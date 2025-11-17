@@ -142,10 +142,12 @@ async fn keyboard_task() {
                             println!();
                             shell.execute();
                             shell.print_prompt();
-                        } else {
+                        } else if character >= ' ' && character <= '~' {
+                            // Only accept printable ASCII characters
                             print!("{}", character);
                             shell.add_char(character);
                         }
+                        // Silently ignore control characters and escape sequences
                     }
                     DecodedKey::RawKey(key_code) => {
                         use pc_keyboard::KeyCode;
