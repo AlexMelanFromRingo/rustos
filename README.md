@@ -122,7 +122,7 @@ rustos/
 - **Stage 0: Standalone Binary** ✅ - Минимальное ядро с VGA выводом
 - **Stage 1: Testing** ✅ - Система тестирования для ядра (custom test framework, serial output, QEMU exit device)
 - **Stage 2: CPU Exceptions** ✅ - Обработка исключений процессора (IDT, breakpoint, double fault)
-- **Stage 3: Hardware Interrupts** 🚧 - Обработка прерываний (PIC, таймер, клавиатура)
+- **Stage 3: Hardware Interrupts** ✅ - Обработка прерываний (PIC, таймер, клавиатура)
 - **Stage 4: Memory Management** 📋 - Управление памятью
 - **Stage 5: Heap Allocation** 📋 - Динамическая память
 - **Stage 6: Multitasking** 📋 - Многозадачность
@@ -164,7 +164,7 @@ rustos/
 - ✅ VGA текстовый буфер с println! макросом
 - ✅ Система тестирования (unit и integration тесты)
 - ✅ CPU исключения (IDT, breakpoint, double fault)
-- 🚧 Аппаратные прерывания (PIC, таймер, клавиатура)
+- ✅ Аппаратные прерывания (PIC, таймер, клавиатура)
 - 📋 Управление памятью (paging, frame allocator)
 - 📋 Динамическая память (heap allocator)
 - 📋 Многозадачность (async/await, cooperative multitasking)

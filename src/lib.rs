@@ -14,6 +14,8 @@ pub mod interrupts;
 
 pub fn init() {
     interrupts::init_idt();
+    interrupts::init_pics();
+    x86_64::instructions::interrupts::enable();
 }
 
 /// Entry point for `cargo test`
