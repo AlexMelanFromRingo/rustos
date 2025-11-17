@@ -142,21 +142,23 @@ async fn keyboard_task() {
                             println!();
                             shell.execute();
                             shell.print_prompt();
-                        } else if character >= ' ' && character <= '~' {
-                            // Only accept printable ASCII characters
+                        } else if character.is_ascii_graphic() || character == ' ' {
+                            // Only accept ASCII graphic chars + space
                             print!("{}", character);
                             shell.add_char(character);
                         }
-                        // Silently ignore control characters and escape sequences
+                        // Ignore everything else
                     }
                     DecodedKey::RawKey(key_code) => {
                         use pc_keyboard::KeyCode;
                         match key_code {
                             KeyCode::Backspace => {
-                                interrupts::without_interrupts(|| {
-                                    WRITER.lock().write_byte(0x08);
-                                });
-                                shell.backspace();
+                                // Only delete visually if buffer actually had something
+                                if shell.backspace() {
+                                    interrupts::without_interrupts(|| {
+                                        WRITER.lock().write_byte(0x08);
+                                    });
+                                }
                             }
                             KeyCode::ArrowUp => {
                                 if let Some(cmd) = shell.history_up() {
