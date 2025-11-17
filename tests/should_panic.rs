@@ -3,9 +3,11 @@
 
 use core::panic::PanicInfo;
 use rustos::{qemu, serial_print, serial_println};
+use bootloader::{entry_point, BootInfo};
 
-#[no_mangle]
-pub extern "C" fn _start() -> ! {
+entry_point!(test_kernel_main);
+
+fn test_kernel_main(_boot_info: &'static BootInfo) -> ! {
     should_fail();
     serial_println!("[test did not panic]");
     qemu::exit_qemu(qemu::QemuExitCode::Failed);
