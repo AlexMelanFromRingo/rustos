@@ -98,7 +98,8 @@ rustos/
 │   ├── lib.rs               # Библиотека для переиспользования кода
 │   ├── vga_buffer.rs        # VGA текстовый режим
 │   ├── serial.rs            # Serial port для тестов
-│   └── qemu.rs              # QEMU exit device
+│   ├── qemu.rs              # QEMU exit device
+│   └── interrupts.rs        # CPU exception handlers (IDT)
 ├── tests/
 │   ├── basic_boot.rs        # Integration тест загрузки
 │   └── should_panic.rs      # Тест обработки паник
@@ -120,8 +121,8 @@ rustos/
 
 - **Stage 0: Standalone Binary** ✅ - Минимальное ядро с VGA выводом
 - **Stage 1: Testing** ✅ - Система тестирования для ядра (custom test framework, serial output, QEMU exit device)
-- **Stage 2: CPU Exceptions** 🚧 - Обработка исключений процессора (IDT, breakpoint, double fault)
-- **Stage 3: Interrupts** 📋 - Обработка прерываний (таймер, клавиатура, PIC)
+- **Stage 2: CPU Exceptions** ✅ - Обработка исключений процессора (IDT, breakpoint, double fault)
+- **Stage 3: Hardware Interrupts** 🚧 - Обработка прерываний (PIC, таймер, клавиатура)
 - **Stage 4: Memory Management** 📋 - Управление памятью
 - **Stage 5: Heap Allocation** 📋 - Динамическая память
 - **Stage 6: Multitasking** 📋 - Многозадачность
@@ -162,8 +163,8 @@ rustos/
 Следующие возможности для реализации:
 - ✅ VGA текстовый буфер с println! макросом
 - ✅ Система тестирования (unit и integration тесты)
-- 🚧 CPU исключения (breakpoint, page fault, double fault)
-- 📋 Аппаратные прерывания (таймер, клавиатура)
+- ✅ CPU исключения (IDT, breakpoint, double fault)
+- 🚧 Аппаратные прерывания (PIC, таймер, клавиатура)
 - 📋 Управление памятью (paging, frame allocator)
 - 📋 Динамическая память (heap allocator)
 - 📋 Многозадачность (async/await, cooperative multitasking)

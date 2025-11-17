@@ -34,6 +34,17 @@ pub extern "C" fn _start() -> ! {
     println!("Based on Phil Opp's excellent tutorials:");
     println!("  https://os.phil-opp.com/");
     println!();
+
+    // Initialize interrupts
+    rustos::init();
+    println!("IDT initialized");
+
+    // Test breakpoint exception
+    println!("Testing breakpoint exception...");
+    x86_64::instructions::interrupts::int3();
+    println!("Breakpoint exception handled successfully!");
+
+    println!();
     println!("Kernel is running successfully!");
 
     #[cfg(test)]
