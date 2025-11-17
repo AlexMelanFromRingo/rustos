@@ -4,6 +4,8 @@
 #![test_runner(rustos::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
+extern crate alloc;
+
 use core::panic::PanicInfo;
 use bootloader::{BootInfo, entry_point};
 
@@ -31,7 +33,7 @@ fn panic(info: &PanicInfo) -> ! {
 /// The bootloader will call this function.
 fn kernel_main(boot_info: &'static BootInfo) -> ! {
     use rustos::memory;
-    use x86_64::{structures::paging::Translate, VirtAddr};
+    use x86_64::VirtAddr;
 
     println!("Hello World from RustOS!");
     println!("This is a minimal kernel written in Rust.");
@@ -45,35 +47,42 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     // Initialize memory management
     let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
-    let mapper = unsafe { memory::init(phys_mem_offset) };
-    let _frame_allocator = unsafe {
+    let mut mapper = unsafe { memory::init(phys_mem_offset) };
+    let mut frame_allocator = unsafe {
         memory::BootInfoFrameAllocator::init(&boot_info.memory_map)
     };
+
+    // Initialize heap
+    rustos::allocator::init_heap(&mut mapper, &mut frame_allocator)
+        .expect("heap initialization failed");
 
     println!("Kernel initialized successfully!");
     println!();
 
-    // Demonstrate address translation
-    println!("Paging demonstration:");
+    // Demonstrate heap allocation
+    println!("Heap allocation tests:");
 
-    // Translate some addresses
-    let addresses = [
-        // VGA buffer
-        0xb8000,
-        // Some code address
-        0x201008,
-        // Some stack address
-        0x0100_0020_1a10,
-        // Virtual address mapped to physical address 0
-        boot_info.physical_memory_offset,
-    ];
+    // Test Box
+    use alloc::boxed::Box;
+    let heap_value = Box::new(41);
+    println!("  Box test: heap value at {:p} = {}", heap_value, *heap_value);
 
-    for &address in &addresses {
-        let virt = VirtAddr::new(address);
-        let phys = mapper.translate_addr(virt);
-        println!("  {:?} -> {:?}", virt, phys);
+    // Test Vec
+    use alloc::vec::Vec;
+    let mut vec = Vec::new();
+    for i in 0..10 {
+        vec.push(i);
     }
+    println!("  Vec test: created vector with {} elements", vec.len());
 
+    // Test String
+    use alloc::string::String;
+    let mut string = String::from("Hello from the heap!");
+    string.push_str(" Heap allocation works!");
+    println!("  String test: {}", string);
+
+    println!();
+    println!("All heap allocations successful!");
     println!();
     println!("Type something on your keyboard:");
     println!();
