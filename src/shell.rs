@@ -33,13 +33,9 @@ impl Shell {
         self.history_index = None;
     }
 
-    pub fn backspace(&mut self) -> bool {
-        if self.buffer.pop().is_some() {
-            self.history_index = None;
-            true
-        } else {
-            false
-        }
+    pub fn backspace(&mut self) {
+        self.buffer.pop();
+        self.history_index = None;
     }
 
     pub fn get_buffer(&self) -> &str {

@@ -142,23 +142,25 @@ async fn keyboard_task() {
                             println!();
                             shell.execute();
                             shell.print_prompt();
-                        } else if character.is_ascii_graphic() || character == ' ' {
-                            // Only accept ASCII graphic chars + space
-                            print!("{}", character);
-                            shell.add_char(character);
+                        } else {
+                            let ch = character as u8;
+                            // Only accept space (0x20) through tilde (0x7E)
+                            // AND explicitly reject escape sequences
+                            if ch >= 0x20 && ch <= 0x7E && character != '\x1B' {
+                                print!("{}", character);
+                                shell.add_char(character);
+                            }
                         }
-                        // Ignore everything else
+                        // Ignore control chars and escape sequences
                     }
                     DecodedKey::RawKey(key_code) => {
                         use pc_keyboard::KeyCode;
                         match key_code {
                             KeyCode::Backspace => {
-                                // Only delete visually if buffer actually had something
-                                if shell.backspace() {
-                                    interrupts::without_interrupts(|| {
-                                        WRITER.lock().write_byte(0x08);
-                                    });
-                                }
+                                shell.backspace();
+                                interrupts::without_interrupts(|| {
+                                    WRITER.lock().write_byte(0x08);
+                                });
                             }
                             KeyCode::ArrowUp => {
                                 if let Some(cmd) = shell.history_up() {
