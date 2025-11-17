@@ -100,7 +100,20 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(
         if let Some(key) = keyboard.process_keyevent(key_event) {
             match key {
                 DecodedKey::Unicode(character) => print!("{}", character),
-                DecodedKey::RawKey(key) => print!("{:?}", key),
+                DecodedKey::RawKey(key_code) => {
+                    use pc_keyboard::KeyCode;
+                    match key_code {
+                        KeyCode::Backspace => {
+                            // Send backspace character (0x08) to VGA buffer
+                            use crate::vga_buffer::WRITER;
+                            use x86_64::instructions::interrupts;
+                            interrupts::without_interrupts(|| {
+                                WRITER.lock().write_byte(0x08);
+                            });
+                        }
+                        _ => {} // Ignore other special keys for now
+                    }
+                }
             }
         }
     }

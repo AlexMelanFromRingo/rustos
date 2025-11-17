@@ -2,6 +2,7 @@ use core::fmt;
 use lazy_static::lazy_static;
 use spin::Mutex;
 use volatile::Volatile;
+use x86_64::instructions::port::Port;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +61,7 @@ impl Writer {
     pub fn write_byte(&mut self, byte: u8) {
         match byte {
             b'\n' => self.new_line(),
+            0x08 => self.backspace(), // Backspace
             byte => {
                 if self.column_position >= BUFFER_WIDTH {
                     self.new_line();
@@ -74,16 +76,51 @@ impl Writer {
                     color_code,
                 });
                 self.column_position += 1;
+                self.update_cursor();
             }
+        }
+    }
+
+    pub fn backspace(&mut self) {
+        if self.column_position > 0 {
+            self.column_position -= 1;
+            let row = BUFFER_HEIGHT - 1;
+            let col = self.column_position;
+
+            let blank = ScreenChar {
+                ascii_character: b' ',
+                color_code: self.color_code,
+            };
+            self.buffer.chars[row][col].write(blank);
+            self.update_cursor();
+        }
+    }
+
+    fn update_cursor(&self) {
+        let pos = (BUFFER_HEIGHT - 1) * BUFFER_WIDTH + self.column_position;
+
+        unsafe {
+            let mut port_cmd = Port::<u8>::new(0x3D4);
+            let mut port_data = Port::<u8>::new(0x3D5);
+
+            // Set cursor location high byte
+            port_cmd.write(0x0E);
+            port_data.write((pos >> 8) as u8);
+
+            // Set cursor location low byte
+            port_cmd.write(0x0F);
+            port_data.write(pos as u8);
         }
     }
 
     pub fn write_string(&mut self, s: &str) {
         for byte in s.bytes() {
             match byte {
-                // printable ASCII byte or newline
-                0x20..=0x7e | b'\n' => self.write_byte(byte),
-                // not part of printable ASCII range
+                // printable ASCII byte, newline, or backspace
+                0x20..=0x7e | b'\n' | 0x08 => self.write_byte(byte),
+                // Extended ASCII (box drawing, symbols, etc.)
+                0x80..=0xff => self.write_byte(byte),
+                // not part of printable range
                 _ => self.write_byte(0xfe),
             }
         }
@@ -98,6 +135,7 @@ impl Writer {
         }
         self.clear_row(BUFFER_HEIGHT - 1);
         self.column_position = 0;
+        self.update_cursor();
     }
 
     fn clear_row(&mut self, row: usize) {
@@ -119,11 +157,15 @@ impl fmt::Write for Writer {
 }
 
 lazy_static! {
-    pub static ref WRITER: Mutex<Writer> = Mutex::new(Writer {
-        column_position: 0,
-        color_code: ColorCode::new(Color::Yellow, Color::Black),
-        buffer: unsafe { &mut *(0xb8000 as *mut Buffer) },
-    });
+    pub static ref WRITER: Mutex<Writer> = {
+        let writer = Writer {
+            column_position: 0,
+            color_code: ColorCode::new(Color::Yellow, Color::Black),
+            buffer: unsafe { &mut *(0xb8000 as *mut Buffer) },
+        };
+        writer.update_cursor();
+        Mutex::new(writer)
+    };
 }
 
 #[macro_export]
