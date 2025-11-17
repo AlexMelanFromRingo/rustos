@@ -33,11 +33,12 @@ cargo install bootimage
 ### Сборка ядра
 
 ```bash
-# Обычная сборка
-cargo build
+# Простая сборка и создание образа rustos.bin в корне проекта
+./build.sh
 
-# Создание загружаемого образа
+# Или вручную:
 cargo bootimage
+cp target/x86_64-rustos/debug/bootimage-rustos.bin rustos.bin
 ```
 
 ## Запуск
@@ -45,11 +46,14 @@ cargo bootimage
 ### С помощью QEMU
 
 ```bash
-# Запуск через cargo run (использует настройки из .cargo/config.toml)
-cargo run
+# Самый простой способ - использовать скрипт (автоматически соберет если нужно)
+./run.sh
 
-# Или напрямую с помощью QEMU
-qemu-system-x86_64 -drive format=raw,file=target/x86_64-rustos/debug/bootimage-rustos.bin
+# Или напрямую с помощью QEMU (образ в корне проекта)
+qemu-system-x86_64 -drive format=raw,file=rustos.bin
+
+# Или через cargo run (использует настройки из .cargo/config.toml)
+cargo run
 ```
 
 ### Запуск на настоящем оборудовании
@@ -58,10 +62,10 @@ qemu-system-x86_64 -drive format=raw,file=target/x86_64-rustos/debug/bootimage-r
 
 ```bash
 # Создать загружаемый образ
-cargo bootimage
+./build.sh
 
 # Записать на USB (замените /dev/sdX на ваше устройство)
-sudo dd if=target/x86_64-rustos/debug/bootimage-rustos.bin of=/dev/sdX && sync
+sudo dd if=rustos.bin of=/dev/sdX && sync
 ```
 
 ## Структура проекта
@@ -76,8 +80,23 @@ rustos/
 ├── x86_64-rustos.json       # Спецификация целевой платформы
 ├── Cargo.toml               # Манифест проекта
 ├── rust-toolchain           # Указывает использовать nightly
+├── build.sh                 # Скрипт сборки (создает rustos.bin)
+├── run.sh                   # Скрипт запуска в QEMU
+├── rustos.bin               # Загружаемый образ (создается build.sh)
 └── README.md                # Этот файл
 ```
+
+## Стадии разработки
+
+Проект развивается поэтапно, каждая стадия в отдельной ветке:
+
+- **Stage 0: Standalone Binary** ✅ - Минимальное ядро с VGA выводом
+- **Stage 1: Testing** 🚧 - Система тестирования для ядра
+- **Stage 2: CPU Exceptions** 📋 - Обработка исключений процессора (IDT, breakpoint, double fault)
+- **Stage 3: Interrupts** 📋 - Обработка прерываний (таймер, клавиатура, PIC)
+- **Stage 4: Memory Management** 📋 - Управление памятью
+- **Stage 5: Heap Allocation** 📋 - Динамическая память
+- **Stage 6: Multitasking** 📋 - Многозадачность
 
 ## Как это работает
 
@@ -110,15 +129,19 @@ rustos/
 - [Writing an OS in Rust](https://os.phil-opp.com/)
 - [GitHub репозиторий](https://github.com/phil-opp/blog_os)
 
-## Следующие шаги
+## Дорожная карта
 
-После создания минимального ядра, можно добавить:
-- Обработку прерываний (IDT)
-- Управление памятью (страничная адресация, кучу)
-- Многозадачность
-- Файловую систему
-- Системные вызовы
-- И многое другое!
+Следующие возможности для реализации:
+- ✅ VGA текстовый буфер с println! макросом
+- 🚧 Система тестирования (unit и integration тесты)
+- 📋 CPU исключения (breakpoint, page fault, double fault)
+- 📋 Аппаратные прерывания (таймер, клавиатура)
+- 📋 Управление памятью (paging, frame allocator)
+- 📋 Динамическая память (heap allocator)
+- 📋 Многозадачность (async/await, cooperative multitasking)
+- 📋 Файловая система
+- 📋 Системные вызовы
+- 📋 Пользовательские процессы
 
 ## Лицензия
 

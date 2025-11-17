@@ -1,8 +1,14 @@
 #!/bin/bash
 # Скрипт для запуска RustOS в QEMU
 
-echo "Запуск RustOS в QEMU..."
-echo "Для выхода нажмите Ctrl+A, затем X"
+# Проверяем наличие образа в корне
+if [ ! -f rustos.bin ]; then
+    echo "⚠️  Образ rustos.bin не найден. Запускаем сборку..."
+    ./build.sh
+fi
+
+echo "🚀 Запуск RustOS в QEMU..."
+echo "   Для выхода: Ctrl+A, затем X"
 echo ""
 
-qemu-system-x86_64 -drive format=raw,file=target/x86_64-rustos/debug/bootimage-rustos.bin "$@"
+qemu-system-x86_64 -drive format=raw,file=rustos.bin "$@"
