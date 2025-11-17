@@ -84,13 +84,53 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     println!();
     println!("All heap allocations successful!");
     println!();
-    println!("Type something on your keyboard:");
-    println!();
 
     #[cfg(test)]
     test_main();
 
-    rustos::hlt_loop();
+    println!("Starting async executor...");
+    println!("Type something on your keyboard:");
+    println!();
+
+    let mut executor = rustos::task::executor::Executor::new();
+    executor.spawn(rustos::task::Task::new(keyboard_task()));
+    executor.run();
+}
+
+async fn keyboard_task() {
+    use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
+    use futures_util::stream::StreamExt;
+    use rustos::task::keyboard::ScancodeStream;
+
+    let mut scancodes = ScancodeStream::new();
+    let mut keyboard = Keyboard::new(
+        ScancodeSet1::new(),
+        layouts::Us104Key,
+        HandleControl::Ignore,
+    );
+
+    while let Some(scancode) = scancodes.next().await {
+        if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
+            if let Some(key) = keyboard.process_keyevent(key_event) {
+                match key {
+                    DecodedKey::Unicode(character) => print!("{}", character),
+                    DecodedKey::RawKey(key_code) => {
+                        use pc_keyboard::KeyCode;
+                        match key_code {
+                            KeyCode::Backspace => {
+                                use rustos::vga_buffer::WRITER;
+                                use x86_64::instructions::interrupts;
+                                interrupts::without_interrupts(|| {
+                                    WRITER.lock().write_byte(0x08);
+                                });
+                            }
+                            _ => {} // Ignore other special keys
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[test_case]
