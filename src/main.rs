@@ -28,9 +28,6 @@ fn panic(info: &PanicInfo) -> ! {
 /// The bootloader will call this function.
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    use rustos::serial_println;
-
-    serial_println!("[DEBUG] Starting kernel...");
     println!("Hello World from RustOS!");
     println!("This is a minimal kernel written in Rust.");
     println!();
@@ -38,19 +35,12 @@ pub extern "C" fn _start() -> ! {
     println!("  https://os.phil-opp.com/");
     println!();
 
-    serial_println!("[DEBUG] About to initialize interrupts...");
-    // Initialize interrupts and PIC
+    // Initialize GDT, IDT and PIC
     rustos::init();
-    serial_println!("[DEBUG] Interrupts initialized!");
 
-    println!("IDT and PIC initialized");
-    println!("Hardware interrupts enabled");
+    println!("Kernel initialized successfully!");
+    println!("Type something on your keyboard:");
     println!();
-    println!("Kernel is running successfully!");
-    println!("Timer ticks: . and keyboard input should appear below");
-    println!();
-
-    serial_println!("[DEBUG] Entering hlt loop...");
 
     #[cfg(test)]
     test_main();
