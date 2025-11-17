@@ -11,11 +11,19 @@ pub mod serial;
 pub mod vga_buffer;
 pub mod qemu;
 pub mod interrupts;
+pub mod gdt;
 
 pub fn init() {
+    gdt::init();
     interrupts::init_idt();
     interrupts::init_pics();
     x86_64::instructions::interrupts::enable();
+}
+
+pub fn hlt_loop() -> ! {
+    loop {
+        x86_64::instructions::hlt();
+    }
 }
 
 /// Entry point for `cargo test`

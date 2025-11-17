@@ -15,7 +15,7 @@ extern crate rustos;
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     println!("{}", info);
-    loop {}
+    rustos::hlt_loop();
 }
 
 #[cfg(test)]
@@ -28,6 +28,9 @@ fn panic(info: &PanicInfo) -> ! {
 /// The bootloader will call this function.
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
+    use rustos::serial_println;
+
+    serial_println!("[DEBUG] Starting kernel...");
     println!("Hello World from RustOS!");
     println!("This is a minimal kernel written in Rust.");
     println!();
@@ -35,22 +38,24 @@ pub extern "C" fn _start() -> ! {
     println!("  https://os.phil-opp.com/");
     println!();
 
-    // Initialize interrupts
+    serial_println!("[DEBUG] About to initialize interrupts...");
+    // Initialize interrupts and PIC
     rustos::init();
-    println!("IDT initialized");
+    serial_println!("[DEBUG] Interrupts initialized!");
 
-    // Test breakpoint exception
-    println!("Testing breakpoint exception...");
-    x86_64::instructions::interrupts::int3();
-    println!("Breakpoint exception handled successfully!");
-
+    println!("IDT and PIC initialized");
+    println!("Hardware interrupts enabled");
     println!();
     println!("Kernel is running successfully!");
+    println!("Timer ticks: . and keyboard input should appear below");
+    println!();
+
+    serial_println!("[DEBUG] Entering hlt loop...");
 
     #[cfg(test)]
     test_main();
 
-    loop {}
+    rustos::hlt_loop();
 }
 
 #[test_case]

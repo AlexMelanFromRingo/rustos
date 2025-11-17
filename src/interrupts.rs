@@ -31,7 +31,10 @@ lazy_static! {
     static ref IDT: InterruptDescriptorTable = {
         let mut idt = InterruptDescriptorTable::new();
         idt.breakpoint.set_handler_fn(breakpoint_handler);
-        idt.double_fault.set_handler_fn(double_fault_handler);
+        unsafe {
+            idt.double_fault.set_handler_fn(double_fault_handler)
+                .set_stack_index(crate::gdt::DOUBLE_FAULT_IST_INDEX);
+        }
         idt[InterruptIndex::Timer.as_usize()]
             .set_handler_fn(timer_interrupt_handler);
         idt[InterruptIndex::Keyboard.as_usize()]
@@ -45,7 +48,11 @@ pub fn init_idt() {
 }
 
 pub fn init_pics() {
-    unsafe { PICS.lock().initialize() };
+    unsafe {
+        PICS.lock().initialize();
+        // Unmask all interrupts (set mask to 0)
+        PICS.lock().write_masks(0, 0);
+    }
 }
 
 extern "x86-interrupt" fn breakpoint_handler(
@@ -63,7 +70,10 @@ extern "x86-interrupt" fn double_fault_handler(
 extern "x86-interrupt" fn timer_interrupt_handler(
     _stack_frame: InterruptStackFrame)
 {
+    use crate::serial_print;
+
     print!(".");
+    serial_print!("T");
 
     unsafe {
         PICS.lock()
