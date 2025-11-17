@@ -68,13 +68,40 @@ cargo run
 sudo dd if=rustos.bin of=/dev/sdX && sync
 ```
 
+## Тестирование
+
+Проект включает систему тестирования для bare-metal окружения:
+
+```bash
+# Запустить все тесты
+./test.sh
+```
+
+### Типы тестов
+
+- **Unit тесты** - тесты для VGA buffer и других модулей
+- **Integration тесты** - тесты загрузки и базовой функциональности
+- **Should panic тесты** - тесты корректной обработки паник
+
+Тестовая система использует:
+- Custom test framework (без стандартной библиотеки)
+- Serial port для вывода результатов
+- QEMU isa-debug-exit device для exit кодов
+- Автоматическое создание загрузочных образов для каждого теста
+
 ## Структура проекта
 
 ```
 rustos/
 ├── src/
 │   ├── main.rs              # Точка входа ядра
-│   └── vga_buffer.rs        # VGA текстовый режим
+│   ├── lib.rs               # Библиотека для переиспользования кода
+│   ├── vga_buffer.rs        # VGA текстовый режим
+│   ├── serial.rs            # Serial port для тестов
+│   └── qemu.rs              # QEMU exit device
+├── tests/
+│   ├── basic_boot.rs        # Integration тест загрузки
+│   └── should_panic.rs      # Тест обработки паник
 ├── .cargo/
 │   └── config.toml          # Настройки сборки Cargo
 ├── x86_64-rustos.json       # Спецификация целевой платформы
@@ -82,6 +109,7 @@ rustos/
 ├── rust-toolchain           # Указывает использовать nightly
 ├── build.sh                 # Скрипт сборки (создает rustos.bin)
 ├── run.sh                   # Скрипт запуска в QEMU
+├── test.sh                  # Скрипт запуска тестов
 ├── rustos.bin               # Загружаемый образ (создается build.sh)
 └── README.md                # Этот файл
 ```
@@ -91,8 +119,8 @@ rustos/
 Проект развивается поэтапно, каждая стадия в отдельной ветке:
 
 - **Stage 0: Standalone Binary** ✅ - Минимальное ядро с VGA выводом
-- **Stage 1: Testing** 🚧 - Система тестирования для ядра
-- **Stage 2: CPU Exceptions** 📋 - Обработка исключений процессора (IDT, breakpoint, double fault)
+- **Stage 1: Testing** ✅ - Система тестирования для ядра (custom test framework, serial output, QEMU exit device)
+- **Stage 2: CPU Exceptions** 🚧 - Обработка исключений процессора (IDT, breakpoint, double fault)
 - **Stage 3: Interrupts** 📋 - Обработка прерываний (таймер, клавиатура, PIC)
 - **Stage 4: Memory Management** 📋 - Управление памятью
 - **Stage 5: Heap Allocation** 📋 - Динамическая память
@@ -133,8 +161,8 @@ rustos/
 
 Следующие возможности для реализации:
 - ✅ VGA текстовый буфер с println! макросом
-- 🚧 Система тестирования (unit и integration тесты)
-- 📋 CPU исключения (breakpoint, page fault, double fault)
+- ✅ Система тестирования (unit и integration тесты)
+- 🚧 CPU исключения (breakpoint, page fault, double fault)
 - 📋 Аппаратные прерывания (таймер, клавиатура)
 - 📋 Управление памятью (paging, frame allocator)
 - 📋 Динамическая память (heap allocator)
