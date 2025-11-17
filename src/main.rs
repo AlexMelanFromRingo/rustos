@@ -57,6 +57,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         .expect("heap initialization failed");
 
     println!("Kernel initialized successfully!");
+    println!("Power management: shutdown and reboot available");
     println!();
 
     // Demonstrate heap allocation
@@ -88,19 +89,39 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     #[cfg(test)]
     test_main();
 
-    println!("Starting async executor...");
-    println!("Type something on your keyboard:");
+    println!("Starting RustOS Shell...");
+    println!("Type 'help' for available commands");
     println!();
 
     let mut executor = rustos::task::executor::Executor::new();
     executor.spawn(rustos::task::Task::new(keyboard_task()));
+    executor.spawn(rustos::task::Task::new(status_task()));
     executor.run();
+}
+
+async fn status_task() {
+    use rustos::task::timer::Timer;
+
+    let mut counter = 0u64;
+
+    loop {
+        // Wait ~3 seconds (assuming ~18.2 Hz timer)
+        Timer::new(54).await;
+
+        counter += 1;
+        if counter % 5 == 0 {
+            println!("[Info] System running... ({} updates)", counter);
+        }
+    }
 }
 
 async fn keyboard_task() {
     use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
     use futures_util::stream::StreamExt;
     use rustos::task::keyboard::ScancodeStream;
+    use rustos::shell::Shell;
+    use rustos::vga_buffer::WRITER;
+    use x86_64::instructions::interrupts;
 
     let mut scancodes = ScancodeStream::new();
     let mut keyboard = Keyboard::new(
@@ -109,20 +130,59 @@ async fn keyboard_task() {
         HandleControl::Ignore,
     );
 
+    let mut shell = Shell::new();
+    shell.print_prompt();
+
     while let Some(scancode) = scancodes.next().await {
         if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
             if let Some(key) = keyboard.process_keyevent(key_event) {
                 match key {
-                    DecodedKey::Unicode(character) => print!("{}", character),
+                    DecodedKey::Unicode(character) => {
+                        if character == '\n' {
+                            println!();
+                            shell.execute();
+                            shell.print_prompt();
+                        } else {
+                            print!("{}", character);
+                            shell.add_char(character);
+                        }
+                    }
                     DecodedKey::RawKey(key_code) => {
                         use pc_keyboard::KeyCode;
                         match key_code {
                             KeyCode::Backspace => {
-                                use rustos::vga_buffer::WRITER;
-                                use x86_64::instructions::interrupts;
                                 interrupts::without_interrupts(|| {
                                     WRITER.lock().write_byte(0x08);
                                 });
+                                shell.backspace();
+                            }
+                            KeyCode::ArrowUp => {
+                                if let Some(cmd) = shell.history_up() {
+                                    // Clear current line
+                                    let buffer_len = shell.get_buffer().len();
+                                    for _ in 0..buffer_len {
+                                        interrupts::without_interrupts(|| {
+                                            WRITER.lock().write_byte(0x08);
+                                        });
+                                    }
+                                    // Print new command
+                                    print!("{}", cmd);
+                                    shell.set_buffer(cmd);
+                                }
+                            }
+                            KeyCode::ArrowDown => {
+                                if let Some(cmd) = shell.history_down() {
+                                    // Clear current line
+                                    let buffer_len = shell.get_buffer().len();
+                                    for _ in 0..buffer_len {
+                                        interrupts::without_interrupts(|| {
+                                            WRITER.lock().write_byte(0x08);
+                                        });
+                                    }
+                                    // Print new command
+                                    print!("{}", cmd);
+                                    shell.set_buffer(cmd);
+                                }
                             }
                             _ => {} // Ignore other special keys
                         }

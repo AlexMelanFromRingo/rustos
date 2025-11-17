@@ -3,6 +3,7 @@ use alloc::boxed::Box;
 
 pub mod executor;
 pub mod keyboard;
+pub mod timer;
 
 pub struct Task {
     id: TaskId,
