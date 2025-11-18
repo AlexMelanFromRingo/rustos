@@ -21,6 +21,7 @@ pub mod task;
 pub mod power;
 pub mod shell;
 pub mod fs;
+pub mod process;
 
 pub fn init() {
     gdt::init();
