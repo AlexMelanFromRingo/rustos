@@ -8,44 +8,72 @@ use x86_64::instructions::port::{Port, PortReadOnly, PortWriteOnly};
 
 /// ATA status register flags
 const ATA_SR_BSY: u8 = 0x80;  // Busy
+#[allow(dead_code)]
 const ATA_SR_DRDY: u8 = 0x40; // Drive ready
 const ATA_SR_DF: u8 = 0x20;   // Drive write fault
+#[allow(dead_code)]
 const ATA_SR_DSC: u8 = 0x10;  // Drive seek complete
 const ATA_SR_DRQ: u8 = 0x08;  // Data request ready
+#[allow(dead_code)]
 const ATA_SR_CORR: u8 = 0x04; // Corrected data
+#[allow(dead_code)]
 const ATA_SR_IDX: u8 = 0x02;  // Index
 const ATA_SR_ERR: u8 = 0x01;  // Error
 
-/// ATA error register flags
+/// ATA error register flags (reserved for future diagnostics)
+#[allow(dead_code)]
 const ATA_ER_BBK: u8 = 0x80;   // Bad block
+#[allow(dead_code)]
 const ATA_ER_UNC: u8 = 0x40;   // Uncorrectable data
+#[allow(dead_code)]
 const ATA_ER_MC: u8 = 0x20;    // Media changed
+#[allow(dead_code)]
 const ATA_ER_IDNF: u8 = 0x10;  // ID not found
+#[allow(dead_code)]
 const ATA_ER_MCR: u8 = 0x08;   // Media change request
+#[allow(dead_code)]
 const ATA_ER_ABRT: u8 = 0x04;  // Command aborted
+#[allow(dead_code)]
 const ATA_ER_TK0NF: u8 = 0x02; // Track 0 not found
+#[allow(dead_code)]
 const ATA_ER_AMNF: u8 = 0x01;  // Address mark not found
 
 /// ATA commands
 const ATA_CMD_READ_PIO: u8 = 0x20;
+#[allow(dead_code)]
 const ATA_CMD_READ_PIO_EXT: u8 = 0x24;
 const ATA_CMD_WRITE_PIO: u8 = 0x30;
+#[allow(dead_code)]
 const ATA_CMD_WRITE_PIO_EXT: u8 = 0x34;
+#[allow(dead_code)]
 const ATA_CMD_CACHE_FLUSH: u8 = 0xE7;
+#[allow(dead_code)]
 const ATA_CMD_CACHE_FLUSH_EXT: u8 = 0xEA;
+#[allow(dead_code)]
 const ATA_CMD_IDENTIFY: u8 = 0xEC;
 
-/// ATA identification space
+/// ATA identification space (reserved for future use)
+#[allow(dead_code)]
 const ATA_IDENT_DEVICETYPE: u8 = 0;
+#[allow(dead_code)]
 const ATA_IDENT_CYLINDERS: u8 = 2;
+#[allow(dead_code)]
 const ATA_IDENT_HEADS: u8 = 6;
+#[allow(dead_code)]
 const ATA_IDENT_SECTORS: u8 = 12;
+#[allow(dead_code)]
 const ATA_IDENT_SERIAL: u8 = 20;
+#[allow(dead_code)]
 const ATA_IDENT_MODEL: u8 = 54;
+#[allow(dead_code)]
 const ATA_IDENT_CAPABILITIES: u8 = 98;
+#[allow(dead_code)]
 const ATA_IDENT_FIELDVALID: u8 = 106;
+#[allow(dead_code)]
 const ATA_IDENT_MAX_LBA: u8 = 120;
+#[allow(dead_code)]
 const ATA_IDENT_COMMANDSETS: u8 = 164;
+#[allow(dead_code)]
 const ATA_IDENT_MAX_LBA_EXT: u8 = 200;
 
 /// Sector size in bytes
@@ -55,15 +83,19 @@ pub const SECTOR_SIZE: usize = 512;
 const PRIMARY_IO_BASE: u16 = 0x1F0;
 const PRIMARY_CONTROL_BASE: u16 = 0x3F6;
 
-/// Secondary IDE bus I/O ports
+/// Secondary IDE bus I/O ports (reserved for future use)
+#[allow(dead_code)]
 const SECONDARY_IO_BASE: u16 = 0x170;
+#[allow(dead_code)]
 const SECONDARY_CONTROL_BASE: u16 = 0x376;
 
 /// ATA drive
 pub struct AtaDrive {
     // I/O ports for primary channel, master drive
     data_port: Port<u16>,
+    #[allow(dead_code)]
     error_port: PortReadOnly<u8>,
+    #[allow(dead_code)]
     features_port: PortWriteOnly<u8>,
     sector_count_port: Port<u8>,
     lba_low_port: Port<u8>,
@@ -72,6 +104,7 @@ pub struct AtaDrive {
     drive_port: Port<u8>,
     status_port: PortReadOnly<u8>,
     command_port: PortWriteOnly<u8>,
+    #[allow(dead_code)]
     control_port: Port<u8>,
 }
 

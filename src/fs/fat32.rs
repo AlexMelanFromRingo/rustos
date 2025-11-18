@@ -80,6 +80,8 @@ struct Fat32ExtendedBootRecord {
 
 /// Complete FAT32 boot sector
 #[repr(C, packed)]
+/// Complete FAT32 boot sector structure (reserved for future use)
+#[allow(dead_code)]
 struct Fat32BootSector {
     bpb: BiosParameterBlock,
     ebr: Fat32ExtendedBootRecord,
