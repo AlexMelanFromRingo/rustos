@@ -150,6 +150,20 @@ async fn keyboard_task() {
                                     WRITER.lock().write_byte(0x08);
                                 });
                             }
+                        } else if character == '\t' {
+                            // Tab for autocomplete
+                            if let Some(completed) = shell.autocomplete() {
+                                // Clear current buffer visually
+                                let old_len = shell.buffer_len();
+                                for _ in 0..old_len {
+                                    interrupts::without_interrupts(|| {
+                                        WRITER.lock().write_byte(0x08);
+                                    });
+                                }
+                                // Print completed command
+                                print!("{}", completed);
+                                shell.set_buffer(completed);
+                            }
                         } else if character >= ' ' && character <= '~' {
                             // Only printable ASCII
                             print!("{}", character);
