@@ -208,20 +208,27 @@ async fn keyboard_task() {
                         match key_code {
                             KeyCode::Backspace => {
                                 // Backspace at cursor position
+                                let old_len = shell.buffer_len();
                                 if shell.backspace() {
                                     let (_clear_len, new_text) = shell.redraw_line();
+                                    let new_len = new_text.len();
                                     let cursor_pos = shell.get_cursor_pos();
+                                    let chars_to_clear = old_len - new_len;
 
                                     interrupts::without_interrupts(|| {
                                         let mut writer = WRITER.lock();
-                                        // Move back to start
-                                        for _ in 0..new_text.len() + 1 {
+                                        // Move back to start of buffer
+                                        for _ in 0..old_len {
                                             writer.move_cursor_left();
                                         }
                                         drop(writer);
 
-                                        // Print new text + space to clear last char
-                                        print!("{} ", new_text);
+                                        // Print new text
+                                        print!("{}", new_text);
+                                        // Clear remaining old characters with spaces
+                                        for _ in 0..chars_to_clear {
+                                            print!(" ");
+                                        }
 
                                         // Set cursor to correct position
                                         writer = WRITER.lock();
@@ -231,20 +238,27 @@ async fn keyboard_task() {
                             }
                             KeyCode::Delete => {
                                 // Delete character at cursor
+                                let old_len = shell.buffer_len();
                                 if shell.delete_char() {
                                     let (_clear_len, new_text) = shell.redraw_line();
+                                    let new_len = new_text.len();
                                     let cursor_pos = shell.get_cursor_pos();
+                                    let chars_to_clear = old_len - new_len;
 
                                     interrupts::without_interrupts(|| {
                                         let mut writer = WRITER.lock();
-                                        // Move back to start
-                                        for _ in 0..new_text.len() + 1 {
+                                        // Move back to start of buffer
+                                        for _ in 0..old_len {
                                             writer.move_cursor_left();
                                         }
                                         drop(writer);
 
-                                        // Print new text + space to clear last char
-                                        print!("{} ", new_text);
+                                        // Print new text
+                                        print!("{}", new_text);
+                                        // Clear remaining old characters with spaces
+                                        for _ in 0..chars_to_clear {
+                                            print!(" ");
+                                        }
 
                                         // Set cursor to correct position
                                         writer = WRITER.lock();
@@ -288,45 +302,90 @@ async fn keyboard_task() {
                                 });
                             }
                             KeyCode::ArrowUp => {
+                                let old_len = shell.buffer_len();
                                 if let Some(cmd) = shell.history_up() {
-                                    // Clear current line
-                                    let buffer_len = shell.buffer_len();
-                                    for _ in 0..buffer_len {
-                                        interrupts::without_interrupts(|| {
-                                            WRITER.lock().write_byte(0x08);
-                                        });
-                                    }
-                                    // Print new command
-                                    print!("{}", cmd);
+                                    let new_len = cmd.len();
+
+                                    interrupts::without_interrupts(|| {
+                                        let mut writer = WRITER.lock();
+                                        // Move back to start of buffer
+                                        for _ in 0..old_len {
+                                            writer.move_cursor_left();
+                                        }
+                                        drop(writer);
+
+                                        // Print new command
+                                        print!("{}", cmd);
+                                        // Clear remaining old characters if new is shorter
+                                        if new_len < old_len {
+                                            for _ in 0..(old_len - new_len) {
+                                                print!(" ");
+                                            }
+                                        }
+
+                                        // Set cursor to end of new command
+                                        writer = WRITER.lock();
+                                        writer.set_cursor_column(2 + new_len);
+                                    });
                                     shell.set_buffer(cmd);
                                 }
                             }
                             KeyCode::ArrowDown => {
+                                let old_len = shell.buffer_len();
                                 if let Some(cmd) = shell.history_down() {
-                                    // Clear current line
-                                    let buffer_len = shell.buffer_len();
-                                    for _ in 0..buffer_len {
-                                        interrupts::without_interrupts(|| {
-                                            WRITER.lock().write_byte(0x08);
-                                        });
-                                    }
-                                    // Print new command
-                                    print!("{}", cmd);
+                                    let new_len = cmd.len();
+
+                                    interrupts::without_interrupts(|| {
+                                        let mut writer = WRITER.lock();
+                                        // Move back to start of buffer
+                                        for _ in 0..old_len {
+                                            writer.move_cursor_left();
+                                        }
+                                        drop(writer);
+
+                                        // Print new command
+                                        print!("{}", cmd);
+                                        // Clear remaining old characters if new is shorter
+                                        if new_len < old_len {
+                                            for _ in 0..(old_len - new_len) {
+                                                print!(" ");
+                                            }
+                                        }
+
+                                        // Set cursor to end of new command
+                                        writer = WRITER.lock();
+                                        writer.set_cursor_column(2 + new_len);
+                                    });
                                     shell.set_buffer(cmd);
                                 }
                             }
                             KeyCode::Tab => {
-                                // Autocomplete command
+                                // Autocomplete command or filename
+                                let old_len = shell.buffer_len();
                                 if let Some(completed) = shell.autocomplete() {
-                                    // Clear current buffer visually
-                                    let old_len = shell.buffer_len();
-                                    for _ in 0..old_len {
-                                        interrupts::without_interrupts(|| {
-                                            WRITER.lock().write_byte(0x08);
-                                        });
-                                    }
-                                    // Print completed command
-                                    print!("{}", completed);
+                                    let new_len = completed.len();
+
+                                    interrupts::without_interrupts(|| {
+                                        let mut writer = WRITER.lock();
+                                        // Move back to start of buffer
+                                        for _ in 0..old_len {
+                                            writer.move_cursor_left();
+                                        }
+                                        drop(writer);
+
+                                        // Print completed command
+                                        print!("{}", completed);
+                                        // Clear remaining old characters if new is shorter
+                                        if new_len < old_len {
+                                            for _ in 0..(old_len - new_len) {
+                                                print!(" ");
+                                            }
+                                        }
+
+                                        // Set cursor to end of completed text
+                                        writer = WRITER.lock();
+                                        writer.set_cursor_column(2 + new_len);
+                                    });
                                     shell.set_buffer(completed);
                                 }
                             }
