@@ -22,6 +22,7 @@ pub mod power;
 pub mod shell;
 pub mod fs;
 pub mod process;
+pub mod editor;
 
 pub fn init() {
     gdt::init();

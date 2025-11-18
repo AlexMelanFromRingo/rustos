@@ -14,9 +14,10 @@
 - ✅ Динамическая память (heap allocation) - `Box`, `Vec`, `String`
 - ✅ Асинхронность (async/await) с кооперативной многозадачностью
 - ✅ Управление питанием (shutdown/reboot через ACPI)
-- ✅ Интерактивный shell с историей команд и Tab-автодополнением
+- ✅ Интерактивный shell с редактируемым буфером и навигацией курсора
 - ✅ RAM disk - простая in-memory файловая система
 - ✅ Базовые Unix-утилиты (ls, cat, cp, mv, rm, touch, head, tail, wc, write)
+- ✅ Встроенный текстовый редактор (edit) для построчного редактирования
 - ✅ Система тестирования для bare-metal окружения (включая VFS тесты)
 - ✅ Freestanding binary (не зависит от стандартной библиотеки)
 
@@ -116,7 +117,8 @@ rustos/
 │   ├── memory.rs            # Управление памятью (paging, frame allocator)
 │   ├── allocator.rs         # Heap allocator (fixed-size block)
 │   ├── power.rs             # Управление питанием (shutdown/reboot via ACPI)
-│   ├── shell.rs             # Интерактивный shell с автодополнением
+│   ├── shell.rs             # Интерактивный shell с автодополнением и редактированием
+│   ├── editor.rs            # Построчный текстовый редактор
 │   ├── task/
 │   │   ├── mod.rs           # Task infrastructure для async/await
 │   │   ├── executor.rs      # Simple task executor
@@ -200,14 +202,18 @@ rustos/
 ### Интерактивный Shell (Stages 9-11)
 
 **Командная оболочка с расширенным функционалом:**
-- Буфер ввода с поддержкой редактирования
+- Буфер ввода с полноценным редактированием
+- Навигация курсора: стрелки влево/вправо, Home, End
+- Вставка символов в любую позицию курсора
+- Delete для удаления символа под курсором
 - История команд (до 50 команд) с навигацией стрелками UP/DOWN
 - Tab-автодополнение команд (показывает все совпадения при нескольких вариантах)
 - Защита от удаления приглашения (backspace блокируется на пустом буфере)
 - Фильтрация escape-последовательностей (только printable ASCII)
 - Системные команды: help, clear, echo, version, uptime, time, meminfo, history, shutdown, reboot
-- Файловые команды: ls, cat, write, rm, touch, cp, mv, head, tail, wc, edit
+- Файловые команды: ls, cat, write, rm, touch, cp, mv, head, tail, wc
 - Unix-подобные утилиты с поддержкой опций (например, head -n 5 файл)
+- Встроенный текстовый редактор (edit) для построчного редактирования файлов
 
 ### Context Switching (Stage 15)
 

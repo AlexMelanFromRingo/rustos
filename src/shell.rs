@@ -7,6 +7,7 @@ const MAX_HISTORY: usize = 50;
 
 pub struct Shell {
     buffer: String,
+    cursor_pos: usize,  // Position in buffer (0 = start, buffer.len() = end)
     prompt: &'static str,
     history: Vec<String>,
     history_index: Option<usize>,
@@ -17,6 +18,7 @@ impl Shell {
     pub fn new() -> Self {
         Shell {
             buffer: String::new(),
+            cursor_pos: 0,
             prompt: "> ",
             history: Vec::new(),
             history_index: None,
@@ -29,13 +31,71 @@ impl Shell {
     }
 
     pub fn add_char(&mut self, c: char) {
-        self.buffer.push(c);
+        self.buffer.insert(self.cursor_pos, c);
+        self.cursor_pos += c.len_utf8();
         self.history_index = None;
     }
 
-    pub fn backspace(&mut self) {
-        self.buffer.pop();
+    pub fn backspace(&mut self) -> bool {
+        if self.cursor_pos == 0 {
+            return false;
+        }
+        // Find character boundary before cursor
+        let mut pos = self.cursor_pos - 1;
+        while !self.buffer.is_char_boundary(pos) && pos > 0 {
+            pos -= 1;
+        }
+        self.buffer.remove(pos);
+        self.cursor_pos = pos;
         self.history_index = None;
+        true
+    }
+
+    pub fn delete_char(&mut self) -> bool {
+        if self.cursor_pos >= self.buffer.len() {
+            return false;
+        }
+        self.buffer.remove(self.cursor_pos);
+        self.history_index = None;
+        true
+    }
+
+    pub fn move_cursor_left(&mut self) -> bool {
+        if self.cursor_pos == 0 {
+            return false;
+        }
+        // Move to previous character boundary
+        let mut pos = self.cursor_pos - 1;
+        while !self.buffer.is_char_boundary(pos) && pos > 0 {
+            pos -= 1;
+        }
+        self.cursor_pos = pos;
+        true
+    }
+
+    pub fn move_cursor_right(&mut self) -> bool {
+        if self.cursor_pos >= self.buffer.len() {
+            return false;
+        }
+        // Move to next character boundary
+        let mut pos = self.cursor_pos + 1;
+        while !self.buffer.is_char_boundary(pos) && pos < self.buffer.len() {
+            pos += 1;
+        }
+        self.cursor_pos = pos;
+        true
+    }
+
+    pub fn move_cursor_home(&mut self) {
+        self.cursor_pos = 0;
+    }
+
+    pub fn move_cursor_end(&mut self) {
+        self.cursor_pos = self.buffer.len();
+    }
+
+    pub fn get_cursor_pos(&self) -> usize {
+        self.cursor_pos
     }
 
     pub fn get_buffer(&self) -> &str {
@@ -43,15 +103,23 @@ impl Shell {
     }
 
     pub fn set_buffer(&mut self, s: String) {
+        self.cursor_pos = s.len();
         self.buffer = s;
     }
 
     pub fn clear_buffer(&mut self) {
         self.buffer.clear();
+        self.cursor_pos = 0;
     }
 
     pub fn buffer_len(&self) -> usize {
         self.buffer.len()
+    }
+
+    /// Redraw the current line (for cursor movement)
+    /// Returns (chars_to_backspace, new_text)
+    pub fn redraw_line(&self) -> (usize, &str) {
+        (self.buffer.len(), &self.buffer)
     }
 
     /// Try to autocomplete the current buffer
@@ -213,9 +281,12 @@ impl Shell {
         println!("  edit      - Simple text editor (usage: edit filename)");
         println!();
         println!("Keyboard shortcuts:");
-        println!("  UP/DOWN   - Navigate command history");
-        println!("  TAB       - Autocomplete command");
-        println!("  Backspace - Delete previous character");
+        println!("  LEFT/RIGHT - Move cursor left/right");
+        println!("  HOME/END   - Jump to start/end of line");
+        println!("  UP/DOWN    - Navigate command history");
+        println!("  TAB        - Autocomplete command");
+        println!("  Backspace  - Delete previous character");
+        println!("  Delete     - Delete character at cursor");
     }
 
     fn cmd_clear(&self) {
@@ -612,15 +683,15 @@ impl Shell {
     }
 
     fn cmd_edit(&self, args: &[&str]) {
+        use crate::editor::Editor;
+
         if args.is_empty() {
             println!("Usage: edit <filename>");
             return;
         }
 
         let filename = args[0];
-        println!("Simple line editor for '{}'", filename);
-        println!("Commands: (a)ppend line, (d)elete line N, (p)rint, (w)rite, (q)uit");
-        println!("Editor not yet implemented - use 'write' command instead");
-        println!("Example: write {} Hello World!", filename);
+        let mut editor = Editor::new(filename);
+        editor.run();
     }
 }
