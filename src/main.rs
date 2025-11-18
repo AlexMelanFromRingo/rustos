@@ -142,16 +142,18 @@ async fn keyboard_task() {
                             println!();
                             shell.execute();
                             shell.print_prompt();
-                        } else {
-                            let ch = character as u8;
-                            // Only accept space (0x20) through tilde (0x7E)
-                            // AND explicitly reject escape sequences
-                            if ch >= 0x20 && ch <= 0x7E && character != '\x1B' {
-                                print!("{}", character);
-                                shell.add_char(character);
-                            }
+                        } else if character == '\u{0008}' {
+                            // Backspace as Unicode character
+                            shell.backspace();
+                            interrupts::without_interrupts(|| {
+                                WRITER.lock().write_byte(0x08);
+                            });
+                        } else if character >= ' ' && character <= '~' {
+                            // Only printable ASCII
+                            print!("{}", character);
+                            shell.add_char(character);
                         }
-                        // Ignore control chars and escape sequences
+                        // Ignore other control characters
                     }
                     DecodedKey::RawKey(key_code) => {
                         use pc_keyboard::KeyCode;
