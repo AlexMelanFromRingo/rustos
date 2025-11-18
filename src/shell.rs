@@ -219,6 +219,12 @@ impl Shell {
             }
         }
 
+        // Check for pipes
+        if command.contains('|') {
+            self.execute_pipeline(&command);
+            return;
+        }
+
         // Parse command and arguments
         let parts: Vec<&str> = command.split_whitespace().collect();
         let cmd = parts[0];
@@ -287,6 +293,11 @@ impl Shell {
         println!("  wc        - Count lines/words/bytes (usage: wc filename)");
         println!("  grep      - Search for pattern in file (usage: grep [-i] [-n] pattern file)");
         println!("  edit      - Simple text editor (usage: edit filename)");
+        println!();
+        println!("Pipes (command chaining):");
+        println!("  cat <file> | grep <pattern>  - Search in file");
+        println!("  cat <file> | wc              - Count lines/words/bytes");
+        println!("  ls | grep <pattern>          - Filter file list");
         println!();
         println!("Keyboard shortcuts:");
         println!("  LEFT/RIGHT - Move cursor left/right");
@@ -849,6 +860,141 @@ impl Shell {
             Err(_) => {
                 println!("Error: File '{}' not found", filename);
             }
+        }
+    }
+
+    /// Execute a pipeline of commands (simplified pipe implementation)
+    fn execute_pipeline(&self, command_line: &str) {
+        let commands: Vec<&str> = command_line.split('|').map(|s| s.trim()).collect();
+
+        if commands.len() < 2 {
+            println!("Error: Invalid pipe syntax");
+            return;
+        }
+
+        // For now, support specific pipe combinations
+        // cat file | grep pattern
+        // cat file | wc
+        let first_cmd = commands[0].split_whitespace().collect::<Vec<&str>>();
+        let second_cmd = commands[1].split_whitespace().collect::<Vec<&str>>();
+
+        if first_cmd.is_empty() || second_cmd.is_empty() {
+            println!("Error: Invalid pipe syntax");
+            return;
+        }
+
+        // Handle: cat file | grep pattern
+        if first_cmd[0] == "cat" && second_cmd[0] == "grep" {
+            if first_cmd.len() < 2 {
+                println!("Usage: cat filename | grep pattern");
+                return;
+            }
+
+            let filename = first_cmd[1];
+
+            // Get file content
+            use crate::fs::ramdisk::RAMDISK;
+            use crate::fs::vfs::FileSystem;
+
+            let ramdisk = RAMDISK.lock();
+            match ramdisk.read(filename) {
+                Ok(content) => {
+                    drop(ramdisk);
+                    match core::str::from_utf8(&content) {
+                        Ok(text) => {
+                            // Now grep through the text
+                            if second_cmd.len() < 2 {
+                                println!("Usage: cat filename | grep pattern");
+                                return;
+                            }
+
+                            let pattern = second_cmd[1];
+                            let mut match_count = 0;
+
+                            for line in text.lines() {
+                                if line.contains(pattern) {
+                                    match_count += 1;
+                                    println!("{}", line);
+                                }
+                            }
+
+                            if match_count == 0 {
+                                println!("No matches found");
+                            }
+                        }
+                        Err(_) => println!("Error: File '{}' is binary", filename),
+                    }
+                }
+                Err(_) => println!("Error: File '{}' not found", filename),
+            }
+        }
+        // Handle: cat file | wc
+        else if first_cmd[0] == "cat" && second_cmd[0] == "wc" {
+            if first_cmd.len() < 2 {
+                println!("Usage: cat filename | wc");
+                return;
+            }
+
+            let filename = first_cmd[1];
+
+            use crate::fs::ramdisk::RAMDISK;
+            use crate::fs::vfs::FileSystem;
+
+            let ramdisk = RAMDISK.lock();
+            match ramdisk.read(filename) {
+                Ok(content) => {
+                    drop(ramdisk);
+                    match core::str::from_utf8(&content) {
+                        Ok(text) => {
+                            let lines = text.lines().count();
+                            let words = text.split_whitespace().count();
+                            let bytes = content.len();
+                            println!("{:8} {:8} {:8}", lines, words, bytes);
+                        }
+                        Err(_) => println!("Error: File '{}' is binary", filename),
+                    }
+                }
+                Err(_) => println!("Error: File '{}' not found", filename),
+            }
+        }
+        // Handle: ls | grep pattern
+        else if first_cmd[0] == "ls" && second_cmd[0] == "grep" {
+            if second_cmd.len() < 2 {
+                println!("Usage: ls | grep pattern");
+                return;
+            }
+
+            let pattern = second_cmd[1];
+
+            use crate::fs::ramdisk::RAMDISK;
+            use crate::fs::vfs::FileSystem;
+
+            let ramdisk = RAMDISK.lock();
+            let files = ramdisk.list();
+            drop(ramdisk);
+
+            let mut match_count = 0;
+
+            for file in &files {
+                if file.name.contains(pattern) {
+                    match_count += 1;
+                    println!("{:32} {:8} bytes", file.name, file.size);
+                }
+            }
+
+            if match_count == 0 {
+                println!("No matches found");
+            } else {
+                println!();
+                println!("Total: {} match(es)", match_count);
+            }
+        }
+        else {
+            println!("Error: Pipe combination '{}' | '{}' not supported", first_cmd[0], second_cmd[0]);
+            println!("Supported pipes:");
+            println!("  cat <file> | grep <pattern>");
+            println!("  cat <file> | wc");
+            println!("  ls | grep <pattern>");
         }
     }
 }

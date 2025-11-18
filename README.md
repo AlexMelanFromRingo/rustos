@@ -17,6 +17,7 @@
 - ✅ Интерактивный shell с редактируемым буфером и навигацией курсора
 - ✅ RAM disk - простая in-memory файловая система
 - ✅ Базовые Unix-утилиты (ls, cat, cp, mv, rm, touch, head, tail, wc, write, grep)
+- ✅ Упрощённые pipes (конвейеры) для связывания команд
 - ✅ Встроенный текстовый редактор (edit) для построчного редактирования
 - ✅ Переключение контекста (context switching) для многозадачности
 - ✅ Планировщик процессов (round-robin) с вытесняющей многозадачностью
@@ -218,6 +219,7 @@ rustos/
 - Команды управления процессами: ps, kill
 - Файловые команды: ls, cat, write, rm, touch, cp, mv, head, tail, wc, grep
 - Unix-подобные утилиты с поддержкой опций (например, head -n 5 файл, grep -i -n pattern file)
+- Упрощённые pipes для связывания команд (cat file | grep pattern, ls | grep pattern, cat file | wc)
 - Встроенный текстовый редактор (edit) для построчного редактирования файлов
 
 ### Context Switching (Stage 15)
@@ -349,6 +351,7 @@ futures-util = "0.3.4"          # Stream utilities для async
 - Virtual File System (VFS) - унифицированный интерфейс для FS
 - RAM disk файловая система с Unix-утилитами
 - Базовые coreutils (ls, cat, cp, mv, rm, touch, head, tail, wc, write, grep)
+- Упрощённые pipes для связывания команд (cat | grep, ls | grep, cat | wc)
 - Context switching - переключение между процессами (основа для многозадачности)
 - Process Scheduler - round-robin планировщик с вытесняющей многозадачностью
 - Управление процессами - команды ps и kill для мониторинга и управления процессами
@@ -357,7 +360,7 @@ futures-util = "0.3.4"          # Stream utilities для async
 ### Планируется 📋
 
 - FAT32 драйвер (чтение файловой системы с диска)
-- Pipes - конвейеры между командами (например, cat file | grep pattern)
+- Расширенные pipes с перенаправлением ввода/вывода
 - Пользовательское пространство (user mode processes в ring 3)
 - ACPI расширенная поддержка (обнаружение устройств)
 - Сетевой стек (TCP/IP)
