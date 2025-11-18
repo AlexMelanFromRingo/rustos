@@ -122,6 +122,7 @@ rustos/
 │   │   └── timer.rs         # Async timer
 │   └── fs/
 │       ├── mod.rs           # Filesystem module
+│       ├── vfs.rs           # VFS - Virtual File System trait и типы
 │       └── ramdisk.rs       # RAM disk - in-memory файловая система
 ├── tests/
 │   ├── basic_boot.rs        # Integration тест загрузки
@@ -155,7 +156,7 @@ rustos/
 - **Stage 9: Interactive Shell** ✅ - Командная оболочка с историей
 - **Stage 10: Shell Enhancements** ✅ - Arrow keys для истории, backspace, фильтрация
 - **Stage 11: Tab Autocomplete** ✅ - Автодополнение команд
-- **Stage 12: VFS** 📋 - Virtual File System (абстракция файловой системы)
+- **Stage 12: VFS** ✅ - Virtual File System (абстракция файловой системы)
 - **Stage 13: RAM Disk** ✅ - In-memory файловая система (ls, cat, write, rm)
 - **Stage 14: FAT32** 📋 - Чтение FAT32 с диска
 - **Stage 15: Context Switching** 📋 - Переключение между процессами
@@ -200,12 +201,21 @@ rustos/
 - Фильтрация escape-последовательностей (только printable ASCII)
 - Встроенные команды: help, clear, echo, version, uptime, time, meminfo, history, shutdown, reboot
 
-### Файловая система (Stage 13)
+### Файловая система (Stages 12-13)
 
-**RAM Disk - In-Memory файловая система:**
+**VFS - Virtual File System (Stage 12):**
+- FileSystem trait для унифицированного интерфейса
+- FileInfo структура для метаданных файлов
+- VfsError для стандартизованной обработки ошибок
+- Методы: read, write, delete, list, exists
+- Управление пространством: used_space, total_space, free_space
+- Позволяет легко добавлять новые FS (FAT32, ext2 и т.д.)
+
+**RAM Disk - In-Memory файловая система (Stage 13):**
 - Максимум 64 файла по 4 КБ каждый (256 КБ всего)
 - Имена файлов до 32 символов
 - Операции: создание/перезапись (write), чтение (read), удаление (delete), список (list)
+- Реализует FileSystem trait из VFS
 - Global Mutex-защищенный singleton (RAMDISK)
 - Shell команды: ls, cat, write, rm
 - Поддержка UTF-8 текста и бинарных данных (hex dump)
@@ -291,11 +301,11 @@ futures-util = "0.3.4"          # Stream utilities для async
 - Асинхронность (async/await, executor, waker, cooperative multitasking)
 - Управление питанием (shutdown/reboot через ACPI и PS/2)
 - Интерактивный shell с историей команд и Tab-автодополнением
+- Virtual File System (VFS) - унифицированный интерфейс для FS
 - RAM disk файловая система (ls, cat, write, rm)
 
 ### Планируется 📋
 
-- Virtual File System (VFS) - абстракция для различных FS
 - FAT32 драйвер (чтение файловой системы с диска)
 - Процессы и потоки (настоящая многозадачность с context switching)
 - Process Scheduler (планировщик процессов)
