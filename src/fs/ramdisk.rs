@@ -2,6 +2,7 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use spin::Mutex;
+use crate::fs::vfs::{FileSystem, FileInfo, VfsError, VfsResult};
 
 const MAX_FILES: usize = 64;
 const MAX_FILE_SIZE: usize = 4096; // 4KB per file
@@ -41,12 +42,17 @@ impl RamDisk {
     }
 
     /// Create or overwrite a file
-    pub fn write(&mut self, name: &str, content: Vec<u8>) -> Result<(), &'static str> {
+    pub fn write_file(&mut self, name: &str, content: Vec<u8>) -> VfsResult<()> {
         if name.is_empty() {
-            return Err("Filename cannot be empty");
+            return Err(VfsError::InvalidName);
         }
 
-        let file = File::new(name.to_string(), content)?;
+        let file = File::new(name.to_string(), content)
+            .map_err(|e| match e {
+                "Filename too long" => VfsError::InvalidName,
+                "File too large" => VfsError::FileTooLarge,
+                _ => VfsError::IoError,
+            })?;
 
         // Check if file exists
         if let Some(existing) = self.files.iter_mut().find(|f| f.name == name) {
@@ -55,7 +61,7 @@ impl RamDisk {
         } else {
             // Create new file
             if self.files.len() >= MAX_FILES {
-                return Err("Too many files");
+                return Err(VfsError::TooManyFiles);
             }
             self.files.push(file);
         }
@@ -64,38 +70,78 @@ impl RamDisk {
     }
 
     /// Read a file
-    pub fn read(&self, name: &str) -> Option<&[u8]> {
+    pub fn read_file(&self, name: &str) -> VfsResult<Vec<u8>> {
         self.files
             .iter()
             .find(|f| f.name == name)
-            .map(|f| f.content.as_slice())
+            .map(|f| f.content.clone())
+            .ok_or(VfsError::FileNotFound)
     }
 
     /// Delete a file
-    pub fn delete(&mut self, name: &str) -> Result<(), &'static str> {
+    pub fn delete_file(&mut self, name: &str) -> VfsResult<()> {
         let index = self
             .files
             .iter()
             .position(|f| f.name == name)
-            .ok_or("File not found")?;
+            .ok_or(VfsError::FileNotFound)?;
 
         self.files.remove(index);
         Ok(())
     }
 
+    /// Check if file exists
+    pub fn file_exists(&self, name: &str) -> bool {
+        self.files.iter().any(|f| f.name == name)
+    }
+
     /// List all files
-    pub fn list(&self) -> &[File] {
-        &self.files
+    pub fn list_files(&self) -> Vec<FileInfo> {
+        self.files
+            .iter()
+            .map(|f| FileInfo::new(f.name.clone(), f.size()))
+            .collect()
     }
 
     /// Get total used space
-    pub fn used_space(&self) -> usize {
+    pub fn space_used(&self) -> usize {
         self.files.iter().map(|f| f.size()).sum()
     }
 
-    /// Get total free space
-    pub fn free_space(&self) -> usize {
-        MAX_FILES * MAX_FILE_SIZE - self.used_space()
+    /// Get total available space
+    pub fn space_total(&self) -> usize {
+        MAX_FILES * MAX_FILE_SIZE
+    }
+}
+
+// Implement VFS trait for RamDisk
+impl FileSystem for RamDisk {
+    fn read(&self, path: &str) -> VfsResult<Vec<u8>> {
+        self.read_file(path)
+    }
+
+    fn write(&mut self, path: &str, data: Vec<u8>) -> VfsResult<()> {
+        self.write_file(path, data)
+    }
+
+    fn delete(&mut self, path: &str) -> VfsResult<()> {
+        self.delete_file(path)
+    }
+
+    fn list(&self) -> Vec<FileInfo> {
+        self.list_files()
+    }
+
+    fn exists(&self, path: &str) -> bool {
+        self.file_exists(path)
+    }
+
+    fn used_space(&self) -> usize {
+        self.space_used()
+    }
+
+    fn total_space(&self) -> usize {
+        self.space_total()
     }
 }
 

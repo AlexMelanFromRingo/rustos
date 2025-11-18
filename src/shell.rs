@@ -289,6 +289,7 @@ impl Shell {
 
     fn cmd_ls(&self) {
         use crate::fs::ramdisk::RAMDISK;
+        use crate::fs::vfs::FileSystem;
 
         let ramdisk = RAMDISK.lock();
         let files = ramdisk.list();
@@ -300,12 +301,13 @@ impl Shell {
 
         println!("Files ({} files, {} bytes used):", files.len(), ramdisk.used_space());
         for file in files {
-            println!("  {} - {} bytes", file.name, file.size());
+            println!("  {} - {} bytes", file.name, file.size);
         }
     }
 
     fn cmd_cat(&self, args: &[&str]) {
         use crate::fs::ramdisk::RAMDISK;
+        use crate::fs::vfs::FileSystem;
 
         if args.is_empty() {
             println!("Usage: cat <filename>");
@@ -316,9 +318,9 @@ impl Shell {
         let ramdisk = RAMDISK.lock();
 
         match ramdisk.read(filename) {
-            Some(content) => {
+            Ok(content) => {
                 // Try to display as UTF-8 text
-                match core::str::from_utf8(content) {
+                match core::str::from_utf8(&content) {
                     Ok(text) => println!("{}", text),
                     Err(_) => {
                         // Display as hex if not valid UTF-8
@@ -333,12 +335,13 @@ impl Shell {
                     }
                 }
             }
-            None => println!("File not found: {}", filename),
+            Err(_) => println!("File not found: {}", filename),
         }
     }
 
     fn cmd_write(&self, args: &[&str]) {
         use crate::fs::ramdisk::RAMDISK;
+        use crate::fs::vfs::{FileSystem, VfsError};
 
         if args.len() < 2 {
             println!("Usage: write <filename> <content>");
@@ -352,12 +355,22 @@ impl Shell {
         let mut ramdisk = RAMDISK.lock();
         match ramdisk.write(filename, bytes) {
             Ok(_) => println!("File '{}' written ({} bytes)", filename, content.len()),
-            Err(e) => println!("Error writing file: {}", e),
+            Err(e) => {
+                let msg = match e {
+                    VfsError::InvalidName => "Invalid filename",
+                    VfsError::FileTooLarge => "File too large",
+                    VfsError::TooManyFiles => "Too many files",
+                    VfsError::NoSpace => "No space left",
+                    _ => "Error writing file",
+                };
+                println!("Error: {}", msg);
+            }
         }
     }
 
     fn cmd_rm(&self, args: &[&str]) {
         use crate::fs::ramdisk::RAMDISK;
+        use crate::fs::vfs::{FileSystem, VfsError};
 
         if args.is_empty() {
             println!("Usage: rm <filename>");
@@ -369,7 +382,13 @@ impl Shell {
 
         match ramdisk.delete(filename) {
             Ok(_) => println!("File '{}' deleted", filename),
-            Err(e) => println!("Error: {}", e),
+            Err(e) => {
+                let msg = match e {
+                    VfsError::FileNotFound => "File not found",
+                    _ => "Error deleting file",
+                };
+                println!("Error: {}", msg);
+            }
         }
     }
 }
