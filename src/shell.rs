@@ -55,6 +55,8 @@ impl Shell {
     }
 
     /// Try to autocomplete the current buffer
+    /// Returns Some(completed) if single match, None otherwise
+    /// Prints all matches if multiple matches found
     pub fn autocomplete(&mut self) -> Option<String> {
         let partial = self.buffer.trim();
         if partial.is_empty() {
@@ -63,9 +65,9 @@ impl Shell {
 
         // List of available commands
         let commands = [
-            "help", "clear", "echo", "hello", "uptime", "time",
-            "meminfo", "version", "history", "shutdown", "reboot",
-            "ls", "cat", "write", "rm",
+            "cat", "clear", "echo", "hello", "help", "history",
+            "ls", "meminfo", "reboot", "rm", "shutdown", "time",
+            "uptime", "version", "write",
         ];
 
         // Find matching commands
@@ -82,9 +84,15 @@ impl Shell {
                 Some(matches[0].to_string())
             }
             _ => {
-                // Multiple matches - return first for now
-                // TODO: cycle through matches on repeated Tab
-                Some(matches[0].to_string())
+                // Multiple matches - show all options
+                println!();
+                for m in &matches {
+                    print!("{} ", m);
+                }
+                println!();
+                self.print_prompt();
+                print!("{}", self.buffer);
+                None
             }
         }
     }

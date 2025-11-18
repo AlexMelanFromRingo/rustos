@@ -120,6 +120,9 @@ rustos/
 │   │   ├── executor.rs      # Simple task executor
 │   │   ├── keyboard.rs      # Async keyboard input stream
 │   │   └── timer.rs         # Async timer
+│   ├── process/
+│   │   ├── mod.rs           # Process management
+│   │   └── context.rs       # Context switching (asm)
 │   └── fs/
 │       ├── mod.rs           # Filesystem module
 │       ├── vfs.rs           # VFS - Virtual File System trait и типы
@@ -159,7 +162,7 @@ rustos/
 - **Stage 12: VFS** ✅ - Virtual File System (абстракция файловой системы)
 - **Stage 13: RAM Disk** ✅ - In-memory файловая система (ls, cat, write, rm)
 - **Stage 14: FAT32** 📋 - Чтение FAT32 с диска
-- **Stage 15: Context Switching** 📋 - Переключение между процессами
+- **Stage 15: Context Switching** ✅ - Переключение между процессами
 - **Stage 16: Process Scheduler** 📋 - Планировщик процессов
 - **Stage 17: User Space** 📋 - Запуск кода в ring 3
 
@@ -200,6 +203,17 @@ rustos/
 - Защита от удаления приглашения (backspace блокируется на пустом буфере)
 - Фильтрация escape-последовательностей (только printable ASCII)
 - Встроенные команды: help, clear, echo, version, uptime, time, meminfo, history, shutdown, reboot
+
+### Context Switching (Stage 15)
+
+**Переключение между процессами:**
+- Context структура для сохранения состояния CPU (регистры, rip, rsp, rflags)
+- Сохранение callee-saved регистров (r15, r14, r13, r12, rbx, rbp)
+- switch_context() функция на чистом ассемблере (naked function)
+- Process структура с PID, состоянием, контекстом и стеком
+- ProcessManager для управления процессами
+- ProcessState: Ready, Running, Blocked, Terminated
+- Основа для кооперативной и вытесняющей многозадачности
 
 ### Файловая система (Stages 12-13)
 
@@ -303,6 +317,7 @@ futures-util = "0.3.4"          # Stream utilities для async
 - Интерактивный shell с историей команд и Tab-автодополнением
 - Virtual File System (VFS) - унифицированный интерфейс для FS
 - RAM disk файловая система (ls, cat, write, rm)
+- Context switching - переключение между процессами (основа для многозадачности)
 
 ### Планируется 📋
 
