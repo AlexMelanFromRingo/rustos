@@ -31,6 +31,14 @@ impl Shell {
     }
 
     pub fn add_char(&mut self, c: char) {
+        // Ensure cursor_pos is at a valid UTF-8 boundary
+        if self.cursor_pos > self.buffer.len() {
+            self.cursor_pos = self.buffer.len();
+        }
+        while self.cursor_pos > 0 && !self.buffer.is_char_boundary(self.cursor_pos) {
+            self.cursor_pos -= 1;
+        }
+
         self.buffer.insert(self.cursor_pos, c);
         self.cursor_pos += c.len_utf8();
         self.history_index = None;
@@ -250,6 +258,7 @@ impl Shell {
     pub fn execute(&mut self) {
         let command = self.buffer.trim().to_string();
         self.buffer.clear();
+        self.cursor_pos = 0;  // Reset cursor position after clearing buffer
         self.history_index = None;
 
         if command.is_empty() {
