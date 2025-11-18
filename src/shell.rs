@@ -133,10 +133,10 @@ impl Shell {
 
         // List of available commands
         let commands = [
-            "cat", "clear", "cp", "echo", "edit", "head", "hello",
-            "help", "history", "kill", "ls", "meminfo", "mv", "ps",
-            "reboot", "rm", "shutdown", "tail", "time", "touch",
-            "uptime", "version", "wc", "write",
+            "cat", "clear", "cp", "echo", "edit", "grep", "head",
+            "hello", "help", "history", "kill", "ls", "meminfo",
+            "mv", "ps", "reboot", "rm", "shutdown", "tail", "time",
+            "touch", "uptime", "version", "wc", "write",
         ];
 
         // Find matching commands
@@ -238,6 +238,7 @@ impl Shell {
             "history" => self.cmd_history(),
             "ps" => self.cmd_ps(),
             "kill" => self.cmd_kill(args),
+            "grep" => self.cmd_grep(args),
             "ls" => self.cmd_ls(),
             "cat" => self.cmd_cat(args),
             "write" => self.cmd_write(args),
@@ -284,6 +285,7 @@ impl Shell {
         println!("  head      - Show first N lines (usage: head [-n N] filename)");
         println!("  tail      - Show last N lines (usage: tail [-n N] filename)");
         println!("  wc        - Count lines/words/bytes (usage: wc filename)");
+        println!("  grep      - Search for pattern in file (usage: grep [-i] [-n] pattern file)");
         println!("  edit      - Simple text editor (usage: edit filename)");
         println!();
         println!("Keyboard shortcuts:");
@@ -751,6 +753,101 @@ impl Shell {
             }
             Err(_) => {
                 println!("Error: Invalid PID '{}'", pid_str);
+            }
+        }
+    }
+
+    fn cmd_grep(&self, args: &[&str]) {
+        use crate::fs::ramdisk::RAMDISK;
+        use crate::fs::vfs::FileSystem;
+
+        if args.is_empty() {
+            println!("Usage: grep [-i] [-n] pattern filename");
+            println!("  -i  Case insensitive search");
+            println!("  -n  Show line numbers");
+            return;
+        }
+
+        let mut case_insensitive = false;
+        let mut show_line_numbers = false;
+        let mut arg_idx = 0;
+
+        // Parse flags
+        while arg_idx < args.len() && args[arg_idx].starts_with('-') {
+            match args[arg_idx] {
+                "-i" => case_insensitive = true,
+                "-n" => show_line_numbers = true,
+                "-in" | "-ni" => {
+                    case_insensitive = true;
+                    show_line_numbers = true;
+                }
+                _ => {
+                    println!("Error: Unknown option '{}'", args[arg_idx]);
+                    return;
+                }
+            }
+            arg_idx += 1;
+        }
+
+        // Need at least pattern and filename
+        if arg_idx + 2 > args.len() {
+            println!("Usage: grep [-i] [-n] pattern filename");
+            return;
+        }
+
+        let pattern = args[arg_idx];
+        let filename = args[arg_idx + 1];
+
+        // Read file
+        let ramdisk = RAMDISK.lock();
+        match ramdisk.read(filename) {
+            Ok(content) => {
+                drop(ramdisk);
+
+                // Convert to UTF-8
+                match core::str::from_utf8(&content) {
+                    Ok(text) => {
+                        let mut match_count = 0;
+
+                        // Prepare pattern for comparison
+                        let search_pattern = if case_insensitive {
+                            pattern.to_lowercase()
+                        } else {
+                            pattern.to_string()
+                        };
+
+                        // Search through lines
+                        for (line_num, line) in text.lines().enumerate() {
+                            let search_line = if case_insensitive {
+                                line.to_lowercase()
+                            } else {
+                                line.to_string()
+                            };
+
+                            if search_line.contains(&search_pattern) {
+                                match_count += 1;
+                                if show_line_numbers {
+                                    println!("{}:{}", line_num + 1, line);
+                                } else {
+                                    println!("{}", line);
+                                }
+                            }
+                        }
+
+                        if match_count == 0 {
+                            println!("No matches found");
+                        } else {
+                            println!();
+                            println!("{} match(es) found", match_count);
+                        }
+                    }
+                    Err(_) => {
+                        println!("Error: File '{}' is binary, cannot search", filename);
+                    }
+                }
+            }
+            Err(_) => {
+                println!("Error: File '{}' not found", filename);
             }
         }
     }

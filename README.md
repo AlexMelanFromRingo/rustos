@@ -16,7 +16,7 @@
 - ✅ Управление питанием (shutdown/reboot через ACPI)
 - ✅ Интерактивный shell с редактируемым буфером и навигацией курсора
 - ✅ RAM disk - простая in-memory файловая система
-- ✅ Базовые Unix-утилиты (ls, cat, cp, mv, rm, touch, head, tail, wc, write)
+- ✅ Базовые Unix-утилиты (ls, cat, cp, mv, rm, touch, head, tail, wc, write, grep)
 - ✅ Встроенный текстовый редактор (edit) для построчного редактирования
 - ✅ Переключение контекста (context switching) для многозадачности
 - ✅ Планировщик процессов (round-robin) с вытесняющей многозадачностью
@@ -216,8 +216,8 @@ rustos/
 - Фильтрация escape-последовательностей (только printable ASCII)
 - Системные команды: help, clear, echo, version, uptime, time, meminfo, history, shutdown, reboot
 - Команды управления процессами: ps, kill
-- Файловые команды: ls, cat, write, rm, touch, cp, mv, head, tail, wc
-- Unix-подобные утилиты с поддержкой опций (например, head -n 5 файл)
+- Файловые команды: ls, cat, write, rm, touch, cp, mv, head, tail, wc, grep
+- Unix-подобные утилиты с поддержкой опций (например, head -n 5 файл, grep -i -n pattern file)
 - Встроенный текстовый редактор (edit) для построчного редактирования файлов
 
 ### Context Switching (Stage 15)
@@ -348,7 +348,7 @@ futures-util = "0.3.4"          # Stream utilities для async
 - Интерактивный shell с историей команд и Tab-автодополнением
 - Virtual File System (VFS) - унифицированный интерфейс для FS
 - RAM disk файловая система с Unix-утилитами
-- Базовые coreutils (ls, cat, cp, mv, rm, touch, head, tail, wc, write)
+- Базовые coreutils (ls, cat, cp, mv, rm, touch, head, tail, wc, write, grep)
 - Context switching - переключение между процессами (основа для многозадачности)
 - Process Scheduler - round-robin планировщик с вытесняющей многозадачностью
 - Управление процессами - команды ps и kill для мониторинга и управления процессами
@@ -357,7 +357,7 @@ futures-util = "0.3.4"          # Stream utilities для async
 ### Планируется 📋
 
 - FAT32 драйвер (чтение файловой системы с диска)
-- grep и pipes - поиск в файлах и конвейеры между командами
+- Pipes - конвейеры между командами (например, cat file | grep pattern)
 - Пользовательское пространство (user mode processes в ring 3)
 - ACPI расширенная поддержка (обнаружение устройств)
 - Сетевой стек (TCP/IP)
