@@ -4,12 +4,12 @@
 /// It implements the VFS FileSystem trait for integration with the virtual filesystem.
 
 use alloc::vec::Vec;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec;
 use core::mem;
 use spin::Mutex;
 
-use crate::drivers::ata::{AtaDrive, ATA_DRIVE, SECTOR_SIZE};
+use crate::drivers::ata::{ATA_DRIVE, SECTOR_SIZE};
 use crate::fs::vfs::{FileSystem, FileInfo, VfsError, VfsResult};
 
 /// FAT32 BIOS Parameter Block (Boot Sector)
@@ -284,6 +284,52 @@ impl Fat32 {
         Ok(buffer)
     }
 
+    /// Write a cluster to disk
+    fn write_cluster(&mut self, cluster: u32, data: &[u8]) -> Result<(), &'static str> {
+        let sector = self.cluster_to_sector(cluster);
+        let cluster_size = (self.sectors_per_cluster * self.bytes_per_sector) as usize;
+
+        if data.len() > cluster_size {
+            return Err("Data exceeds cluster size");
+        }
+
+        // Prepare buffer (pad with zeros if needed)
+        let mut buffer = vec![0u8; cluster_size];
+        buffer[..data.len()].copy_from_slice(data);
+
+        let mut drive = ATA_DRIVE.lock();
+        drive.write_sectors(sector, self.sectors_per_cluster as usize, &buffer)?;
+        drop(drive);
+
+        Ok(())
+    }
+
+    /// Write data to a cluster chain
+    fn write_cluster_chain(&mut self, start_cluster: u32, data: &[u8]) -> Result<(), &'static str> {
+        let cluster_size = (self.sectors_per_cluster * self.bytes_per_sector) as usize;
+        let mut offset = 0;
+        let mut current_cluster = start_cluster;
+
+        while offset < data.len() {
+            let chunk_size = core::cmp::min(cluster_size, data.len() - offset);
+            let chunk = &data[offset..offset + chunk_size];
+
+            self.write_cluster(current_cluster, chunk)?;
+
+            offset += chunk_size;
+
+            if offset < data.len() {
+                // Need next cluster
+                match self.get_next_cluster(current_cluster)? {
+                    Some(next) => current_cluster = next,
+                    None => return Err("Cluster chain too short for data"),
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Get the next cluster in the FAT chain
     fn get_next_cluster(&self, cluster: u32) -> Result<Option<u32>, &'static str> {
         // Calculate FAT entry offset
@@ -390,8 +436,6 @@ impl Fat32 {
     /// Find a free cluster in the FAT table
     /// Returns the cluster number of the first free cluster found
     fn find_free_cluster(&self) -> Result<Option<u32>, &'static str> {
-        let entries_per_sector = self.bytes_per_sector / 4;
-
         // Start from cluster 2 (first data cluster)
         let start_cluster = 2;
         let end_cluster = self.total_clusters + 2;
@@ -465,7 +509,7 @@ impl Fat32 {
         let mut prev_cluster = first_cluster;
 
         // Allocate remaining clusters
-        for i in 1..num_clusters {
+        for _ in 1..num_clusters {
             let next_cluster = match self.find_free_cluster()? {
                 Some(cluster) => cluster,
                 None => {
@@ -502,6 +546,162 @@ impl Fat32 {
         }
 
         Ok(())
+    }
+
+    /// Create a new file entry in root directory
+    fn create_file_entry(&mut self, filename: &str, first_cluster: u32, file_size: u32) -> Result<(), &'static str> {
+        // Convert filename to 8.3 format
+        let short_name = self.to_short_name(filename)?;
+
+        // Create directory entry
+        let entry = DirectoryEntry {
+            name: short_name,
+            attributes: ATTR_ARCHIVE,
+            nt_reserved: 0,
+            creation_time_tenths: 0,
+            creation_time: 0,
+            creation_date: 0,
+            last_access_date: 0,
+            first_cluster_high: ((first_cluster >> 16) & 0xFFFF) as u16,
+            write_time: 0,
+            write_date: 0,
+            first_cluster_low: (first_cluster & 0xFFFF) as u16,
+            file_size,
+        };
+
+        // Find free slot in root directory
+        self.write_directory_entry_to_root(&entry)
+    }
+
+    /// Update an existing directory entry
+    fn update_directory_entry(&mut self, filename: &str, entry: &DirectoryEntry) -> Result<(), &'static str> {
+        let short_name = self.to_short_name(filename)?;
+
+        // Read root directory
+        let data = self.read_cluster_chain(self.root_cluster)?;
+        let entry_size = mem::size_of::<DirectoryEntry>();
+        let num_entries = data.len() / entry_size;
+
+        for i in 0..num_entries {
+            let offset = i * entry_size;
+            let existing_entry = unsafe {
+                &*(data.as_ptr().add(offset) as *const DirectoryEntry)
+            };
+
+            if !existing_entry.is_free() && !existing_entry.is_long_name() {
+                if existing_entry.name == short_name {
+                    // Found it - update this entry
+                    let mut new_data = data.clone();
+                    let entry_bytes = unsafe {
+                        core::slice::from_raw_parts(
+                            entry as *const DirectoryEntry as *const u8,
+                            entry_size
+                        )
+                    };
+                    new_data[offset..offset + entry_size].copy_from_slice(entry_bytes);
+
+                    // Write back
+                    return self.write_cluster_chain(self.root_cluster, &new_data);
+                }
+            }
+        }
+
+        Err("File not found in directory")
+    }
+
+    /// Delete a directory entry (mark as deleted)
+    fn delete_directory_entry(&mut self, filename: &str) -> Result<(), &'static str> {
+        let short_name = self.to_short_name(filename)?;
+
+        // Read root directory
+        let data = self.read_cluster_chain(self.root_cluster)?;
+        let entry_size = mem::size_of::<DirectoryEntry>();
+        let num_entries = data.len() / entry_size;
+
+        for i in 0..num_entries {
+            let offset = i * entry_size;
+            let existing_entry = unsafe {
+                &*(data.as_ptr().add(offset) as *const DirectoryEntry)
+            };
+
+            if !existing_entry.is_free() && !existing_entry.is_long_name() {
+                if existing_entry.name == short_name {
+                    // Found it - mark as deleted
+                    let mut new_data = data.clone();
+                    new_data[offset] = 0xE5; // Deleted marker
+
+                    // Write back
+                    return self.write_cluster_chain(self.root_cluster, &new_data);
+                }
+            }
+        }
+
+        Err("File not found in directory")
+    }
+
+    /// Write directory entry to first free slot in root directory
+    fn write_directory_entry_to_root(&mut self, entry: &DirectoryEntry) -> Result<(), &'static str> {
+        // Read root directory
+        let data = self.read_cluster_chain(self.root_cluster)?;
+        let entry_size = mem::size_of::<DirectoryEntry>();
+        let num_entries = data.len() / entry_size;
+
+        for i in 0..num_entries {
+            let offset = i * entry_size;
+            let existing_entry = unsafe {
+                &*(data.as_ptr().add(offset) as *const DirectoryEntry)
+            };
+
+            if existing_entry.is_free() || existing_entry.is_last() {
+                // Found free slot
+                let mut new_data = data.clone();
+                let entry_bytes = unsafe {
+                    core::slice::from_raw_parts(
+                        entry as *const DirectoryEntry as *const u8,
+                        entry_size
+                    )
+                };
+                new_data[offset..offset + entry_size].copy_from_slice(entry_bytes);
+
+                // Write back
+                return self.write_cluster_chain(self.root_cluster, &new_data);
+            }
+        }
+
+        Err("No free directory entries")
+    }
+
+    /// Convert filename to 8.3 format
+    fn to_short_name(&self, filename: &str) -> Result<[u8; 11], &'static str> {
+        let mut short_name = [b' '; 11];
+
+        if let Some(dot_pos) = filename.rfind('.') {
+            // Has extension
+            let name = &filename[..dot_pos];
+            let ext = &filename[dot_pos + 1..];
+
+            if name.len() > 8 || ext.len() > 3 {
+                return Err("Filename too long for 8.3 format");
+            }
+
+            for (i, c) in name.bytes().enumerate() {
+                short_name[i] = c.to_ascii_uppercase();
+            }
+            for (i, c) in ext.bytes().enumerate() {
+                short_name[8 + i] = c.to_ascii_uppercase();
+            }
+        } else {
+            // No extension
+            if filename.len() > 8 {
+                return Err("Filename too long for 8.3 format");
+            }
+
+            for (i, c) in filename.bytes().enumerate() {
+                short_name[i] = c.to_ascii_uppercase();
+            }
+        }
+
+        Ok(short_name)
     }
 
     /// Count used clusters by traversing the FAT table
@@ -570,14 +770,95 @@ impl FileSystem for Fat32 {
         }
     }
 
-    fn write(&mut self, _path: &str, _data: Vec<u8>) -> VfsResult<()> {
-        // FAT32 is read-only for now
-        Err(VfsError::PermissionDenied)
+    fn write(&mut self, path: &str, data: Vec<u8>) -> VfsResult<()> {
+        // For now, only support files in root directory
+        let path = path.trim_start_matches('/');
+
+        if path.contains('/') {
+            return Err(VfsError::PermissionDenied); // Subdirectories not supported
+        }
+
+        // Calculate required clusters
+        let cluster_size = (self.sectors_per_cluster * self.bytes_per_sector) as usize;
+        let num_clusters = ((data.len() + cluster_size - 1) / cluster_size) as u32;
+        let num_clusters = core::cmp::max(num_clusters, 1); // At least one cluster
+
+        // Check if file exists
+        match self.find_file(path).map_err(|_| VfsError::IoError)? {
+            Some(mut entry) => {
+                // File exists - update it
+                // Free old cluster chain
+                if entry.first_cluster() != 0 {
+                    self.free_cluster_chain(entry.first_cluster())
+                        .map_err(|_| VfsError::IoError)?;
+                }
+
+                // Allocate new cluster chain
+                let first_cluster = self.allocate_clusters(num_clusters)
+                    .map_err(|_| VfsError::NoSpace)?;
+
+                // Write data
+                self.write_cluster_chain(first_cluster, &data)
+                    .map_err(|_| VfsError::IoError)?;
+
+                // Update directory entry
+                entry.first_cluster_low = (first_cluster & 0xFFFF) as u16;
+                entry.first_cluster_high = ((first_cluster >> 16) & 0xFFFF) as u16;
+                entry.file_size = data.len() as u32;
+
+                self.update_directory_entry(path, &entry)
+                    .map_err(|_| VfsError::IoError)?;
+
+                Ok(())
+            }
+            None => {
+                // File doesn't exist - create it
+                // Allocate cluster chain
+                let first_cluster = self.allocate_clusters(num_clusters)
+                    .map_err(|_| VfsError::NoSpace)?;
+
+                // Write data
+                self.write_cluster_chain(first_cluster, &data)
+                    .map_err(|_| VfsError::IoError)?;
+
+                // Create directory entry
+                self.create_file_entry(path, first_cluster, data.len() as u32)
+                    .map_err(|_| VfsError::IoError)?;
+
+                Ok(())
+            }
+        }
     }
 
-    fn delete(&mut self, _path: &str) -> VfsResult<()> {
-        // FAT32 is read-only for now
-        Err(VfsError::PermissionDenied)
+    fn delete(&mut self, path: &str) -> VfsResult<()> {
+        // For now, only support files in root directory
+        let path = path.trim_start_matches('/');
+
+        if path.contains('/') {
+            return Err(VfsError::PermissionDenied); // Subdirectories not supported
+        }
+
+        // Find the file
+        match self.find_file(path).map_err(|_| VfsError::IoError)? {
+            Some(entry) => {
+                if entry.is_directory() {
+                    return Err(VfsError::PermissionDenied);
+                }
+
+                // Free cluster chain
+                if entry.first_cluster() != 0 {
+                    self.free_cluster_chain(entry.first_cluster())
+                        .map_err(|_| VfsError::IoError)?;
+                }
+
+                // Mark directory entry as deleted
+                self.delete_directory_entry(path)
+                    .map_err(|_| VfsError::IoError)?;
+
+                Ok(())
+            }
+            None => Err(VfsError::FileNotFound),
+        }
     }
 
     fn list(&self) -> Vec<FileInfo> {
