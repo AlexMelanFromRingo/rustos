@@ -379,7 +379,9 @@ futures-util = "0.3.4"          # Stream utilities для async
 - Интерактивный shell с историей команд и Tab-автодополнением (команды и файлы)
 - Virtual File System (VFS) - унифицированный интерфейс для FS
 - RAM disk файловая система с Unix-утилитами
-- Базовые coreutils (ls, cat, cp, mv, rm, touch, head, tail, wc, write, grep)
+- FAT32 filesystem - read-only чтение с диска через IDE/ATA PIO driver (mount/umount)
+- Disk space reporting - команда df для отображения использования дисков
+- Базовые coreutils (ls, cat, cp, mv, rm, touch, head, tail, wc, write, grep, df)
 - Упрощённые pipes для связывания команд (cat | grep, ls | grep, cat | wc)
 - Context switching - переключение между процессами (основа для многозадачности)
 - Process Scheduler - round-robin планировщик с вытесняющей многозадачностью
@@ -388,17 +390,20 @@ futures-util = "0.3.4"          # Stream utilities для async
 
 ### Планируется 📋
 
-- FAT32 драйвер (чтение файловой системы с диска)
-- Расширенные pipes с перенаправлением ввода/вывода
+- FAT32 write support (запись файлов на диск)
+- FAT32 subdirectory navigation (cd, mkdir, rmdir)
+- Расширенные pipes с перенаправлением ввода/вывода (>, <, 2>)
 - Пользовательское пространство (user mode processes в ring 3)
 - ACPI расширенная поддержка (обнаружение устройств)
 - Сетевой стек (TCP/IP)
 - Системные вызовы (syscall interface)
 - ELF загрузчик (запуск программ)
+- Цветной вывод в терминале (ANSI escape sequences)
+- Persistent command history (сохранение между перезагрузками)
 
 ## Производительность
 
-Текущий размер образа: ~687 KB (включая bootloader)
+Текущий размер образа: ~1.1 MB (включая bootloader)
 
 ## Лицензия
 

@@ -200,6 +200,10 @@ pub struct Fat32 {
     root_cluster: u32,
     /// Sectors per FAT
     sectors_per_fat: u32,
+    /// Total sectors on the volume
+    total_sectors: u32,
+    /// Total clusters (data area)
+    total_clusters: u32,
 }
 
 impl Fat32 {
@@ -239,6 +243,17 @@ impl Fat32 {
         let first_data_sector = bpb.reserved_sectors as u32 + (bpb.num_fats as u32 * fat_size) + root_dir_sectors;
         let first_fat_sector = bpb.reserved_sectors as u32;
 
+        // Get total sectors
+        let total_sectors = if bpb.total_sectors_16 != 0 {
+            bpb.total_sectors_16 as u32
+        } else {
+            bpb.total_sectors_32
+        };
+
+        // Calculate total clusters in data area
+        let data_sectors = total_sectors - first_data_sector;
+        let total_clusters = data_sectors / (bpb.sectors_per_cluster as u32);
+
         Ok(Fat32 {
             first_data_sector,
             sectors_per_cluster: bpb.sectors_per_cluster as u32,
@@ -246,6 +261,8 @@ impl Fat32 {
             first_fat_sector,
             root_cluster: ebr.root_cluster,
             sectors_per_fat: fat_size,
+            total_sectors,
+            total_clusters,
         })
     }
 
@@ -369,6 +386,51 @@ impl Fat32 {
 
         self.find_file_in_directory(self.root_cluster, path)
     }
+
+    /// Count used clusters by traversing the FAT table
+    /// This is relatively slow but accurate
+    fn count_used_clusters(&self) -> Result<u32, &'static str> {
+        let mut used_count = 0u32;
+        let entries_per_sector = self.bytes_per_sector / 4; // Each FAT32 entry is 4 bytes
+
+        // Read FAT table sector by sector
+        for sector_offset in 0..self.sectors_per_fat {
+            let fat_sector = self.first_fat_sector + sector_offset;
+            let mut sector_buffer = [0u8; SECTOR_SIZE];
+
+            let mut drive = ATA_DRIVE.lock();
+            drive.read_sector(fat_sector, &mut sector_buffer)?;
+            drop(drive);
+
+            // Check each FAT entry in this sector
+            for entry_idx in 0..entries_per_sector {
+                let offset = (entry_idx * 4) as usize;
+                if offset + 4 > SECTOR_SIZE {
+                    break;
+                }
+
+                let fat_entry = u32::from_le_bytes([
+                    sector_buffer[offset],
+                    sector_buffer[offset + 1],
+                    sector_buffer[offset + 2],
+                    sector_buffer[offset + 3],
+                ]) & 0x0FFFFFFF; // Mask off top 4 bits
+
+                // Check if cluster is in use
+                // 0x00000000 = free
+                // 0x00000001 = reserved
+                // 0x00000002 - 0x0FFFFFEF = used (data)
+                // 0x0FFFFFF0 - 0x0FFFFFF6 = reserved
+                // 0x0FFFFFF7 = bad cluster
+                // 0x0FFFFFF8 - 0x0FFFFFFF = end of chain
+                if fat_entry >= 0x00000002 && fat_entry <= 0x0FFFFFFF {
+                    used_count += 1;
+                }
+            }
+        }
+
+        Ok(used_count)
+    }
 }
 
 impl FileSystem for Fat32 {
@@ -426,13 +488,19 @@ impl FileSystem for Fat32 {
     }
 
     fn used_space(&self) -> usize {
-        // TODO: Calculate actual used space by traversing FAT
-        0
+        // Count used clusters by traversing FAT table
+        match self.count_used_clusters() {
+            Ok(used_clusters) => {
+                // Calculate space: clusters × sectors_per_cluster × bytes_per_sector
+                (used_clusters as usize) * (self.sectors_per_cluster as usize) * (self.bytes_per_sector as usize)
+            }
+            Err(_) => 0, // Return 0 on error
+        }
     }
 
     fn total_space(&self) -> usize {
-        // TODO: Calculate total space from BPB
-        0
+        // Total space is total_sectors × bytes_per_sector
+        (self.total_sectors as usize) * (self.bytes_per_sector as usize)
     }
 }
 

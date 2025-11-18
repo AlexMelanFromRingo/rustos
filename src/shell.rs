@@ -145,7 +145,7 @@ impl Shell {
         if parts.len() == 1 {
             // Autocomplete command name
             let commands = [
-                "cat", "clear", "cp", "echo", "edit", "grep", "head",
+                "cat", "clear", "cp", "df", "echo", "edit", "grep", "head",
                 "hello", "help", "history", "kill", "ls", "meminfo",
                 "mount", "mv", "ps", "reboot", "rm", "shutdown", "tail", "time",
                 "touch", "umount", "uptime", "version", "wc", "write",
@@ -312,6 +312,7 @@ impl Shell {
             "edit" => self.cmd_edit(args),
             "mount" => self.cmd_mount(args),
             "umount" => self.cmd_umount(args),
+            "df" => self.cmd_df(),
             _ => {
                 println!("Unknown command: '{}'. Type 'help' for available commands.", cmd);
             }
@@ -349,6 +350,7 @@ impl Shell {
         println!("  wc        - Count lines/words/bytes (usage: wc filename)");
         println!("  grep      - Search for pattern in file (usage: grep [-i] [-n] pattern file)");
         println!("  edit      - Simple text editor (usage: edit filename)");
+        println!("  df        - Show disk space usage");
         println!("  mount     - Mount FAT32 disk (usage: mount fat32)");
         println!("  umount    - Unmount FAT32 disk");
         println!();
@@ -1096,5 +1098,58 @@ impl Shell {
         } else {
             println!("No FAT32 filesystem is mounted");
         }
+    }
+
+    fn cmd_df(&self) {
+        use crate::fs::ramdisk::RAMDISK;
+        use crate::fs::fat32::FAT32;
+        use crate::fs::vfs::FileSystem;
+
+        println!("Filesystem            Size      Used     Avail  Use%  Mounted on");
+        println!("---------------------------------------------------------------");
+
+        // Show RAM disk usage
+        let ramdisk = RAMDISK.lock();
+        let total = ramdisk.total_space();
+        let used = ramdisk.used_space();
+        let avail = ramdisk.free_space();
+        let use_percent = if total > 0 {
+            (used * 100) / total
+        } else {
+            0
+        };
+        drop(ramdisk);
+
+        println!(
+            "{:<20}  {:>6}K  {:>6}K  {:>6}K   {:>3}%  /",
+            "ramdisk",
+            total / 1024,
+            used / 1024,
+            avail / 1024,
+            use_percent
+        );
+
+        // Show FAT32 usage if mounted
+        let fat32 = FAT32.lock();
+        if let Some(ref fs) = *fat32 {
+            let total = fs.total_space();
+            let used = fs.used_space();
+            let avail = fs.free_space();
+            let use_percent = if total > 0 {
+                (used * 100) / total
+            } else {
+                0
+            };
+
+            println!(
+                "{:<20}  {:>6}K  {:>6}K  {:>6}K   {:>3}%  /mnt/fat32",
+                "fat32",
+                total / 1024,
+                used / 1024,
+                avail / 1024,
+                use_percent
+            );
+        }
+        drop(fat32);
     }
 }
