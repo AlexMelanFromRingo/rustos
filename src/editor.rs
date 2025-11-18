@@ -1,9 +1,15 @@
 /// Simple line-based text editor
 use alloc::vec::Vec;
 use alloc::string::{String, ToString};
-use crate::println;
+use crate::{print, println};
 use crate::fs::ramdisk::RAMDISK;
 use crate::fs::vfs::{FileSystem, VfsError};
+use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
+use spin::Mutex;
+
+static KEYBOARD: Mutex<Keyboard<layouts::Us104Key, ScancodeSet1>> = Mutex::new(
+    Keyboard::new(ScancodeSet1::new(), layouts::Us104Key, HandleControl::Ignore)
+);
 
 pub struct Editor {
     lines: Vec<String>,
@@ -46,14 +52,154 @@ impl Editor {
     pub fn run(&mut self) {
         println!("RustOS Editor - File: {}", self.filename);
         println!("Commands: (i)nsert, (a)ppend, (d)elete, (p)rint, (w)rite, (q)uit, (h)elp");
-        println!("Type line number to edit that line");
         println!();
 
         self.print_all();
+        println!();
 
-        println!("\nEditor ready. Type 'h' for help, 'q' to quit.");
-        println!("Note: This is a demonstration. In real shell, use interactive commands.");
-        println!("For now, use: write <file> <content>");
+        // Main editor loop
+        loop {
+            print!(": ");
+
+            let command = match self.read_line() {
+                Some(line) => line,
+                None => continue,
+            };
+
+            let command = command.trim();
+            if command.is_empty() {
+                continue;
+            }
+
+            // Parse command
+            let parts: Vec<&str> = command.splitn(3, ' ').collect();
+            let cmd = parts[0];
+
+            match cmd {
+                "h" | "help" => print_help(),
+                "q" | "quit" => {
+                    if self.modified {
+                        println!("Warning: File modified but not saved!");
+                        println!("Use 'w' to save, or 'q!' to quit without saving");
+                    } else {
+                        break;
+                    }
+                }
+                "q!" => break,
+                "p" | "print" => {
+                    if parts.len() > 1 {
+                        if let Ok(line_num) = parts[1].parse::<usize>() {
+                            self.print_line(line_num);
+                        } else {
+                            println!("Error: Invalid line number");
+                        }
+                    } else {
+                        self.print_all();
+                    }
+                }
+                "a" | "append" => {
+                    if parts.len() > 1 {
+                        let text = parts[1..].join(" ");
+                        self.append_line(text);
+                        println!("Line appended");
+                    } else {
+                        println!("Usage: a <text>");
+                    }
+                }
+                "i" | "insert" => {
+                    if parts.len() > 2 {
+                        if let Ok(line_num) = parts[1].parse::<usize>() {
+                            let text = parts[2..].join(" ");
+                            self.insert_line(line_num - 1, text);
+                            println!("Line inserted");
+                        } else {
+                            println!("Error: Invalid line number");
+                        }
+                    } else {
+                        println!("Usage: i <line> <text>");
+                    }
+                }
+                "e" | "edit" => {
+                    if parts.len() > 2 {
+                        if let Ok(line_num) = parts[1].parse::<usize>() {
+                            let text = parts[2..].join(" ");
+                            self.replace_line(line_num, text);
+                            println!("Line replaced");
+                        } else {
+                            println!("Error: Invalid line number");
+                        }
+                    } else {
+                        println!("Usage: e <line> <text>");
+                    }
+                }
+                "d" | "delete" => {
+                    if parts.len() > 1 {
+                        if let Ok(line_num) = parts[1].parse::<usize>() {
+                            self.delete_line(line_num);
+                        } else {
+                            println!("Error: Invalid line number");
+                        }
+                    } else {
+                        println!("Usage: d <line>");
+                    }
+                }
+                "w" | "write" | "save" => {
+                    match self.save() {
+                        Ok(_) => {},
+                        Err(e) => println!("Error saving: {:?}", e),
+                    }
+                }
+                _ => {
+                    println!("Unknown command: '{}'. Type 'h' for help.", cmd);
+                }
+            }
+        }
+
+        println!("Editor closed.");
+    }
+
+    /// Read a line of input from keyboard
+    fn read_line(&self) -> Option<String> {
+        use crate::task::keyboard::SCANCODE_QUEUE;
+
+        let mut line = String::new();
+
+        loop {
+            // Poll scancode queue
+            if let Ok(queue) = SCANCODE_QUEUE.try_get() {
+                if let Some(scancode) = queue.pop() {
+                    let mut keyboard = KEYBOARD.lock();
+
+                    if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
+                        if let Some(key) = keyboard.process_keyevent(key_event) {
+                            match key {
+                                DecodedKey::Unicode(character) => {
+                                    if character == '\n' {
+                                        println!();
+                                        return Some(line);
+                                    } else if character == '\x08' {
+                                        // Backspace
+                                        if !line.is_empty() {
+                                            line.pop();
+                                            print!("\x08 \x08");
+                                        }
+                                    } else if character >= ' ' && character <= '~' {
+                                        line.push(character);
+                                        print!("{}", character);
+                                    }
+                                }
+                                DecodedKey::RawKey(_) => {}
+                            }
+                        }
+                    }
+
+                    drop(keyboard);
+                }
+            }
+
+            // Yield CPU to prevent busy-waiting
+            x86_64::instructions::hlt();
+        }
     }
 
     pub fn print_all(&self) {
@@ -146,7 +292,8 @@ pub fn print_help() {
     println!("  d N        - Delete line N");
     println!("  e N <text> - Edit (replace) line N with <text>");
     println!("  w          - Write (save) file");
-    println!("  q          - Quit editor");
+    println!("  q          - Quit editor (warns if unsaved)");
+    println!("  q!         - Quit without saving");
     println!();
     println!("Examples:");
     println!("  a Hello World    - Add 'Hello World' at end");
