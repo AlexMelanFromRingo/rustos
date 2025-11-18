@@ -183,18 +183,24 @@ async fn keyboard_task() {
                             shell.add_char(character);
                             let cursor_pos = shell.get_cursor_pos();
 
-                            // Redraw from cursor position
+                            // Redraw entire buffer
                             let (_clear_len, new_text) = shell.redraw_line();
+                            let new_len = new_text.len();
 
                             interrupts::without_interrupts(|| {
                                 let mut writer = WRITER.lock();
-                                // Clear old content
-                                for _ in 0..old_len {
-                                    writer.move_cursor_left();
-                                }
-                                // Print new text
+                                // Move cursor to start of buffer (after prompt "> ")
+                                writer.set_cursor_column(2);
                                 drop(writer);
+
+                                // Print new text
                                 print!("{}", new_text);
+                                // Clear remaining old characters if any
+                                if old_len > new_len {
+                                    for _ in 0..(old_len - new_len) {
+                                        print!(" ");
+                                    }
+                                }
 
                                 // Set cursor to correct position (prompt + cursor_pos)
                                 writer = WRITER.lock();
@@ -213,20 +219,17 @@ async fn keyboard_task() {
                                     let (_clear_len, new_text) = shell.redraw_line();
                                     let new_len = new_text.len();
                                     let cursor_pos = shell.get_cursor_pos();
-                                    let chars_to_clear = old_len - new_len;
 
                                     interrupts::without_interrupts(|| {
                                         let mut writer = WRITER.lock();
-                                        // Move back to start of buffer
-                                        for _ in 0..old_len {
-                                            writer.move_cursor_left();
-                                        }
+                                        // Move cursor to start of buffer (after prompt "> ")
+                                        writer.set_cursor_column(2);
                                         drop(writer);
 
                                         // Print new text
                                         print!("{}", new_text);
-                                        // Clear remaining old characters with spaces
-                                        for _ in 0..chars_to_clear {
+                                        // Clear remaining old characters
+                                        for _ in 0..(old_len - new_len) {
                                             print!(" ");
                                         }
 
@@ -243,20 +246,17 @@ async fn keyboard_task() {
                                     let (_clear_len, new_text) = shell.redraw_line();
                                     let new_len = new_text.len();
                                     let cursor_pos = shell.get_cursor_pos();
-                                    let chars_to_clear = old_len - new_len;
 
                                     interrupts::without_interrupts(|| {
                                         let mut writer = WRITER.lock();
-                                        // Move back to start of buffer
-                                        for _ in 0..old_len {
-                                            writer.move_cursor_left();
-                                        }
+                                        // Move cursor to start of buffer (after prompt "> ")
+                                        writer.set_cursor_column(2);
                                         drop(writer);
 
                                         // Print new text
                                         print!("{}", new_text);
-                                        // Clear remaining old characters with spaces
-                                        for _ in 0..chars_to_clear {
+                                        // Clear remaining old characters
+                                        for _ in 0..(old_len - new_len) {
                                             print!(" ");
                                         }
 
@@ -308,10 +308,8 @@ async fn keyboard_task() {
 
                                     interrupts::without_interrupts(|| {
                                         let mut writer = WRITER.lock();
-                                        // Move back to start of buffer
-                                        for _ in 0..old_len {
-                                            writer.move_cursor_left();
-                                        }
+                                        // Move cursor to start of buffer (after prompt "> ")
+                                        writer.set_cursor_column(2);
                                         drop(writer);
 
                                         // Print new command
@@ -337,10 +335,8 @@ async fn keyboard_task() {
 
                                     interrupts::without_interrupts(|| {
                                         let mut writer = WRITER.lock();
-                                        // Move back to start of buffer
-                                        for _ in 0..old_len {
-                                            writer.move_cursor_left();
-                                        }
+                                        // Move cursor to start of buffer (after prompt "> ")
+                                        writer.set_cursor_column(2);
                                         drop(writer);
 
                                         // Print new command
@@ -367,10 +363,8 @@ async fn keyboard_task() {
 
                                     interrupts::without_interrupts(|| {
                                         let mut writer = WRITER.lock();
-                                        // Move back to start of buffer
-                                        for _ in 0..old_len {
-                                            writer.move_cursor_left();
-                                        }
+                                        // Move cursor to start of buffer (after prompt "> ")
+                                        writer.set_cursor_column(2);
                                         drop(writer);
 
                                         // Print completed command
