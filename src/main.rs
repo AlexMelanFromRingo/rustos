@@ -172,7 +172,7 @@ async fn keyboard_task() {
                             KeyCode::ArrowUp => {
                                 if let Some(cmd) = shell.history_up() {
                                     // Clear current line
-                                    let buffer_len = shell.get_buffer().len();
+                                    let buffer_len = shell.buffer_len();
                                     for _ in 0..buffer_len {
                                         interrupts::without_interrupts(|| {
                                             WRITER.lock().write_byte(0x08);
@@ -186,7 +186,7 @@ async fn keyboard_task() {
                             KeyCode::ArrowDown => {
                                 if let Some(cmd) = shell.history_down() {
                                     // Clear current line
-                                    let buffer_len = shell.get_buffer().len();
+                                    let buffer_len = shell.buffer_len();
                                     for _ in 0..buffer_len {
                                         interrupts::without_interrupts(|| {
                                             WRITER.lock().write_byte(0x08);
@@ -195,6 +195,21 @@ async fn keyboard_task() {
                                     // Print new command
                                     print!("{}", cmd);
                                     shell.set_buffer(cmd);
+                                }
+                            }
+                            KeyCode::Tab => {
+                                // Autocomplete command
+                                if let Some(completed) = shell.autocomplete() {
+                                    // Clear current buffer visually
+                                    let old_len = shell.buffer_len();
+                                    for _ in 0..old_len {
+                                        interrupts::without_interrupts(|| {
+                                            WRITER.lock().write_byte(0x08);
+                                        });
+                                    }
+                                    // Print completed command
+                                    print!("{}", completed);
+                                    shell.set_buffer(completed);
                                 }
                             }
                             _ => {} // Ignore other special keys

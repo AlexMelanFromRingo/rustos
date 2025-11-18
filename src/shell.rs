@@ -50,6 +50,44 @@ impl Shell {
         self.buffer.clear();
     }
 
+    pub fn buffer_len(&self) -> usize {
+        self.buffer.len()
+    }
+
+    /// Try to autocomplete the current buffer
+    pub fn autocomplete(&mut self) -> Option<String> {
+        let partial = self.buffer.trim();
+        if partial.is_empty() {
+            return None;
+        }
+
+        // List of available commands
+        let commands = [
+            "help", "clear", "echo", "hello", "uptime", "time",
+            "meminfo", "version", "history", "shutdown", "reboot",
+        ];
+
+        // Find matching commands
+        let matches: Vec<&str> = commands
+            .iter()
+            .filter(|cmd| cmd.starts_with(partial))
+            .copied()
+            .collect();
+
+        match matches.len() {
+            0 => None,  // No matches
+            1 => {
+                // Single match - complete it
+                Some(matches[0].to_string())
+            }
+            _ => {
+                // Multiple matches - return first for now
+                // TODO: cycle through matches on repeated Tab
+                Some(matches[0].to_string())
+            }
+        }
+    }
+
     /// Navigate up in command history
     pub fn history_up(&mut self) -> Option<String> {
         if self.history.is_empty() {
@@ -140,7 +178,11 @@ impl Shell {
         println!("  shutdown  - Shutdown the system");
         println!("  reboot    - Reboot the system");
         println!();
-        println!("Use UP/DOWN arrows to navigate command history");
+        println!("Keyboard shortcuts:");
+        println!("  UP/DOWN   - Navigate command history");
+        println!("  TAB       - Autocomplete command");
+        println!("  ESC       - Clear current input line (not implemented)");
+        println!("  Backspace - Delete previous character");
     }
 
     fn cmd_clear(&self) {
