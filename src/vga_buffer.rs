@@ -184,6 +184,27 @@ impl Writer {
         self.column_position = 0;
         self.update_cursor();
     }
+
+    /// Set foreground color for text output
+    pub fn set_color(&mut self, foreground: Color, background: Color) {
+        self.color_code = ColorCode::new(foreground, background);
+    }
+
+    /// Get current foreground and background colors
+    pub fn get_color(&self) -> (Color, Color) {
+        let code = self.color_code.0;
+        let foreground = code & 0x0F;
+        let background = (code >> 4) & 0x0F;
+        (
+            unsafe { core::mem::transmute(foreground) },
+            unsafe { core::mem::transmute(background) },
+        )
+    }
+
+    /// Reset to default colors (Yellow on Black)
+    pub fn reset_color(&mut self) {
+        self.color_code = ColorCode::new(Color::Yellow, Color::Black);
+    }
 }
 
 impl fmt::Write for Writer {

@@ -463,6 +463,8 @@ impl Shell {
     fn cmd_ls(&self) {
         use crate::fs::ramdisk::RAMDISK;
         use crate::fs::vfs::FileSystem;
+        use crate::vga_buffer::{WRITER, Color};
+        use x86_64::instructions::interrupts;
 
         let ramdisk = RAMDISK.lock();
         let files = ramdisk.list();
@@ -474,7 +476,29 @@ impl Shell {
 
         println!("Files ({} files, {} bytes used):", files.len(), ramdisk.used_space());
         for file in files {
-            println!("  {} - {} bytes", file.name, file.size);
+            // Print filename in cyan
+            interrupts::without_interrupts(|| {
+                WRITER.lock().set_color(Color::LightCyan, Color::Black);
+            });
+            print!("  {}", file.name);
+
+            // Print " - " in default color
+            interrupts::without_interrupts(|| {
+                WRITER.lock().reset_color();
+            });
+            print!(" - ");
+
+            // Print size in light green
+            interrupts::without_interrupts(|| {
+                WRITER.lock().set_color(Color::LightGreen, Color::Black);
+            });
+            print!("{}", file.size);
+
+            // Reset color and print " bytes"
+            interrupts::without_interrupts(|| {
+                WRITER.lock().reset_color();
+            });
+            println!(" bytes");
         }
     }
 
@@ -897,11 +921,25 @@ impl Shell {
 
                             if search_line.contains(&search_pattern) {
                                 match_count += 1;
+
+                                // Print with colored highlighting
+                                use crate::vga_buffer::{WRITER, Color};
+                                use x86_64::instructions::interrupts;
+
                                 if show_line_numbers {
-                                    println!("{}:{}", line_num + 1, line);
-                                } else {
-                                    println!("{}", line);
+                                    // Print line number in green
+                                    interrupts::without_interrupts(|| {
+                                        WRITER.lock().set_color(Color::LightGreen, Color::Black);
+                                    });
+                                    print!("{}:", line_num + 1);
+                                    interrupts::without_interrupts(|| {
+                                        WRITER.lock().reset_color();
+                                    });
                                 }
+
+                                // Highlight matches in red
+                                self.print_highlighted(line, pattern, case_insensitive);
+                                println!();
                             }
                         }
 
@@ -1097,6 +1135,52 @@ impl Shell {
             println!("FAT32 filesystem unmounted");
         } else {
             println!("No FAT32 filesystem is mounted");
+        }
+    }
+
+    /// Print text with highlighted pattern
+    fn print_highlighted(&self, text: &str, pattern: &str, case_insensitive: bool) {
+        use crate::vga_buffer::{WRITER, Color};
+        use x86_64::instructions::interrupts;
+
+        let search_text = if case_insensitive {
+            text.to_lowercase()
+        } else {
+            text.to_string()
+        };
+
+        let search_pattern = if case_insensitive {
+            pattern.to_lowercase()
+        } else {
+            pattern.to_string()
+        };
+
+        let mut last_end = 0;
+
+        while let Some(pos) = search_text[last_end..].find(&search_pattern) {
+            let start = last_end + pos;
+            let end = start + pattern.len();
+
+            // Print text before match (normal color)
+            if start > last_end {
+                print!("{}", &text[last_end..start]);
+            }
+
+            // Print match (red color)
+            interrupts::without_interrupts(|| {
+                WRITER.lock().set_color(Color::LightRed, Color::Black);
+            });
+            print!("{}", &text[start..end]);
+            interrupts::without_interrupts(|| {
+                WRITER.lock().reset_color();
+            });
+
+            last_end = end;
+        }
+
+        // Print remaining text
+        if last_end < text.len() {
+            print!("{}", &text[last_end..]);
         }
     }
 
