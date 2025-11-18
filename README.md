@@ -112,7 +112,7 @@ sudo dd if=rustos.bin of=/dev/sdX && sync
 ```
 rustos/
 ├── src/
-│   ├── main.rs              # Точка входа ядра
+│   ├── main.rs              # Точка входа ядра (keyboard input с абсолютным cursor positioning)
 │   ├── lib.rs               # Библиотека для переиспользования кода
 │   ├── vga_buffer.rs        # VGA текстовый режим с hardware cursor
 │   ├── serial.rs            # Serial port для тестов
@@ -133,10 +133,14 @@ rustos/
 │   │   ├── mod.rs           # Process management
 │   │   ├── context.rs       # Context switching (asm)
 │   │   └── scheduler.rs     # Process scheduler (round-robin)
+│   ├── drivers/
+│   │   ├── mod.rs           # Hardware drivers module
+│   │   └── ata.rs           # IDE/ATA PIO disk driver
 │   └── fs/
 │       ├── mod.rs           # Filesystem module
 │       ├── vfs.rs           # VFS - Virtual File System trait и типы
-│       └── ramdisk.rs       # RAM disk - in-memory файловая система
+│       ├── ramdisk.rs       # RAM disk - in-memory файловая система
+│       └── fat32.rs         # FAT32 filesystem (read-only)
 ├── tests/
 │   ├── basic_boot.rs        # Integration тест загрузки
 │   ├── should_panic.rs      # Тест обработки паник
@@ -193,9 +197,18 @@ rustos/
 - Каждый символ занимает 2 байта (ASCII код + цветовой код)
 - Поддержка 16 цветов для текста и фона
 - Автоматическая прокрутка при заполнении экрана
-- Hardware cursor через VGA порты 0x3D4/0x3D5
+- **Hardware cursor positioning:**
+  - VGA использует 16-битную абсолютную адресацию курсора
+  - Позиция = (row × 80) + column для стандартного 80×25 режима
+  - Управление через порты 0x3D4 (Command Register) и 0x3D5 (Data Register)
+  - Cursor Location High Register (14) и Low Register (15)
+  - Методы: set_cursor_column(), get_cursor_column(), move_cursor_left/right()
 - Поддержка Backspace и расширенных символов
 - Безопасная абстракция поверх небезопасных операций
+- **Абсолютное vs относительное позиционирование:**
+  - Абсолютное (set_cursor_column) - гарантирует точную позицию, предотвращает glitches
+  - Относительное (move_cursor_left/right) - может привести к выходу за границы при многократных вызовах
+  - В RustOS используется абсолютное позиционирование для всех операций редактирования
 
 ### Управление питанием (Stage 8)
 
@@ -216,6 +229,10 @@ rustos/
 - Tab-автодополнение команд и имён файлов (показывает все совпадения при нескольких вариантах)
 - Защита от удаления приглашения (backspace блокируется на пустом буфере)
 - Фильтрация escape-последовательностей (только printable ASCII)
+- **Абсолютное позиционирование курсора** - предотвращает visual glitches при редактировании
+  - Курсор всегда устанавливается через set_cursor_column(2 + position)
+  - Column 0-1: приглашение "> ", Column 2+: пользовательский ввод
+  - Защита от "уезжания" курсора за границы буфера
 - Системные команды: help, clear, echo, version, uptime, time, meminfo, history, shutdown, reboot
 - Команды управления процессами: ps, kill
 - Файловые команды: ls, cat, write, rm, touch, cp, mv, head, tail, wc, grep

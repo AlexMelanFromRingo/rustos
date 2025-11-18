@@ -143,38 +143,56 @@ async fn keyboard_task() {
                             shell.execute();
                             shell.print_prompt();
                         } else if character == '\u{0008}' {
-                            // Backspace as Unicode character
+                            // Backspace as Unicode character - use absolute positioning
+                            let old_len = shell.buffer_len();
                             if shell.backspace() {
-                                // Redraw line
                                 let (_clear_len, new_text) = shell.redraw_line();
-                                // Clear old line
-                                for _ in 0..new_text.len() + 1 {
-                                    interrupts::without_interrupts(|| {
-                                        WRITER.lock().write_byte(0x08);
-                                    });
-                                }
-                                // Print new text and position cursor
-                                print!("{}", new_text);
+                                let new_len = new_text.len();
                                 let cursor_pos = shell.get_cursor_pos();
-                                let chars_to_left = new_text.len() - cursor_pos;
-                                for _ in 0..chars_to_left {
-                                    interrupts::without_interrupts(|| {
-                                        WRITER.lock().write_byte(0x08);
-                                    });
-                                }
+
+                                interrupts::without_interrupts(|| {
+                                    let mut writer = WRITER.lock();
+                                    // Move cursor to start of buffer (after prompt "> ")
+                                    writer.set_cursor_column(2);
+                                    drop(writer);
+
+                                    // Print new text
+                                    print!("{}", new_text);
+                                    // Clear remaining old characters
+                                    for _ in 0..(old_len - new_len) {
+                                        print!(" ");
+                                    }
+
+                                    // Set cursor to correct position
+                                    writer = WRITER.lock();
+                                    writer.set_cursor_column(2 + cursor_pos);
+                                });
                             }
                         } else if character == '\t' {
-                            // Tab for autocomplete
+                            // Tab for autocomplete - use absolute positioning
+                            let old_len = shell.buffer_len();
                             if let Some(completed) = shell.autocomplete() {
-                                // Clear current buffer visually
-                                let old_len = shell.buffer_len();
-                                for _ in 0..old_len {
-                                    interrupts::without_interrupts(|| {
-                                        WRITER.lock().write_byte(0x08);
-                                    });
-                                }
-                                // Print completed command
-                                print!("{}", completed);
+                                let new_len = completed.len();
+
+                                interrupts::without_interrupts(|| {
+                                    let mut writer = WRITER.lock();
+                                    // Move cursor to start of buffer (after prompt "> ")
+                                    writer.set_cursor_column(2);
+                                    drop(writer);
+
+                                    // Print completed command
+                                    print!("{}", completed);
+                                    // Clear remaining old characters if new is shorter
+                                    if new_len < old_len {
+                                        for _ in 0..(old_len - new_len) {
+                                            print!(" ");
+                                        }
+                                    }
+
+                                    // Set cursor to end of completed text
+                                    writer = WRITER.lock();
+                                    writer.set_cursor_column(2 + new_len);
+                                });
                                 shell.set_buffer(completed);
                             }
                         } else if character >= ' ' && character <= '~' {
@@ -267,18 +285,24 @@ async fn keyboard_task() {
                                 }
                             }
                             KeyCode::ArrowLeft => {
-                                // Move cursor left without erasing
+                                // Move cursor left using absolute positioning
                                 if shell.move_cursor_left() {
+                                    let cursor_pos = shell.get_cursor_pos();
                                     interrupts::without_interrupts(|| {
-                                        WRITER.lock().move_cursor_left();
+                                        let mut writer = WRITER.lock();
+                                        // Set cursor to absolute position (prompt + cursor_pos)
+                                        writer.set_cursor_column(2 + cursor_pos);
                                     });
                                 }
                             }
                             KeyCode::ArrowRight => {
-                                // Move cursor right without writing
+                                // Move cursor right using absolute positioning
                                 if shell.move_cursor_right() {
+                                    let cursor_pos = shell.get_cursor_pos();
                                     interrupts::without_interrupts(|| {
-                                        WRITER.lock().move_cursor_right();
+                                        let mut writer = WRITER.lock();
+                                        // Set cursor to absolute position (prompt + cursor_pos)
+                                        writer.set_cursor_column(2 + cursor_pos);
                                     });
                                 }
                             }
