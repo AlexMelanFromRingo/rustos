@@ -16,6 +16,7 @@
 - ✅ Управление питанием (shutdown/reboot через ACPI)
 - ✅ Интерактивный shell с редактируемым буфером и навигацией курсора
 - ✅ RAM disk - простая in-memory файловая система
+- ✅ FAT32 - чтение с диска через IDE/ATA PIO driver (mount/umount)
 - ✅ Базовые Unix-утилиты (ls, cat, cp, mv, rm, touch, head, tail, wc, write, grep)
 - ✅ Упрощённые pipes (конвейеры) для связывания команд
 - ✅ Встроенный текстовый редактор (edit) для построчного редактирования
@@ -171,7 +172,7 @@ rustos/
 - **Stage 11: Tab Autocomplete** ✅ - Автодополнение команд
 - **Stage 12: VFS** ✅ - Virtual File System (абстракция файловой системы)
 - **Stage 13: RAM Disk** ✅ - In-memory файловая система (ls, cat, write, rm)
-- **Stage 14: FAT32** 📋 - Чтение FAT32 с диска
+- **Stage 14: FAT32** ✅ - Чтение FAT32 с диска (IDE/ATA PIO driver, boot sector, directory parsing)
 - **Stage 15: Context Switching** ✅ - Переключение между процессами
 - **Stage 16: Process Scheduler** ✅ - Планировщик процессов (round-robin, preemptive)
 - **Stage 17: User Space** 📋 - Запуск кода в ring 3
@@ -266,6 +267,17 @@ rustos/
 - Global Mutex-защищенный singleton (RAMDISK)
 - Shell команды: ls, cat, write, rm
 - Поддержка UTF-8 текста и бинарных данных (hex dump)
+
+**FAT32 - Чтение с диска (Stage 14):**
+- IDE/ATA PIO driver для чтения секторов с диска
+- Поддержка primary IDE bus (порты 0x1F0-0x1F7)
+- Парсинг FAT32 boot sector (BPB и Extended Boot Record)
+- Чтение FAT таблицы и traversal цепочек кластеров
+- Парсинг directory entries (short file names)
+- Read-only доступ к FAT32 файловым системам
+- Реализует FileSystem trait из VFS
+- Shell команды: mount/umount для монтирования FAT32 дисков
+- Тестирование через QEMU с FAT32 disk images
 
 ### Память
 

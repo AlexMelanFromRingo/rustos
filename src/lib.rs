@@ -23,12 +23,14 @@ pub mod shell;
 pub mod fs;
 pub mod process;
 pub mod editor;
+pub mod drivers;
 
 pub fn init() {
     gdt::init();
     interrupts::init_idt();
     interrupts::init_pics();
     x86_64::instructions::interrupts::enable();
+    drivers::ata::init();
 }
 
 pub fn hlt_loop() -> ! {

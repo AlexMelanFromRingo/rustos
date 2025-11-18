@@ -147,8 +147,8 @@ impl Shell {
             let commands = [
                 "cat", "clear", "cp", "echo", "edit", "grep", "head",
                 "hello", "help", "history", "kill", "ls", "meminfo",
-                "mv", "ps", "reboot", "rm", "shutdown", "tail", "time",
-                "touch", "uptime", "version", "wc", "write",
+                "mount", "mv", "ps", "reboot", "rm", "shutdown", "tail", "time",
+                "touch", "umount", "uptime", "version", "wc", "write",
             ];
 
             let matches: Vec<&str> = commands
@@ -310,6 +310,8 @@ impl Shell {
             "tail" => self.cmd_tail(args),
             "wc" => self.cmd_wc(args),
             "edit" => self.cmd_edit(args),
+            "mount" => self.cmd_mount(args),
+            "umount" => self.cmd_umount(args),
             _ => {
                 println!("Unknown command: '{}'. Type 'help' for available commands.", cmd);
             }
@@ -347,6 +349,8 @@ impl Shell {
         println!("  wc        - Count lines/words/bytes (usage: wc filename)");
         println!("  grep      - Search for pattern in file (usage: grep [-i] [-n] pattern file)");
         println!("  edit      - Simple text editor (usage: edit filename)");
+        println!("  mount     - Mount FAT32 disk (usage: mount fat32)");
+        println!("  umount    - Unmount FAT32 disk");
         println!();
         println!("Pipes (command chaining):");
         println!("  cat <file> | grep <pattern>  - Search in file");
@@ -1049,6 +1053,48 @@ impl Shell {
             println!("  cat <file> | grep <pattern>");
             println!("  cat <file> | wc");
             println!("  ls | grep <pattern>");
+        }
+    }
+
+    fn cmd_mount(&self, args: &[&str]) {
+        if args.is_empty() {
+            println!("Usage: mount <filesystem>");
+            println!("Supported filesystems: fat32");
+            return;
+        }
+
+        match args[0] {
+            "fat32" => {
+                use crate::fs::fat32;
+
+                println!("Attempting to mount FAT32 filesystem...");
+                match fat32::init() {
+                    Ok(_) => {
+                        println!("FAT32 filesystem mounted successfully!");
+                        println!("Use 'ls' to list files from the disk.");
+                    }
+                    Err(e) => {
+                        println!("Failed to mount FAT32 filesystem: {}", e);
+                        println!("Make sure a FAT32-formatted disk is attached.");
+                    }
+                }
+            }
+            _ => {
+                println!("Unknown filesystem: '{}'", args[0]);
+                println!("Supported filesystems: fat32");
+            }
+        }
+    }
+
+    fn cmd_umount(&self, _args: &[&str]) {
+        use crate::fs::fat32::FAT32;
+
+        let mut fat32 = FAT32.lock();
+        if fat32.is_some() {
+            *fat32 = None;
+            println!("FAT32 filesystem unmounted");
+        } else {
+            println!("No FAT32 filesystem is mounted");
         }
     }
 }
