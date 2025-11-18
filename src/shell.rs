@@ -1,4 +1,5 @@
 /// Simple command-line shell for RustOS
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use crate::{print, println};
@@ -357,6 +358,12 @@ impl Shell {
             self.save_history();
         }
 
+        // Check for output redirection
+        if command.contains('>') {
+            self.execute_with_redirection(&command);
+            return;
+        }
+
         // Check for pipes
         if command.contains('|') {
             self.execute_pipeline(&command);
@@ -438,14 +445,22 @@ impl Shell {
         println!("  mount     - Mount FAT32 disk (usage: mount fat32)");
         println!("  umount    - Unmount FAT32 disk");
         println!();
-        println!("Pipes (command chaining):");
+        println!("Pipes and redirection:");
         println!("  cat <file> | grep <pattern>  - Search in file");
         println!("  cat <file> | wc              - Count lines/words/bytes");
         println!("  ls | grep <pattern>          - Filter file list");
+        println!("  echo text > file             - Write to file (overwrite)");
+        println!("  echo text >> file            - Append to file");
+        println!("  cat file > newfile           - Copy file contents");
+        println!("  ls > filelist.txt            - Save file list");
         println!();
         println!("Keyboard shortcuts:");
         println!("  LEFT/RIGHT - Move cursor left/right");
         println!("  HOME/END   - Jump to start/end of line");
+        println!("  Ctrl+A     - Jump to beginning of line");
+        println!("  Ctrl+E     - Jump to end of line");
+        println!("  Ctrl+U     - Delete from cursor to beginning");
+        println!("  Ctrl+W     - Delete word backward");
         println!("  UP/DOWN    - Navigate command history");
         println!("  TAB        - Autocomplete command or filename");
         println!("  Backspace  - Delete previous character");
@@ -1041,6 +1056,122 @@ impl Shell {
             }
             Err(_) => {
                 println!("Error: File '{}' not found", filename);
+            }
+        }
+    }
+
+    /// Execute command with output redirection (>, >>)
+    fn execute_with_redirection(&self, command_line: &str) {
+        use crate::fs::ramdisk::RAMDISK;
+        use crate::fs::vfs::FileSystem;
+
+        // Determine redirect type (> or >>)
+        let (append, parts) = if command_line.contains(">>") {
+            (true, command_line.split(">>").collect::<Vec<&str>>())
+        } else {
+            (false, command_line.split('>').collect::<Vec<&str>>())
+        };
+
+        if parts.len() != 2 {
+            println!("Error: Invalid redirection syntax");
+            return;
+        }
+
+        let command = parts[0].trim();
+        let filename = parts[1].trim();
+
+        if filename.is_empty() {
+            println!("Error: No output file specified");
+            return;
+        }
+
+        // Parse command and arguments
+        let cmd_parts: Vec<&str> = command.split_whitespace().collect();
+        if cmd_parts.is_empty() {
+            println!("Error: No command specified");
+            return;
+        }
+
+        let cmd = cmd_parts[0];
+        let args = &cmd_parts[1..];
+
+        // Capture output based on command
+        let output = match cmd {
+            "echo" => {
+                // Echo command - join args with spaces
+                Some(args.join(" "))
+            }
+            "cat" => {
+                // Cat command - read file contents
+                if args.is_empty() {
+                    println!("Usage: cat <filename>");
+                    return;
+                }
+                let ramdisk = RAMDISK.lock();
+                match ramdisk.read(args[0]) {
+                    Ok(content) => {
+                        match core::str::from_utf8(&content) {
+                            Ok(text) => Some(text.to_string()),
+                            Err(_) => {
+                                println!("Error: File '{}' is binary", args[0]);
+                                return;
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        println!("Error: File '{}' not found", args[0]);
+                        return;
+                    }
+                }
+            }
+            "ls" => {
+                // List files
+                let ramdisk = RAMDISK.lock();
+                let files = ramdisk.list();
+                let mut output = String::new();
+                for file in files {
+                    output.push_str(&format!("{}  {} bytes\n", file.name, file.size));
+                }
+                Some(output)
+            }
+            _ => {
+                println!("Error: Command '{}' does not support output redirection", cmd);
+                println!("Supported: echo, cat, ls");
+                return;
+            }
+        };
+
+        if let Some(content) = output {
+            let mut ramdisk = RAMDISK.lock();
+
+            // Handle append vs overwrite
+            let final_content = if append {
+                // Read existing content and append
+                match ramdisk.read(filename) {
+                    Ok(existing) => {
+                        match core::str::from_utf8(&existing) {
+                            Ok(existing_text) => {
+                                format!("{}{}\n", existing_text, content)
+                            }
+                            Err(_) => {
+                                println!("Error: Cannot append to binary file");
+                                return;
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        // File doesn't exist, just write new content
+                        format!("{}\n", content)
+                    }
+                }
+            } else {
+                // Overwrite
+                format!("{}\n", content)
+            };
+
+            match ramdisk.write(filename, final_content.as_bytes().to_vec()) {
+                Ok(_) => println!("Output written to '{}'", filename),
+                Err(_) => println!("Error writing to file '{}'", filename),
             }
         }
     }
