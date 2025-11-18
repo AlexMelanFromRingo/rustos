@@ -16,14 +16,57 @@ pub struct Shell {
 
 impl Shell {
     pub fn new() -> Self {
-        Shell {
+        let mut shell = Shell {
             buffer: String::new(),
             cursor_pos: 0,
             prompt: "> ",
             history: Vec::new(),
             history_index: None,
             saved_buffer: String::new(),
+        };
+
+        // Load command history from file
+        shell.load_history();
+
+        shell
+    }
+
+    /// Load command history from RAM disk
+    fn load_history(&mut self) {
+        use crate::fs::ramdisk::RAMDISK;
+        use crate::fs::vfs::FileSystem;
+
+        let ramdisk = RAMDISK.lock();
+
+        if let Ok(data) = ramdisk.read(".history") {
+            // Parse history file (one command per line)
+            let history_text = core::str::from_utf8(&data).unwrap_or("");
+
+            for line in history_text.lines() {
+                if !line.is_empty() && self.history.len() < MAX_HISTORY {
+                    self.history.push(line.to_string());
+                }
+            }
         }
+        // If file doesn't exist, start with empty history
+    }
+
+    /// Save command history to RAM disk
+    fn save_history(&self) {
+        use crate::fs::ramdisk::RAMDISK;
+        use crate::fs::vfs::FileSystem;
+
+        let mut ramdisk = RAMDISK.lock();
+
+        // Create history file content (one command per line)
+        let mut content = String::new();
+        for cmd in &self.history {
+            content.push_str(cmd);
+            content.push('\n');
+        }
+
+        // Write to file (ignore errors - history is not critical)
+        let _ = ramdisk.write(".history", content.as_bytes().to_vec());
     }
 
     pub fn print_prompt(&self) {
@@ -310,6 +353,8 @@ impl Shell {
             if self.history.len() > MAX_HISTORY {
                 self.history.remove(0);
             }
+            // Save history to disk after adding new command
+            self.save_history();
         }
 
         // Check for pipes
