@@ -143,11 +143,13 @@ async fn keyboard_task() {
                             shell.execute();
                             shell.print_prompt();
                         } else if character == '\u{0008}' {
-                            // Backspace as Unicode character
-                            shell.backspace();
-                            interrupts::without_interrupts(|| {
-                                WRITER.lock().write_byte(0x08);
-                            });
+                            // Backspace as Unicode character - only if buffer not empty
+                            if !shell.get_buffer().is_empty() {
+                                shell.backspace();
+                                interrupts::without_interrupts(|| {
+                                    WRITER.lock().write_byte(0x08);
+                                });
+                            }
                         } else if character >= ' ' && character <= '~' {
                             // Only printable ASCII
                             print!("{}", character);
@@ -159,10 +161,13 @@ async fn keyboard_task() {
                         use pc_keyboard::KeyCode;
                         match key_code {
                             KeyCode::Backspace => {
-                                shell.backspace();
-                                interrupts::without_interrupts(|| {
-                                    WRITER.lock().write_byte(0x08);
-                                });
+                                // Only if buffer not empty - prevents deleting prompt
+                                if !shell.get_buffer().is_empty() {
+                                    shell.backspace();
+                                    interrupts::without_interrupts(|| {
+                                        WRITER.lock().write_byte(0x08);
+                                    });
+                                }
                             }
                             KeyCode::ArrowUp => {
                                 if let Some(cmd) = shell.history_up() {
