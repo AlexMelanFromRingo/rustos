@@ -65,6 +65,7 @@ impl Shell {
         let commands = [
             "help", "clear", "echo", "hello", "uptime", "time",
             "meminfo", "version", "history", "shutdown", "reboot",
+            "ls", "cat", "write", "rm",
         ];
 
         // Find matching commands
@@ -158,6 +159,10 @@ impl Shell {
             "version" => self.cmd_version(),
             "time" => self.cmd_time(),
             "history" => self.cmd_history(),
+            "ls" => self.cmd_ls(),
+            "cat" => self.cmd_cat(args),
+            "write" => self.cmd_write(args),
+            "rm" => self.cmd_rm(args),
             _ => {
                 println!("Unknown command: '{}'. Type 'help' for available commands.", cmd);
             }
@@ -178,10 +183,15 @@ impl Shell {
         println!("  shutdown  - Shutdown the system");
         println!("  reboot    - Reboot the system");
         println!();
+        println!("File system commands:");
+        println!("  ls        - List files in RAM disk");
+        println!("  cat       - Display file contents");
+        println!("  write     - Create/write file (usage: write filename content)");
+        println!("  rm        - Remove file");
+        println!();
         println!("Keyboard shortcuts:");
         println!("  UP/DOWN   - Navigate command history");
         println!("  TAB       - Autocomplete command");
-        println!("  ESC       - Clear current input line (not implemented)");
         println!("  Backspace - Delete previous character");
     }
 
@@ -257,6 +267,7 @@ impl Shell {
         println!("  - Async/await cooperative multitasking");
         println!("  - Power management (shutdown/reboot)");
         println!("  - Interactive shell with command history");
+        println!("  - RAM disk filesystem");
     }
 
     fn cmd_time(&self) {
@@ -273,6 +284,92 @@ impl Shell {
         println!("Command history:");
         for (i, cmd) in self.history.iter().enumerate() {
             println!("  {} {}", i + 1, cmd);
+        }
+    }
+
+    fn cmd_ls(&self) {
+        use crate::fs::ramdisk::RAMDISK;
+
+        let ramdisk = RAMDISK.lock();
+        let files = ramdisk.list();
+
+        if files.is_empty() {
+            println!("No files");
+            return;
+        }
+
+        println!("Files ({} files, {} bytes used):", files.len(), ramdisk.used_space());
+        for file in files {
+            println!("  {} - {} bytes", file.name, file.size());
+        }
+    }
+
+    fn cmd_cat(&self, args: &[&str]) {
+        use crate::fs::ramdisk::RAMDISK;
+
+        if args.is_empty() {
+            println!("Usage: cat <filename>");
+            return;
+        }
+
+        let filename = args[0];
+        let ramdisk = RAMDISK.lock();
+
+        match ramdisk.read(filename) {
+            Some(content) => {
+                // Try to display as UTF-8 text
+                match core::str::from_utf8(content) {
+                    Ok(text) => println!("{}", text),
+                    Err(_) => {
+                        // Display as hex if not valid UTF-8
+                        println!("Binary file ({} bytes):", content.len());
+                        for (i, byte) in content.iter().enumerate() {
+                            if i % 16 == 0 {
+                                print!("\n{:04x}: ", i);
+                            }
+                            print!("{:02x} ", byte);
+                        }
+                        println!();
+                    }
+                }
+            }
+            None => println!("File not found: {}", filename),
+        }
+    }
+
+    fn cmd_write(&self, args: &[&str]) {
+        use crate::fs::ramdisk::RAMDISK;
+
+        if args.len() < 2 {
+            println!("Usage: write <filename> <content>");
+            return;
+        }
+
+        let filename = args[0];
+        let content = args[1..].join(" ");
+        let bytes = content.as_bytes().to_vec();
+
+        let mut ramdisk = RAMDISK.lock();
+        match ramdisk.write(filename, bytes) {
+            Ok(_) => println!("File '{}' written ({} bytes)", filename, content.len()),
+            Err(e) => println!("Error writing file: {}", e),
+        }
+    }
+
+    fn cmd_rm(&self, args: &[&str]) {
+        use crate::fs::ramdisk::RAMDISK;
+
+        if args.is_empty() {
+            println!("Usage: rm <filename>");
+            return;
+        }
+
+        let filename = args[0];
+        let mut ramdisk = RAMDISK.lock();
+
+        match ramdisk.delete(filename) {
+            Ok(_) => println!("File '{}' deleted", filename),
+            Err(e) => println!("Error: {}", e),
         }
     }
 }
