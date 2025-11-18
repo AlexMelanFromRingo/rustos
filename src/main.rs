@@ -127,7 +127,7 @@ async fn keyboard_task() {
     let mut keyboard = Keyboard::new(
         ScancodeSet1::new(),
         layouts::Us104Key,
-        HandleControl::Ignore,
+        HandleControl::MapLettersToUnicode,
     );
 
     let mut shell = Shell::new();
@@ -142,6 +142,72 @@ async fn keyboard_task() {
                             println!();
                             shell.execute();
                             shell.print_prompt();
+                        } else if character == '\u{0001}' {
+                            // Ctrl+A - Move to beginning of line
+                            shell.move_cursor_home();
+                            interrupts::without_interrupts(|| {
+                                let mut writer = WRITER.lock();
+                                writer.set_cursor_column(2);
+                            });
+                        } else if character == '\u{0005}' {
+                            // Ctrl+E - Move to end of line
+                            let buffer_len = shell.buffer_len();
+                            shell.move_cursor_end();
+                            interrupts::without_interrupts(|| {
+                                let mut writer = WRITER.lock();
+                                writer.set_cursor_column(2 + buffer_len);
+                            });
+                        } else if character == '\u{0015}' {
+                            // Ctrl+U - Delete from cursor to beginning
+                            let old_len = shell.buffer_len();
+                            if shell.delete_to_beginning() {
+                                let (_clear_len, new_text) = shell.redraw_line();
+                                let new_len = new_text.len();
+
+                                interrupts::without_interrupts(|| {
+                                    let mut writer = WRITER.lock();
+                                    // Move cursor to start of buffer (after prompt "> ")
+                                    writer.set_cursor_column(2);
+                                    drop(writer);
+
+                                    // Print new text
+                                    print!("{}", new_text);
+                                    // Clear remaining old characters
+                                    for _ in 0..(old_len - new_len) {
+                                        print!(" ");
+                                    }
+
+                                    // Set cursor to beginning (after prompt)
+                                    writer = WRITER.lock();
+                                    writer.set_cursor_column(2);
+                                });
+                            }
+                        } else if character == '\u{0017}' {
+                            // Ctrl+W - Delete word backward
+                            let old_len = shell.buffer_len();
+                            if shell.delete_word_backward() {
+                                let (_clear_len, new_text) = shell.redraw_line();
+                                let new_len = new_text.len();
+                                let cursor_pos = shell.get_cursor_pos();
+
+                                interrupts::without_interrupts(|| {
+                                    let mut writer = WRITER.lock();
+                                    // Move cursor to start of buffer (after prompt "> ")
+                                    writer.set_cursor_column(2);
+                                    drop(writer);
+
+                                    // Print new text
+                                    print!("{}", new_text);
+                                    // Clear remaining old characters
+                                    for _ in 0..(old_len - new_len) {
+                                        print!(" ");
+                                    }
+
+                                    // Set cursor to correct position
+                                    writer = WRITER.lock();
+                                    writer.set_cursor_column(2 + cursor_pos);
+                                });
+                            }
                         } else if character == '\u{0008}' {
                             // Backspace as Unicode character - use absolute positioning
                             let old_len = shell.buffer_len();

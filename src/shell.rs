@@ -120,6 +120,45 @@ impl Shell {
         self.cursor_pos = 0;
     }
 
+    /// Delete from cursor to beginning of line (Ctrl+U)
+    pub fn delete_to_beginning(&mut self) -> bool {
+        if self.cursor_pos == 0 {
+            return false;
+        }
+        self.buffer.drain(..self.cursor_pos);
+        self.cursor_pos = 0;
+        self.history_index = None;
+        true
+    }
+
+    /// Delete word backward from cursor (Ctrl+W)
+    pub fn delete_word_backward(&mut self) -> bool {
+        if self.cursor_pos == 0 {
+            return false;
+        }
+
+        let mut pos = self.cursor_pos;
+
+        // Skip trailing whitespace
+        while pos > 0 && self.buffer.chars().nth(pos - 1).map_or(false, |c| c.is_whitespace()) {
+            pos -= 1;
+        }
+
+        // Delete word characters
+        while pos > 0 && self.buffer.chars().nth(pos - 1).map_or(false, |c| !c.is_whitespace()) {
+            pos -= 1;
+        }
+
+        if pos < self.cursor_pos {
+            self.buffer.drain(pos..self.cursor_pos);
+            self.cursor_pos = pos;
+            self.history_index = None;
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn buffer_len(&self) -> usize {
         self.buffer.len()
     }
