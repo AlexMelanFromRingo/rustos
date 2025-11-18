@@ -212,7 +212,7 @@ rustos/
 - Вставка символов в любую позицию курсора
 - Delete для удаления символа под курсором
 - История команд (до 50 команд) с навигацией стрелками UP/DOWN
-- Tab-автодополнение команд (показывает все совпадения при нескольких вариантах)
+- Tab-автодополнение команд и имён файлов (показывает все совпадения при нескольких вариантах)
 - Защита от удаления приглашения (backspace блокируется на пустом буфере)
 - Фильтрация escape-последовательностей (только printable ASCII)
 - Системные команды: help, clear, echo, version, uptime, time, meminfo, history, shutdown, reboot
@@ -347,7 +347,7 @@ futures-util = "0.3.4"          # Stream utilities для async
 - Динамическая память (fixed-size block allocator, Box/Vec/String)
 - Асинхронность (async/await, executor, waker, cooperative multitasking)
 - Управление питанием (shutdown/reboot через ACPI и PS/2)
-- Интерактивный shell с историей команд и Tab-автодополнением
+- Интерактивный shell с историей команд и Tab-автодополнением (команды и файлы)
 - Virtual File System (VFS) - унифицированный интерфейс для FS
 - RAM disk файловая система с Unix-утилитами
 - Базовые coreutils (ls, cat, cp, mv, rm, touch, head, tail, wc, write, grep)

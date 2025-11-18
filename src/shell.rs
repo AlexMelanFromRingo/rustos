@@ -131,26 +131,71 @@ impl Shell {
             return None;
         }
 
-        // List of available commands
-        let commands = [
-            "cat", "clear", "cp", "echo", "edit", "grep", "head",
-            "hello", "help", "history", "kill", "ls", "meminfo",
-            "mv", "ps", "reboot", "rm", "shutdown", "tail", "time",
-            "touch", "uptime", "version", "wc", "write",
-        ];
+        // Check if we're completing a command or a filename argument
+        let parts: Vec<String> = partial.split_whitespace().map(|s| s.to_string()).collect();
 
-        // Find matching commands
-        let matches: Vec<&str> = commands
+        if parts.len() == 1 {
+            // Autocomplete command name
+            let commands = [
+                "cat", "clear", "cp", "echo", "edit", "grep", "head",
+                "hello", "help", "history", "kill", "ls", "meminfo",
+                "mv", "ps", "reboot", "rm", "shutdown", "tail", "time",
+                "touch", "uptime", "version", "wc", "write",
+            ];
+
+            let matches: Vec<&str> = commands
+                .iter()
+                .filter(|cmd| cmd.starts_with(partial))
+                .copied()
+                .collect();
+
+            match matches.len() {
+                0 => None,
+                1 => Some(matches[0].to_string()),
+                _ => {
+                    println!();
+                    for m in &matches {
+                        print!("{} ", m);
+                    }
+                    println!();
+                    self.print_prompt();
+                    print!("{}", self.buffer);
+                    None
+                }
+            }
+        } else {
+            // Autocomplete filename argument
+            self.autocomplete_filename(parts)
+        }
+    }
+
+    /// Autocomplete filename arguments
+    fn autocomplete_filename(&mut self, parts: Vec<String>) -> Option<String> {
+        use crate::fs::ramdisk::RAMDISK;
+        use crate::fs::vfs::FileSystem;
+
+        // Get the partial filename (last part)
+        let partial_filename = parts.last().map(|s| s.as_str()).unwrap_or("");
+
+        // Get list of files
+        let ramdisk = RAMDISK.lock();
+        let files = ramdisk.list();
+        drop(ramdisk);
+
+        // Find matching filenames
+        let matches: Vec<String> = files
             .iter()
-            .filter(|cmd| cmd.starts_with(partial))
-            .copied()
+            .filter(|f| f.name.starts_with(partial_filename))
+            .map(|f| f.name.clone())
             .collect();
 
         match matches.len() {
-            0 => None,  // No matches
+            0 => None,
             1 => {
-                // Single match - complete it
-                Some(matches[0].to_string())
+                // Single match - rebuild command with completed filename
+                let mut new_parts = parts[..parts.len()-1].to_vec();
+                new_parts.push(matches[0].clone());
+                Some(new_parts.join(" "))
             }
             _ => {
                 // Multiple matches - show all options
@@ -303,7 +348,7 @@ impl Shell {
         println!("  LEFT/RIGHT - Move cursor left/right");
         println!("  HOME/END   - Jump to start/end of line");
         println!("  UP/DOWN    - Navigate command history");
-        println!("  TAB        - Autocomplete command");
+        println!("  TAB        - Autocomplete command or filename");
         println!("  Backspace  - Delete previous character");
         println!("  Delete     - Delete character at cursor");
     }
