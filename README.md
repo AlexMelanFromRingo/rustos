@@ -18,6 +18,9 @@
 - ✅ RAM disk - простая in-memory файловая система
 - ✅ Базовые Unix-утилиты (ls, cat, cp, mv, rm, touch, head, tail, wc, write)
 - ✅ Встроенный текстовый редактор (edit) для построчного редактирования
+- ✅ Переключение контекста (context switching) для многозадачности
+- ✅ Планировщик процессов (round-robin) с вытесняющей многозадачностью
+- ✅ Команды управления процессами (ps, kill)
 - ✅ Система тестирования для bare-metal окружения (включая VFS тесты)
 - ✅ Freestanding binary (не зависит от стандартной библиотеки)
 
@@ -126,7 +129,8 @@ rustos/
 │   │   └── timer.rs         # Async timer
 │   ├── process/
 │   │   ├── mod.rs           # Process management
-│   │   └── context.rs       # Context switching (asm)
+│   │   ├── context.rs       # Context switching (asm)
+│   │   └── scheduler.rs     # Process scheduler (round-robin)
 │   └── fs/
 │       ├── mod.rs           # Filesystem module
 │       ├── vfs.rs           # VFS - Virtual File System trait и типы
@@ -168,7 +172,7 @@ rustos/
 - **Stage 13: RAM Disk** ✅ - In-memory файловая система (ls, cat, write, rm)
 - **Stage 14: FAT32** 📋 - Чтение FAT32 с диска
 - **Stage 15: Context Switching** ✅ - Переключение между процессами
-- **Stage 16: Process Scheduler** 📋 - Планировщик процессов
+- **Stage 16: Process Scheduler** ✅ - Планировщик процессов (round-robin, preemptive)
 - **Stage 17: User Space** 📋 - Запуск кода в ring 3
 
 ## Как это работает
@@ -211,6 +215,7 @@ rustos/
 - Защита от удаления приглашения (backspace блокируется на пустом буфере)
 - Фильтрация escape-последовательностей (только printable ASCII)
 - Системные команды: help, clear, echo, version, uptime, time, meminfo, history, shutdown, reboot
+- Команды управления процессами: ps, kill
 - Файловые команды: ls, cat, write, rm, touch, cp, mv, head, tail, wc
 - Unix-подобные утилиты с поддержкой опций (например, head -n 5 файл)
 - Встроенный текстовый редактор (edit) для построчного редактирования файлов
@@ -225,6 +230,21 @@ rustos/
 - ProcessManager для управления процессами
 - ProcessState: Ready, Running, Blocked, Terminated
 - Основа для кооперативной и вытесняющей многозадачности
+
+### Process Scheduler (Stage 16)
+
+**Планировщик процессов:**
+- Round-robin планировщик с временными квантами
+- Вытесняющая многозадачность (preemptive multitasking) через timer interrupt
+- Очередь готовых процессов (ready queue)
+- Функции для управления процессами:
+  - spawn() - создание нового процесса
+  - yield_cpu() - кооперативная передача управления
+  - block() / unblock() - блокировка и разблокировка процессов
+  - terminate() / exit() - завершение процессов
+- Интеграция с таймером для автоматического переключения
+- Команды shell: ps (список процессов), kill (завершить процесс)
+- Поддержка многозадачности на уровне ядра
 
 ### Файловая система (Stages 12-13)
 
@@ -330,13 +350,14 @@ futures-util = "0.3.4"          # Stream utilities для async
 - RAM disk файловая система с Unix-утилитами
 - Базовые coreutils (ls, cat, cp, mv, rm, touch, head, tail, wc, write)
 - Context switching - переключение между процессами (основа для многозадачности)
+- Process Scheduler - round-robin планировщик с вытесняющей многозадачностью
+- Управление процессами - команды ps и kill для мониторинга и управления процессами
 - Комплексная система тестирования (VFS, heap, integration, panic tests)
 
 ### Планируется 📋
 
 - FAT32 драйвер (чтение файловой системы с диска)
-- Процессы и потоки (настоящая многозадачность с context switching)
-- Process Scheduler (планировщик процессов)
+- grep и pipes - поиск в файлах и конвейеры между командами
 - Пользовательское пространство (user mode processes в ring 3)
 - ACPI расширенная поддержка (обнаружение устройств)
 - Сетевой стек (TCP/IP)

@@ -72,6 +72,9 @@ extern "x86-interrupt" fn timer_interrupt_handler(
 {
     crate::task::timer::tick();
 
+    // Call scheduler tick for preemptive multitasking
+    crate::process::scheduler::tick();
+
     unsafe {
         PICS.lock()
             .notify_end_of_interrupt(InterruptIndex::Timer.as_u8());

@@ -1,5 +1,6 @@
 /// Process management and context switching
 pub mod context;
+pub mod scheduler;
 
 use alloc::vec::Vec;
 use spin::Mutex;
@@ -50,7 +51,7 @@ impl Process {
 /// Process Manager - manages all processes
 pub struct ProcessManager {
     processes: Vec<Process>,
-    current_pid: Option<Pid>,
+    pub current_pid: Option<Pid>,
     next_pid: Pid,
 }
 
@@ -116,6 +117,16 @@ impl ProcessManager {
         if self.current_pid == Some(pid) {
             self.current_pid = None;
         }
+    }
+
+    /// Get all processes
+    pub fn all_processes(&self) -> &Vec<Process> {
+        &self.processes
+    }
+
+    /// Get a process by PID
+    pub fn get_process(&self, pid: Pid) -> Option<&Process> {
+        self.processes.iter().find(|p| p.pid == pid)
     }
 }
 

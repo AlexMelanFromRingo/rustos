@@ -134,9 +134,9 @@ impl Shell {
         // List of available commands
         let commands = [
             "cat", "clear", "cp", "echo", "edit", "head", "hello",
-            "help", "history", "ls", "meminfo", "mv", "reboot",
-            "rm", "shutdown", "tail", "time", "touch", "uptime",
-            "version", "wc", "write",
+            "help", "history", "kill", "ls", "meminfo", "mv", "ps",
+            "reboot", "rm", "shutdown", "tail", "time", "touch",
+            "uptime", "version", "wc", "write",
         ];
 
         // Find matching commands
@@ -236,6 +236,8 @@ impl Shell {
             "version" => self.cmd_version(),
             "time" => self.cmd_time(),
             "history" => self.cmd_history(),
+            "ps" => self.cmd_ps(),
+            "kill" => self.cmd_kill(args),
             "ls" => self.cmd_ls(),
             "cat" => self.cmd_cat(args),
             "write" => self.cmd_write(args),
@@ -266,6 +268,10 @@ impl Shell {
         println!("  history   - Show command history");
         println!("  shutdown  - Shutdown the system");
         println!("  reboot    - Reboot the system");
+        println!();
+        println!("Process management:");
+        println!("  ps        - List all processes");
+        println!("  kill      - Terminate a process (usage: kill <pid>)");
         println!();
         println!("File system commands:");
         println!("  ls        - List files in RAM disk");
@@ -693,5 +699,59 @@ impl Shell {
         let filename = args[0];
         let mut editor = Editor::new(filename);
         editor.run();
+    }
+
+    fn cmd_ps(&self) {
+        use crate::process::PROCESS_MANAGER;
+
+        let pm = PROCESS_MANAGER.lock();
+        let processes = pm.all_processes();
+
+        println!("PID    STATE       STACK_SIZE");
+        println!("---    -----       ----------");
+
+        for process in processes {
+            let state_str = match process.state {
+                crate::process::ProcessState::Ready => "Ready    ",
+                crate::process::ProcessState::Running => "Running  ",
+                crate::process::ProcessState::Blocked => "Blocked  ",
+                crate::process::ProcessState::Terminated => "Terminated",
+            };
+
+            println!("{:<6} {:<11} {} bytes",
+                process.pid,
+                state_str,
+                process.stack.len()
+            );
+        }
+
+        println!();
+        println!("Total: {} processes", processes.len());
+
+        if let Some(current_pid) = pm.current_pid {
+            println!("Current: PID {}", current_pid);
+        } else {
+            println!("Current: None");
+        }
+    }
+
+    fn cmd_kill(&self, args: &[&str]) {
+        use crate::process::scheduler;
+
+        if args.is_empty() {
+            println!("Usage: kill <pid>");
+            return;
+        }
+
+        let pid_str = args[0];
+        match pid_str.parse::<usize>() {
+            Ok(pid) => {
+                scheduler::terminate(pid);
+                println!("Process {} terminated", pid);
+            }
+            Err(_) => {
+                println!("Error: Invalid PID '{}'", pid_str);
+            }
+        }
     }
 }
