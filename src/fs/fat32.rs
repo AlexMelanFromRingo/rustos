@@ -387,6 +387,123 @@ impl Fat32 {
         self.find_file_in_directory(self.root_cluster, path)
     }
 
+    /// Find a free cluster in the FAT table
+    /// Returns the cluster number of the first free cluster found
+    fn find_free_cluster(&self) -> Result<Option<u32>, &'static str> {
+        let entries_per_sector = self.bytes_per_sector / 4;
+
+        // Start from cluster 2 (first data cluster)
+        let start_cluster = 2;
+        let end_cluster = self.total_clusters + 2;
+
+        for cluster in start_cluster..end_cluster {
+            // Calculate which sector contains this cluster's FAT entry
+            let fat_offset = cluster * 4;
+            let fat_sector = self.first_fat_sector + (fat_offset / self.bytes_per_sector);
+            let entry_offset = (fat_offset % self.bytes_per_sector) as usize;
+
+            // Read FAT sector
+            let mut sector_buffer = [0u8; SECTOR_SIZE];
+            let mut drive = ATA_DRIVE.lock();
+            drive.read_sector(fat_sector, &mut sector_buffer)?;
+            drop(drive);
+
+            let fat_entry = u32::from_le_bytes([
+                sector_buffer[entry_offset],
+                sector_buffer[entry_offset + 1],
+                sector_buffer[entry_offset + 2],
+                sector_buffer[entry_offset + 3],
+            ]) & 0x0FFFFFFF;
+
+            // Check if cluster is free
+            if fat_entry == 0x00000000 {
+                return Ok(Some(cluster));
+            }
+        }
+
+        // No free clusters found
+        Ok(None)
+    }
+
+    /// Write a FAT entry for a given cluster
+    fn write_fat_entry(&mut self, cluster: u32, value: u32) -> Result<(), &'static str> {
+        let fat_offset = cluster * 4;
+        let fat_sector = self.first_fat_sector + (fat_offset / self.bytes_per_sector);
+        let entry_offset = (fat_offset % self.bytes_per_sector) as usize;
+
+        // Read the sector containing this FAT entry
+        let mut sector_buffer = [0u8; SECTOR_SIZE];
+        let mut drive = ATA_DRIVE.lock();
+        drive.read_sector(fat_sector, &mut sector_buffer)?;
+
+        // Update the FAT entry (preserve top 4 bits)
+        let masked_value = value & 0x0FFFFFFF;
+        sector_buffer[entry_offset..entry_offset + 4].copy_from_slice(&masked_value.to_le_bytes());
+
+        // Write back to disk
+        // Note: In a real implementation, we should write to ALL FAT copies
+        // For now, we'll just write to the first FAT
+        drive.write_sector(fat_sector, &sector_buffer)?;
+        drop(drive);
+
+        Ok(())
+    }
+
+    /// Allocate a cluster chain for a file
+    /// Returns the first cluster number
+    fn allocate_clusters(&mut self, num_clusters: u32) -> Result<u32, &'static str> {
+        if num_clusters == 0 {
+            return Err("Cannot allocate zero clusters");
+        }
+
+        // Find first free cluster
+        let first_cluster = match self.find_free_cluster()? {
+            Some(cluster) => cluster,
+            None => return Err("No free space available"),
+        };
+
+        let mut prev_cluster = first_cluster;
+
+        // Allocate remaining clusters
+        for i in 1..num_clusters {
+            let next_cluster = match self.find_free_cluster()? {
+                Some(cluster) => cluster,
+                None => {
+                    // TODO: Clean up partially allocated chain
+                    return Err("Insufficient space");
+                }
+            };
+
+            // Link prev_cluster to next_cluster
+            self.write_fat_entry(prev_cluster, next_cluster)?;
+            prev_cluster = next_cluster;
+        }
+
+        // Mark last cluster as end of chain
+        self.write_fat_entry(prev_cluster, 0x0FFFFFFF)?;
+
+        Ok(first_cluster)
+    }
+
+    /// Free a cluster chain
+    fn free_cluster_chain(&mut self, start_cluster: u32) -> Result<(), &'static str> {
+        let mut current_cluster = start_cluster;
+
+        loop {
+            let next_cluster = self.get_next_cluster(current_cluster)?;
+
+            // Mark current cluster as free
+            self.write_fat_entry(current_cluster, 0x00000000)?;
+
+            match next_cluster {
+                Some(next) => current_cluster = next,
+                None => break,
+            }
+        }
+
+        Ok(())
+    }
+
     /// Count used clusters by traversing the FAT table
     /// This is relatively slow but accurate
     fn count_used_clusters(&self) -> Result<u32, &'static str> {

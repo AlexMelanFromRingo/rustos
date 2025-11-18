@@ -192,6 +192,72 @@ impl AtaDrive {
         Ok(())
     }
 
+    /// Write a single sector to the disk
+    ///
+    /// # Arguments
+    /// * `lba` - Logical Block Address (sector number)
+    /// * `buffer` - 512-byte buffer containing data to write
+    pub fn write_sector(&mut self, lba: u32, buffer: &[u8; SECTOR_SIZE]) -> Result<(), &'static str> {
+        if buffer.len() != SECTOR_SIZE {
+            return Err("Buffer must be exactly 512 bytes");
+        }
+
+        unsafe {
+            // Wait for drive to be ready
+            self.wait_ready();
+
+            // Select drive (master) and set LBA mode
+            self.drive_port.write(0xE0 | ((lba >> 24) & 0x0F) as u8);
+
+            // Write sector count (1 sector)
+            self.sector_count_port.write(1);
+
+            // Write LBA address
+            self.lba_low_port.write((lba & 0xFF) as u8);
+            self.lba_mid_port.write(((lba >> 8) & 0xFF) as u8);
+            self.lba_high_port.write(((lba >> 16) & 0xFF) as u8);
+
+            // Send write command
+            self.command_port.write(ATA_CMD_WRITE_PIO);
+
+            // Wait for drive to be ready for data
+            self.wait_data()?;
+
+            // Write 256 words (512 bytes) to data port
+            let buffer_ptr = buffer.as_ptr() as *const u16;
+            for i in 0..256 {
+                let word = buffer_ptr.add(i).read_volatile();
+                self.data_port.write(word);
+            }
+
+            // Wait for write to complete
+            self.wait_ready();
+        }
+
+        Ok(())
+    }
+
+    /// Write multiple consecutive sectors to the disk
+    ///
+    /// # Arguments
+    /// * `lba` - Starting Logical Block Address
+    /// * `sector_count` - Number of sectors to write
+    /// * `buffer` - Buffer containing the data (must be at least sector_count * 512 bytes)
+    pub fn write_sectors(&mut self, lba: u32, sector_count: usize, buffer: &[u8]) -> Result<(), &'static str> {
+        if buffer.len() < sector_count * SECTOR_SIZE {
+            return Err("Buffer too small for requested sectors");
+        }
+
+        for i in 0..sector_count {
+            let offset = i * SECTOR_SIZE;
+            let mut sector_buffer = [0u8; SECTOR_SIZE];
+            sector_buffer.copy_from_slice(&buffer[offset..offset + SECTOR_SIZE]);
+            self.write_sector(lba + i as u32, &sector_buffer)?;
+        }
+
+        Ok(())
+    }
+
     /// Check if a drive exists and is accessible
     pub fn exists(&mut self) -> bool {
         unsafe {
