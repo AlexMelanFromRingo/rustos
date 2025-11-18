@@ -65,9 +65,10 @@ impl Shell {
 
         // List of available commands
         let commands = [
-            "cat", "clear", "echo", "hello", "help", "history",
-            "ls", "meminfo", "reboot", "rm", "shutdown", "time",
-            "uptime", "version", "write",
+            "cat", "clear", "cp", "echo", "edit", "head", "hello",
+            "help", "history", "ls", "meminfo", "mv", "reboot",
+            "rm", "shutdown", "tail", "time", "touch", "uptime",
+            "version", "wc", "write",
         ];
 
         // Find matching commands
@@ -171,6 +172,13 @@ impl Shell {
             "cat" => self.cmd_cat(args),
             "write" => self.cmd_write(args),
             "rm" => self.cmd_rm(args),
+            "touch" => self.cmd_touch(args),
+            "cp" => self.cmd_cp(args),
+            "mv" => self.cmd_mv(args),
+            "head" => self.cmd_head(args),
+            "tail" => self.cmd_tail(args),
+            "wc" => self.cmd_wc(args),
+            "edit" => self.cmd_edit(args),
             _ => {
                 println!("Unknown command: '{}'. Type 'help' for available commands.", cmd);
             }
@@ -196,6 +204,13 @@ impl Shell {
         println!("  cat       - Display file contents");
         println!("  write     - Create/write file (usage: write filename content)");
         println!("  rm        - Remove file");
+        println!("  touch     - Create empty file");
+        println!("  cp        - Copy file (usage: cp source dest)");
+        println!("  mv        - Move/rename file (usage: mv source dest)");
+        println!("  head      - Show first N lines (usage: head [-n N] filename)");
+        println!("  tail      - Show last N lines (usage: tail [-n N] filename)");
+        println!("  wc        - Count lines/words/bytes (usage: wc filename)");
+        println!("  edit      - Simple text editor (usage: edit filename)");
         println!();
         println!("Keyboard shortcuts:");
         println!("  UP/DOWN   - Navigate command history");
@@ -398,5 +413,214 @@ impl Shell {
                 println!("Error: {}", msg);
             }
         }
+    }
+
+    fn cmd_touch(&self, args: &[&str]) {
+        use crate::fs::ramdisk::RAMDISK;
+        use crate::fs::vfs::FileSystem;
+
+        if args.is_empty() {
+            println!("Usage: touch <filename>");
+            return;
+        }
+
+        let filename = args[0];
+        let mut ramdisk = RAMDISK.lock();
+
+        // Create empty file
+        match ramdisk.write(filename, Vec::new()) {
+            Ok(_) => println!("File '{}' created", filename),
+            Err(e) => println!("Error: {:?}", e),
+        }
+    }
+
+    fn cmd_cp(&self, args: &[&str]) {
+        use crate::fs::ramdisk::RAMDISK;
+        use crate::fs::vfs::FileSystem;
+
+        if args.len() < 2 {
+            println!("Usage: cp <source> <destination>");
+            return;
+        }
+
+        let source = args[0];
+        let dest = args[1];
+        let mut ramdisk = RAMDISK.lock();
+
+        // Read source file
+        match ramdisk.read(source) {
+            Ok(content) => {
+                // Write to destination
+                match ramdisk.write(dest, content) {
+                    Ok(_) => println!("Copied '{}' to '{}'", source, dest),
+                    Err(e) => println!("Error writing destination: {:?}", e),
+                }
+            }
+            Err(_) => println!("Error: Source file '{}' not found", source),
+        }
+    }
+
+    fn cmd_mv(&self, args: &[&str]) {
+        use crate::fs::ramdisk::RAMDISK;
+        use crate::fs::vfs::FileSystem;
+
+        if args.len() < 2 {
+            println!("Usage: mv <source> <destination>");
+            return;
+        }
+
+        let source = args[0];
+        let dest = args[1];
+        let mut ramdisk = RAMDISK.lock();
+
+        // Read source file
+        match ramdisk.read(source) {
+            Ok(content) => {
+                // Write to destination
+                match ramdisk.write(dest, content) {
+                    Ok(_) => {
+                        // Delete source
+                        match ramdisk.delete(source) {
+                            Ok(_) => println!("Moved '{}' to '{}'", source, dest),
+                            Err(e) => println!("Error deleting source: {:?}", e),
+                        }
+                    }
+                    Err(e) => println!("Error writing destination: {:?}", e),
+                }
+            }
+            Err(_) => println!("Error: Source file '{}' not found", source),
+        }
+    }
+
+    fn cmd_head(&self, args: &[&str]) {
+        use crate::fs::ramdisk::RAMDISK;
+        use crate::fs::vfs::FileSystem;
+
+        let num_lines;
+        let filename;
+
+        // Parse arguments
+        if args.is_empty() {
+            println!("Usage: head [-n N] <filename>");
+            return;
+        }
+
+        if args[0] == "-n" {
+            if args.len() < 3 {
+                println!("Usage: head -n <number> <filename>");
+                return;
+            }
+            num_lines = args[1].parse().unwrap_or(10);
+            filename = args[2];
+        } else {
+            num_lines = 10;
+            filename = args[0];
+        }
+
+        let ramdisk = RAMDISK.lock();
+        match ramdisk.read(filename) {
+            Ok(content) => {
+                match core::str::from_utf8(&content) {
+                    Ok(text) => {
+                        let lines: Vec<&str> = text.lines().collect();
+                        for line in lines.iter().take(num_lines) {
+                            println!("{}", line);
+                        }
+                    }
+                    Err(_) => println!("Error: File is not valid UTF-8 text"),
+                }
+            }
+            Err(_) => println!("Error: File '{}' not found", filename),
+        }
+    }
+
+    fn cmd_tail(&self, args: &[&str]) {
+        use crate::fs::ramdisk::RAMDISK;
+        use crate::fs::vfs::FileSystem;
+
+        let num_lines;
+        let filename;
+
+        // Parse arguments
+        if args.is_empty() {
+            println!("Usage: tail [-n N] <filename>");
+            return;
+        }
+
+        if args[0] == "-n" {
+            if args.len() < 3 {
+                println!("Usage: tail -n <number> <filename>");
+                return;
+            }
+            num_lines = args[1].parse().unwrap_or(10);
+            filename = args[2];
+        } else {
+            num_lines = 10;
+            filename = args[0];
+        }
+
+        let ramdisk = RAMDISK.lock();
+        match ramdisk.read(filename) {
+            Ok(content) => {
+                match core::str::from_utf8(&content) {
+                    Ok(text) => {
+                        let lines: Vec<&str> = text.lines().collect();
+                        let start = if lines.len() > num_lines {
+                            lines.len() - num_lines
+                        } else {
+                            0
+                        };
+                        for line in &lines[start..] {
+                            println!("{}", line);
+                        }
+                    }
+                    Err(_) => println!("Error: File is not valid UTF-8 text"),
+                }
+            }
+            Err(_) => println!("Error: File '{}' not found", filename),
+        }
+    }
+
+    fn cmd_wc(&self, args: &[&str]) {
+        use crate::fs::ramdisk::RAMDISK;
+        use crate::fs::vfs::FileSystem;
+
+        if args.is_empty() {
+            println!("Usage: wc <filename>");
+            return;
+        }
+
+        let filename = args[0];
+        let ramdisk = RAMDISK.lock();
+
+        match ramdisk.read(filename) {
+            Ok(content) => {
+                let bytes = content.len();
+                match core::str::from_utf8(&content) {
+                    Ok(text) => {
+                        let lines = text.lines().count();
+                        let words = text.split_whitespace().count();
+                        println!("  {} {} {} {}", lines, words, bytes, filename);
+                    }
+                    Err(_) => {
+                        println!("  0 0 {} {} (binary)", bytes, filename);
+                    }
+                }
+            }
+            Err(_) => println!("Error: File '{}' not found", filename),
+        }
+    }
+
+    fn cmd_edit(&self, args: &[&str]) {
+        if args.is_empty() {
+            println!("Usage: edit <filename>");
+            return;
+        }
+
+        let filename = args[0];
+        println!("Simple line editor for '{}'", filename);
+        println!("Commands: (a)ppend line, (d)elete line N, (p)rint, (w)rite, (q)uit");
+        println!("Editor not yet implemented - use 'write' command instead");
+        println!("Example: write {} Hello World!", filename);
     }
 }

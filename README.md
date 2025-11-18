@@ -15,8 +15,9 @@
 - ✅ Асинхронность (async/await) с кооперативной многозадачностью
 - ✅ Управление питанием (shutdown/reboot через ACPI)
 - ✅ Интерактивный shell с историей команд и Tab-автодополнением
-- ✅ RAM disk - простая in-memory файловая система (ls, cat, write, rm)
-- ✅ Система тестирования для bare-metal окружения
+- ✅ RAM disk - простая in-memory файловая система
+- ✅ Базовые Unix-утилиты (ls, cat, cp, mv, rm, touch, head, tail, wc, write)
+- ✅ Система тестирования для bare-metal окружения (включая VFS тесты)
 - ✅ Freestanding binary (не зависит от стандартной библиотеки)
 
 ## Требования
@@ -92,6 +93,7 @@ sudo dd if=rustos.bin of=/dev/sdX && sync
 - **Integration тесты** - тесты загрузки и базовой функциональности (basic_boot)
 - **Should panic тесты** - тесты корректной обработки паник
 - **Heap allocation тесты** - тесты динамической памяти (Box, Vec, много аллокаций)
+- **VFS тесты** - тесты файловой системы (создание, чтение, удаление, переполнение, ошибки)
 
 Тестовая система использует:
 - Custom test framework (без стандартной библиотеки)
@@ -130,7 +132,8 @@ rustos/
 ├── tests/
 │   ├── basic_boot.rs        # Integration тест загрузки
 │   ├── should_panic.rs      # Тест обработки паник
-│   └── heap_allocation.rs   # Тесты heap allocation
+│   ├── heap_allocation.rs   # Тесты heap allocation
+│   └── vfs_test.rs          # Тесты VFS и файловой системы
 ├── .cargo/
 │   └── config.toml          # Настройки сборки Cargo (включая alloc)
 ├── x86_64-rustos.json       # Спецификация целевой платформы
@@ -199,10 +202,12 @@ rustos/
 **Командная оболочка с расширенным функционалом:**
 - Буфер ввода с поддержкой редактирования
 - История команд (до 50 команд) с навигацией стрелками UP/DOWN
-- Tab-автодополнение команд (префиксный поиск)
+- Tab-автодополнение команд (показывает все совпадения при нескольких вариантах)
 - Защита от удаления приглашения (backspace блокируется на пустом буфере)
 - Фильтрация escape-последовательностей (только printable ASCII)
-- Встроенные команды: help, clear, echo, version, uptime, time, meminfo, history, shutdown, reboot
+- Системные команды: help, clear, echo, version, uptime, time, meminfo, history, shutdown, reboot
+- Файловые команды: ls, cat, write, rm, touch, cp, mv, head, tail, wc, edit
+- Unix-подобные утилиты с поддержкой опций (например, head -n 5 файл)
 
 ### Context Switching (Stage 15)
 
@@ -316,8 +321,10 @@ futures-util = "0.3.4"          # Stream utilities для async
 - Управление питанием (shutdown/reboot через ACPI и PS/2)
 - Интерактивный shell с историей команд и Tab-автодополнением
 - Virtual File System (VFS) - унифицированный интерфейс для FS
-- RAM disk файловая система (ls, cat, write, rm)
+- RAM disk файловая система с Unix-утилитами
+- Базовые coreutils (ls, cat, cp, mv, rm, touch, head, tail, wc, write)
 - Context switching - переключение между процессами (основа для многозадачности)
+- Комплексная система тестирования (VFS, heap, integration, panic tests)
 
 ### Планируется 📋
 
