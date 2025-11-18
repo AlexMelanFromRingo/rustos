@@ -181,24 +181,25 @@ async fn keyboard_task() {
                             // Only printable ASCII - insert at cursor position
                             let old_len = shell.buffer_len();
                             shell.add_char(character);
+                            let cursor_pos = shell.get_cursor_pos();
+
                             // Redraw from cursor position
                             let (_clear_len, new_text) = shell.redraw_line();
-                            // Clear old content
-                            for _ in 0..old_len {
-                                interrupts::without_interrupts(|| {
-                                    WRITER.lock().write_byte(0x08);
-                                });
-                            }
-                            // Print new text
-                            print!("{}", new_text);
-                            // Move cursor back if needed
-                            let cursor_pos = shell.get_cursor_pos();
-                            let chars_to_left = new_text.len() - cursor_pos;
-                            for _ in 0..chars_to_left {
-                                interrupts::without_interrupts(|| {
-                                    WRITER.lock().write_byte(0x08);
-                                });
-                            }
+
+                            interrupts::without_interrupts(|| {
+                                let mut writer = WRITER.lock();
+                                // Clear old content
+                                for _ in 0..old_len {
+                                    writer.move_cursor_left();
+                                }
+                                // Print new text
+                                drop(writer);
+                                print!("{}", new_text);
+
+                                // Set cursor to correct position (prompt + cursor_pos)
+                                writer = WRITER.lock();
+                                writer.set_cursor_column(2 + cursor_pos);
+                            });
                         }
                         // Ignore other control characters
                     }
@@ -209,79 +210,82 @@ async fn keyboard_task() {
                                 // Backspace at cursor position
                                 if shell.backspace() {
                                     let (_clear_len, new_text) = shell.redraw_line();
-                                    // Clear old line
-                                    for _ in 0..new_text.len() + 1 {
-                                        interrupts::without_interrupts(|| {
-                                            WRITER.lock().write_byte(0x08);
-                                        });
-                                    }
-                                    // Print new text and position cursor
-                                    print!("{}", new_text);
                                     let cursor_pos = shell.get_cursor_pos();
-                                    let chars_to_left = new_text.len() - cursor_pos;
-                                    for _ in 0..chars_to_left {
-                                        interrupts::without_interrupts(|| {
-                                            WRITER.lock().write_byte(0x08);
-                                        });
-                                    }
+
+                                    interrupts::without_interrupts(|| {
+                                        let mut writer = WRITER.lock();
+                                        // Move back to start
+                                        for _ in 0..new_text.len() + 1 {
+                                            writer.move_cursor_left();
+                                        }
+                                        drop(writer);
+
+                                        // Print new text + space to clear last char
+                                        print!("{} ", new_text);
+
+                                        // Set cursor to correct position
+                                        writer = WRITER.lock();
+                                        writer.set_cursor_column(2 + cursor_pos);
+                                    });
                                 }
                             }
                             KeyCode::Delete => {
                                 // Delete character at cursor
                                 if shell.delete_char() {
                                     let (_clear_len, new_text) = shell.redraw_line();
-                                    for _ in 0..new_text.len() + 1 {
-                                        interrupts::without_interrupts(|| {
-                                            WRITER.lock().write_byte(0x08);
-                                        });
-                                    }
-                                    print!("{}", new_text);
                                     let cursor_pos = shell.get_cursor_pos();
-                                    let chars_to_left = new_text.len() - cursor_pos;
-                                    for _ in 0..chars_to_left {
-                                        interrupts::without_interrupts(|| {
-                                            WRITER.lock().write_byte(0x08);
-                                        });
-                                    }
+
+                                    interrupts::without_interrupts(|| {
+                                        let mut writer = WRITER.lock();
+                                        // Move back to start
+                                        for _ in 0..new_text.len() + 1 {
+                                            writer.move_cursor_left();
+                                        }
+                                        drop(writer);
+
+                                        // Print new text + space to clear last char
+                                        print!("{} ", new_text);
+
+                                        // Set cursor to correct position
+                                        writer = WRITER.lock();
+                                        writer.set_cursor_column(2 + cursor_pos);
+                                    });
                                 }
                             }
                             KeyCode::ArrowLeft => {
-                                // Move cursor left
+                                // Move cursor left without erasing
                                 if shell.move_cursor_left() {
                                     interrupts::without_interrupts(|| {
-                                        WRITER.lock().write_byte(0x08);
+                                        WRITER.lock().move_cursor_left();
                                     });
                                 }
                             }
                             KeyCode::ArrowRight => {
-                                // Move cursor right
+                                // Move cursor right without writing
                                 if shell.move_cursor_right() {
-                                    let cursor_pos = shell.get_cursor_pos();
-                                    if cursor_pos <= shell.buffer_len() {
-                                        let ch = shell.get_buffer().chars().nth(cursor_pos - 1).unwrap_or(' ');
-                                        print!("{}", ch);
-                                    }
+                                    interrupts::without_interrupts(|| {
+                                        WRITER.lock().move_cursor_right();
+                                    });
                                 }
                             }
                             KeyCode::Home => {
                                 // Move to start of line
-                                let old_pos = shell.get_cursor_pos();
                                 shell.move_cursor_home();
-                                for _ in 0..old_pos {
-                                    interrupts::without_interrupts(|| {
-                                        WRITER.lock().write_byte(0x08);
-                                    });
-                                }
+                                // Set VGA cursor to prompt position (2 chars for "> ")
+                                interrupts::without_interrupts(|| {
+                                    let mut writer = WRITER.lock();
+                                    writer.set_cursor_column(2);
+                                });
                             }
                             KeyCode::End => {
                                 // Move to end of line
-                                let old_pos = shell.get_cursor_pos();
+                                let buffer_len = shell.buffer_len();
                                 shell.move_cursor_end();
-                                let new_pos = shell.get_cursor_pos();
-                                if new_pos > old_pos {
-                                    let text = &shell.get_buffer()[old_pos..new_pos];
-                                    print!("{}", text);
-                                }
+                                // Set VGA cursor to prompt + buffer length
+                                interrupts::without_interrupts(|| {
+                                    let mut writer = WRITER.lock();
+                                    writer.set_cursor_column(2 + buffer_len);
+                                });
                             }
                             KeyCode::ArrowUp => {
                                 if let Some(cmd) = shell.history_up() {

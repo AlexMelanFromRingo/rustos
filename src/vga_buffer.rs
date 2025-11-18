@@ -96,6 +96,35 @@ impl Writer {
         }
     }
 
+    /// Move cursor left without erasing character
+    pub fn move_cursor_left(&mut self) {
+        if self.column_position > 0 {
+            self.column_position -= 1;
+            self.update_cursor();
+        }
+    }
+
+    /// Move cursor right without writing character
+    pub fn move_cursor_right(&mut self) {
+        if self.column_position < BUFFER_WIDTH - 1 {
+            self.column_position += 1;
+            self.update_cursor();
+        }
+    }
+
+    /// Set cursor to specific column position
+    pub fn set_cursor_column(&mut self, col: usize) {
+        if col < BUFFER_WIDTH {
+            self.column_position = col;
+            self.update_cursor();
+        }
+    }
+
+    /// Get current cursor column position
+    pub fn get_cursor_column(&self) -> usize {
+        self.column_position
+    }
+
     fn update_cursor(&self) {
         let pos = (BUFFER_HEIGHT - 1) * BUFFER_WIDTH + self.column_position;
 
