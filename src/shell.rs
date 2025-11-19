@@ -259,12 +259,12 @@ impl Shell {
         if parts.len() == 1 {
             // Autocomplete command name
             let commands = [
-                "alias", "cat", "clear", "cp", "date", "df", "du", "echo",
+                "alias", "cat", "cd", "clear", "cp", "date", "df", "du", "echo",
                 "edit", "find", "grep", "head", "hello", "help", "history",
-                "hostname", "kill", "less", "ls", "meminfo", "more", "mount",
-                "mv", "ps", "pwd", "reboot", "rm", "shutdown", "sleep", "tail",
-                "time", "touch", "tree", "umount", "unalias", "uptime",
-                "version", "wc", "which", "write",
+                "hostname", "kill", "less", "ls", "meminfo", "mkdir", "more",
+                "mount", "mv", "ps", "pwd", "reboot", "rm", "rmdir", "shutdown",
+                "sleep", "tail", "time", "touch", "tree", "umount", "unalias",
+                "uptime", "version", "wc", "which", "write",
             ];
 
             let matches: Vec<&str> = commands
@@ -449,6 +449,9 @@ impl Shell {
             "unalias" => self.cmd_unalias(args),
             "which" => self.cmd_which(args),
             "sleep" => self.cmd_sleep(args),
+            "cd" => self.cmd_cd(args),
+            "mkdir" => self.cmd_mkdir(args),
+            "rmdir" => self.cmd_rmdir(args),
             _ => {
                 // Check if it's an alias
                 if let Some(expanded) = self.expand_alias(cmd) {
@@ -503,7 +506,10 @@ impl Shell {
         println!();
         println!("File system commands:");
         println!("  pwd       - Print working directory");
-        println!("  ls        - List files in RAM disk");
+        println!("  cd        - Change directory (usage: cd <dir>)");
+        println!("  ls        - List files in current/specified directory");
+        println!("  mkdir     - Create directory (usage: mkdir <dir>)");
+        println!("  rmdir     - Remove empty directory (usage: rmdir <dir>)");
         println!("  cat       - Display file contents");
         println!("  less/more - Page through file contents");
         println!("  write     - Create/write file (usage: write filename content)");
@@ -643,11 +649,72 @@ impl Shell {
     }
 
     fn cmd_ls(&self) {
+        use crate::fs::fat32::FAT32;
         use crate::fs::ramdisk::RAMDISK;
         use crate::fs::vfs::FileSystem;
         use crate::vga_buffer::{WRITER, Color};
         use x86_64::instructions::interrupts;
 
+        // Try FAT32 first if mounted
+        let fat32 = FAT32.lock();
+        if let Some(ref fs) = *fat32 {
+            // List current directory on FAT32
+            match fs.list_directory(&self.current_dir) {
+                Ok(files) => {
+                    drop(fat32);
+
+                    if files.is_empty() {
+                        println!("Empty directory");
+                        return;
+                    }
+
+                    println!("{} ({} items):", self.current_dir, files.len());
+                    for file in files {
+                        // Print filename in cyan
+                        interrupts::without_interrupts(|| {
+                            WRITER.lock().set_color(Color::LightCyan, Color::Black);
+                        });
+                        print!("  {}", file.name);
+
+                        // Print " - " in default color
+                        interrupts::without_interrupts(|| {
+                            WRITER.lock().reset_color();
+                        });
+                        print!(" - ");
+
+                        if file.size == 0 && !file.name.contains('.') {
+                            // Likely a directory
+                            interrupts::without_interrupts(|| {
+                                WRITER.lock().set_color(Color::Blue, Color::Black);
+                            });
+                            print!("<DIR>");
+                        } else {
+                            // Print size in light green
+                            interrupts::without_interrupts(|| {
+                                WRITER.lock().set_color(Color::LightGreen, Color::Black);
+                            });
+                            print!("{} bytes", file.size);
+                        }
+
+                        // Reset color
+                        interrupts::without_interrupts(|| {
+                            WRITER.lock().reset_color();
+                        });
+                        println!();
+                    }
+                    return;
+                }
+                Err(e) => {
+                    drop(fat32);
+                    println!("ls: {}: {}", self.current_dir, e);
+                    println!("Falling back to RAM disk...");
+                }
+            }
+        } else {
+            drop(fat32);
+        }
+
+        // Fallback to RAM disk
         let ramdisk = RAMDISK.lock();
         let files = ramdisk.list();
 
@@ -656,7 +723,7 @@ impl Shell {
             return;
         }
 
-        println!("Files ({} files, {} bytes used):", files.len(), ramdisk.used_space());
+        println!("RAM disk ({} files, {} bytes used):", files.len(), ramdisk.used_space());
         for file in files {
             // Print filename in cyan
             interrupts::without_interrupts(|| {
@@ -1741,12 +1808,12 @@ impl Shell {
 
         // List of built-in commands
         let builtins = [
-            "alias", "cat", "clear", "cp", "date", "df", "du", "echo",
+            "alias", "cat", "cd", "clear", "cp", "date", "df", "du", "echo",
             "edit", "find", "grep", "head", "hello", "help", "history",
-            "hostname", "kill", "less", "ls", "meminfo", "more", "mount",
-            "mv", "ps", "pwd", "reboot", "rm", "shutdown", "sleep", "tail",
-            "time", "touch", "tree", "umount", "unalias", "uptime",
-            "version", "wc", "which", "write"
+            "hostname", "kill", "less", "ls", "meminfo", "mkdir", "more",
+            "mount", "mv", "ps", "pwd", "reboot", "rm", "rmdir", "shutdown",
+            "sleep", "tail", "time", "touch", "tree", "umount", "unalias",
+            "uptime", "version", "wc", "which", "write"
         ];
 
         if builtins.contains(&cmd) {
@@ -1779,6 +1846,144 @@ impl Shell {
                 println!("Done");
             }
             Err(_) => println!("Error: Invalid number '{}'", args[0]),
+        }
+    }
+
+    fn cmd_cd(&mut self, args: &[&str]) {
+        use crate::fs::fat32::FAT32;
+
+        if args.is_empty() {
+            // cd without arguments goes to root
+            self.current_dir = String::from("/");
+            return;
+        }
+
+        let target = args[0];
+
+        // Handle special cases
+        if target == "/" {
+            self.current_dir = String::from("/");
+            return;
+        }
+
+        if target == "." {
+            // Stay in current directory
+            return;
+        }
+
+        if target == ".." {
+            // Go to parent directory
+            if self.current_dir == "/" {
+                // Already at root
+                return;
+            }
+
+            // Remove last component from path
+            if let Some(pos) = self.current_dir.rfind('/') {
+                if pos == 0 {
+                    self.current_dir = String::from("/");
+                } else {
+                    self.current_dir.truncate(pos);
+                }
+            }
+            return;
+        }
+
+        // Construct new path
+        let new_path = if target.starts_with('/') {
+            // Absolute path
+            target.to_string()
+        } else {
+            // Relative path
+            if self.current_dir == "/" {
+                format!("/{}", target)
+            } else {
+                format!("{}/{}", self.current_dir, target)
+            }
+        };
+
+        // Check if directory exists on FAT32
+        let fat32 = FAT32.lock();
+        if let Some(ref fs) = *fat32 {
+            // Verify it's a directory
+            match fs.list_directory(&new_path) {
+                Ok(_) => {
+                    drop(fat32);
+                    self.current_dir = new_path;
+                    println!("Changed directory to: {}", self.current_dir);
+                }
+                Err(e) => {
+                    drop(fat32);
+                    println!("cd: {}: {}", target, e);
+                }
+            }
+        } else {
+            drop(fat32);
+            println!("cd: FAT32 filesystem not mounted");
+        }
+    }
+
+    fn cmd_mkdir(&mut self, args: &[&str]) {
+        use crate::fs::fat32::FAT32;
+
+        if args.is_empty() {
+            println!("Usage: mkdir <directory>");
+            return;
+        }
+
+        let dirname = args[0];
+
+        // Construct full path
+        let path = if dirname.starts_with('/') {
+            dirname.to_string()
+        } else {
+            if self.current_dir == "/" {
+                format!("/{}", dirname)
+            } else {
+                format!("{}/{}", self.current_dir, dirname)
+            }
+        };
+
+        let mut fat32 = FAT32.lock();
+        if let Some(ref mut fs) = *fat32 {
+            match fs.create_directory(&path) {
+                Ok(_) => println!("Directory '{}' created", dirname),
+                Err(e) => println!("mkdir: {}: {}", dirname, e),
+            }
+        } else {
+            println!("mkdir: FAT32 filesystem not mounted");
+        }
+    }
+
+    fn cmd_rmdir(&mut self, args: &[&str]) {
+        use crate::fs::fat32::FAT32;
+
+        if args.is_empty() {
+            println!("Usage: rmdir <directory>");
+            return;
+        }
+
+        let dirname = args[0];
+
+        // Construct full path
+        let path = if dirname.starts_with('/') {
+            dirname.to_string()
+        } else {
+            if self.current_dir == "/" {
+                format!("/{}", dirname)
+            } else {
+                format!("{}/{}", self.current_dir, dirname)
+            }
+        };
+
+        let mut fat32 = FAT32.lock();
+        if let Some(ref mut fs) = *fat32 {
+            match fs.remove_directory(&path) {
+                Ok(_) => println!("Directory '{}' removed", dirname),
+                Err(e) => println!("rmdir: {}: {}", dirname, e),
+            }
+        } else {
+            println!("rmdir: FAT32 filesystem not mounted");
         }
     }
 }

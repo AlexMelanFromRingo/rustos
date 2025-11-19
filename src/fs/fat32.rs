@@ -425,14 +425,82 @@ impl Fat32 {
 
     /// Find a file by path
     fn find_file(&self, path: &str) -> Result<Option<DirectoryEntry>, &'static str> {
-        // For now, only support files in root directory
         let path = path.trim_start_matches('/');
 
-        if path.contains('/') {
-            return Err("Subdirectories not yet supported");
+        if path.is_empty() {
+            // Return root directory entry (create a pseudo-entry)
+            return Ok(None);
         }
 
-        self.find_file_in_directory(self.root_cluster, path)
+        // Parse path into components
+        let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+
+        if components.is_empty() {
+            return Ok(None);
+        }
+
+        // Navigate to the parent directory
+        let mut current_cluster = self.root_cluster;
+
+        for (i, component) in components.iter().enumerate() {
+            let is_last = i == components.len() - 1;
+
+            if let Some(entry) = self.find_file_in_directory(current_cluster, component)? {
+                if is_last {
+                    // Found the target file/directory
+                    return Ok(Some(entry));
+                } else {
+                    // This should be a directory, navigate into it
+                    if entry.is_directory() {
+                        current_cluster = entry.first_cluster();
+                    } else {
+                        return Err("Not a directory in path");
+                    }
+                }
+            } else {
+                // File/directory not found in path
+                return Ok(None);
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Find a directory by path and return its cluster
+    fn find_directory_cluster(&self, path: &str) -> Result<u32, &'static str> {
+        let path = path.trim_start_matches('/');
+
+        if path.is_empty() {
+            return Ok(self.root_cluster);
+        }
+
+        let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        let mut current_cluster = self.root_cluster;
+
+        for component in components {
+            if let Some(entry) = self.find_file_in_directory(current_cluster, component)? {
+                if entry.is_directory() {
+                    current_cluster = entry.first_cluster();
+                } else {
+                    return Err("Not a directory");
+                }
+            } else {
+                return Err("Directory not found");
+            }
+        }
+
+        Ok(current_cluster)
+    }
+
+    /// Split path into parent directory and filename
+    fn split_path(path: &str) -> (&str, &str) {
+        let path = path.trim_start_matches('/');
+
+        if let Some(pos) = path.rfind('/') {
+            (&path[..pos], &path[pos + 1..])
+        } else {
+            ("", path)
+        }
     }
 
     /// Find a free cluster in the FAT table
@@ -750,6 +818,226 @@ impl Fat32 {
 
         Ok(used_count)
     }
+
+    /// Create a new directory
+    pub fn create_directory(&mut self, path: &str) -> Result<(), &'static str> {
+        let path = path.trim_start_matches('/');
+
+        if path.is_empty() {
+            return Err("Cannot create root directory");
+        }
+
+        // Split path into parent and dirname
+        let (parent_path, dirname) = Self::split_path(path);
+
+        // Find parent directory cluster
+        let parent_cluster = if parent_path.is_empty() {
+            self.root_cluster
+        } else {
+            self.find_directory_cluster(parent_path)?
+        };
+
+        // Check if directory already exists
+        if self.find_file_in_directory(parent_cluster, dirname)?.is_some() {
+            return Err("Directory already exists");
+        }
+
+        // Allocate one cluster for the new directory
+        let dir_cluster = self.allocate_clusters(1)?;
+
+        // Initialize directory with . and .. entries
+        self.initialize_directory(dir_cluster, parent_cluster)?;
+
+        // Create directory entry in parent
+        let short_name = self.to_short_name(dirname)?;
+        let entry = DirectoryEntry {
+            name: short_name,
+            attributes: ATTR_DIRECTORY,
+            nt_reserved: 0,
+            creation_time_tenths: 0,
+            creation_time: 0,
+            creation_date: 0,
+            last_access_date: 0,
+            first_cluster_high: ((dir_cluster >> 16) & 0xFFFF) as u16,
+            write_time: 0,
+            write_date: 0,
+            first_cluster_low: (dir_cluster & 0xFFFF) as u16,
+            file_size: 0,  // Directories have size 0
+        };
+
+        self.add_directory_entry(parent_cluster, &entry)?;
+
+        Ok(())
+    }
+
+    /// Initialize a new directory with . and .. entries
+    fn initialize_directory(&mut self, dir_cluster: u32, parent_cluster: u32) -> Result<(), &'static str> {
+        // Create . (current directory) entry
+        let dot_entry = DirectoryEntry {
+            name: [b'.', b' ', b' ', b' ', b' ', b' ', b' ', b' ', b' ', b' ', b' '],
+            attributes: ATTR_DIRECTORY,
+            nt_reserved: 0,
+            creation_time_tenths: 0,
+            creation_time: 0,
+            creation_date: 0,
+            last_access_date: 0,
+            first_cluster_high: ((dir_cluster >> 16) & 0xFFFF) as u16,
+            write_time: 0,
+            write_date: 0,
+            first_cluster_low: (dir_cluster & 0xFFFF) as u16,
+            file_size: 0,
+        };
+
+        // Create .. (parent directory) entry
+        let dotdot_entry = DirectoryEntry {
+            name: [b'.', b'.', b' ', b' ', b' ', b' ', b' ', b' ', b' ', b' ', b' '],
+            attributes: ATTR_DIRECTORY,
+            nt_reserved: 0,
+            creation_time_tenths: 0,
+            creation_time: 0,
+            creation_date: 0,
+            last_access_date: 0,
+            first_cluster_high: ((parent_cluster >> 16) & 0xFFFF) as u16,
+            write_time: 0,
+            write_date: 0,
+            first_cluster_low: (parent_cluster & 0xFFFF) as u16,
+            file_size: 0,
+        };
+
+        // Write . and .. entries to the directory cluster
+        let cluster_size = (self.sectors_per_cluster * self.bytes_per_sector) as usize;
+        let mut cluster_data = vec![0u8; cluster_size];
+
+        // Copy dot entry
+        unsafe {
+            let dot_bytes = core::slice::from_raw_parts(
+                &dot_entry as *const DirectoryEntry as *const u8,
+                core::mem::size_of::<DirectoryEntry>(),
+            );
+            cluster_data[0..32].copy_from_slice(dot_bytes);
+        }
+
+        // Copy dotdot entry
+        unsafe {
+            let dotdot_bytes = core::slice::from_raw_parts(
+                &dotdot_entry as *const DirectoryEntry as *const u8,
+                core::mem::size_of::<DirectoryEntry>(),
+            );
+            cluster_data[32..64].copy_from_slice(dotdot_bytes);
+        }
+
+        // Fill rest with zeros (empty entries)
+        // Already done since vec is initialized with zeros
+
+        // Write cluster to disk
+        self.write_cluster(dir_cluster, &cluster_data)?;
+
+        Ok(())
+    }
+
+    /// Add a directory entry to a directory
+    fn add_directory_entry(&mut self, dir_cluster: u32, entry: &DirectoryEntry) -> Result<(), &'static str> {
+        // Read directory
+        let cluster_data = self.read_cluster(dir_cluster)?;
+        let entries_per_cluster = cluster_data.len() / 32;
+
+        // Find first free entry
+        for i in 0..entries_per_cluster {
+            let offset = i * 32;
+            let first_byte = cluster_data[offset];
+
+            // 0x00 = never used, 0xE5 = deleted
+            if first_byte == 0x00 || first_byte == 0xE5 {
+                // Found free entry, write it
+                let mut new_cluster_data = cluster_data.clone();
+
+                unsafe {
+                    let entry_bytes = core::slice::from_raw_parts(
+                        entry as *const DirectoryEntry as *const u8,
+                        core::mem::size_of::<DirectoryEntry>(),
+                    );
+                    new_cluster_data[offset..offset + 32].copy_from_slice(entry_bytes);
+                }
+
+                self.write_cluster(dir_cluster, &new_cluster_data)?;
+                return Ok(());
+            }
+        }
+
+        Err("Directory is full")
+    }
+
+    /// List directory contents
+    pub fn list_directory(&self, path: &str) -> Result<Vec<FileInfo>, &'static str> {
+        let path = path.trim_start_matches('/');
+
+        // Find directory cluster
+        let dir_cluster = if path.is_empty() {
+            self.root_cluster
+        } else {
+            self.find_directory_cluster(path)?
+        };
+
+        // Read directory entries
+        let entries = self.read_directory(dir_cluster)?;
+
+        // Convert to FileInfo
+        let mut files = Vec::new();
+        for entry in entries {
+            let name = entry.get_name();
+
+            // Skip . and .. entries
+            if name == "." || name == ".." {
+                continue;
+            }
+
+            // Use special size for directories (show as 0 or could show <DIR>)
+            let size = if entry.is_directory() {
+                0
+            } else {
+                entry.file_size as usize
+            };
+
+            files.push(FileInfo::new(name, size));
+        }
+
+        Ok(files)
+    }
+
+    /// Remove an empty directory
+    pub fn remove_directory(&mut self, path: &str) -> Result<(), &'static str> {
+        let path = path.trim_start_matches('/');
+
+        if path.is_empty() {
+            return Err("Cannot remove root directory");
+        }
+
+        // Find directory entry
+        match self.find_file(path)? {
+            Some(entry) => {
+                if !entry.is_directory() {
+                    return Err("Not a directory");
+                }
+
+                // Check if directory is empty (only . and .. entries)
+                let entries = self.read_directory(entry.first_cluster())?;
+                if entries.len() > 2 {
+                    return Err("Directory not empty");
+                }
+
+                // Free cluster chain
+                if entry.first_cluster() != 0 {
+                    self.free_cluster_chain(entry.first_cluster())?;
+                }
+
+                // Mark directory entry as deleted
+                self.delete_directory_entry(path)?;
+
+                Ok(())
+            }
+            None => Err("Directory not found"),
+        }
+    }
 }
 
 impl FileSystem for Fat32 {
@@ -773,12 +1061,7 @@ impl FileSystem for Fat32 {
     }
 
     fn write(&mut self, path: &str, data: Vec<u8>) -> VfsResult<()> {
-        // For now, only support files in root directory
         let path = path.trim_start_matches('/');
-
-        if path.contains('/') {
-            return Err(VfsError::PermissionDenied); // Subdirectories not supported
-        }
 
         // Calculate required clusters
         let cluster_size = (self.sectors_per_cluster * self.bytes_per_sector) as usize;
@@ -833,12 +1116,7 @@ impl FileSystem for Fat32 {
     }
 
     fn delete(&mut self, path: &str) -> VfsResult<()> {
-        // For now, only support files in root directory
         let path = path.trim_start_matches('/');
-
-        if path.contains('/') {
-            return Err(VfsError::PermissionDenied); // Subdirectories not supported
-        }
 
         // Find the file
         match self.find_file(path).map_err(|_| VfsError::IoError)? {

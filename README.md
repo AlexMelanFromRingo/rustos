@@ -17,8 +17,9 @@
 - ✅ Интерактивный shell с редактируемым буфером и навигацией курсора
 - ✅ Persistent command history - история команд сохраняется между перезагрузками на FAT32
 - ✅ RAM disk - простая in-memory файловая система
-- ✅ FAT32 - чтение и запись на диск через IDE/ATA PIO driver (mount/umount)
+- ✅ FAT32 - полная поддержка чтения/записи и вложенных директорий через IDE/ATA PIO driver
 - ✅ Расширенные Unix-утилиты (ls, cat, cp, mv, rm, touch, head, tail, wc, write, grep, pwd, du, find, tree, less, which)
+- ✅ Полноценная навигация по директориям (cd, mkdir, rmdir) с поддержкой путей и вложенных папок
 - ✅ Система алиасов команд (alias/unalias) для удобства работы
 - ✅ Дополнительные утилиты: date, hostname, sleep - вдохновлено OpenComputers
 - ✅ Упрощённые pipes (конвейеры) для связывания команд
@@ -288,16 +289,23 @@ rustos/
 - Shell команды: ls, cat, write, rm
 - Поддержка UTF-8 текста и бинарных данных (hex dump)
 
-**FAT32 - Чтение и запись на диск (Stage 14):**
+**FAT32 - Полная поддержка файловой системы с директориями (Stage 14+):**
 - IDE/ATA PIO driver для чтения и записи секторов на диск
 - Поддержка primary IDE bus (порты 0x1F0-0x1F7)
 - Парсинг FAT32 boot sector (BPB и Extended Boot Record)
 - Чтение и запись FAT таблицы и traversal цепочек кластеров
 - Парсинг и создание directory entries (short file names)
-- Полная поддержка чтения и записи FAT32 файловых систем
-- Реализует FileSystem trait из VFS
-- Shell команды: mount/umount для монтирования FAT32 дисков
+- **Полная поддержка вложенных директорий:**
+  - Навигация по путям (абсолютные и относительные)
+  - Создание директорий (mkdir) с инициализацией . и .. записей
+  - Удаление пустых директорий (rmdir)
+  - Список содержимого любой директории (ls)
+  - Чтение/запись файлов в любой директории
+  - Смена текущей директории (cd) с поддержкой .., ., и /
+- Реализует FileSystem trait из VFS + расширенные методы для директорий
+- Shell команды: mount/umount, cd, mkdir, rmdir
 - Persistent command history - автоматическое сохранение на FAT32
+- Текущая директория отслеживается в shell
 - Тестирование через QEMU с FAT32 disk images
 
 ### Память
@@ -384,9 +392,10 @@ futures-util = "0.3.4"          # Stream utilities для async
 - Persistent command history - история команд сохраняется на FAT32 между перезагрузками
 - Virtual File System (VFS) - унифицированный интерфейс для FS
 - RAM disk файловая система с Unix-утилитами
-- FAT32 filesystem - чтение и запись на диск через IDE/ATA PIO driver (mount/umount)
+- FAT32 filesystem - полная поддержка чтения/записи с вложенными директориями через IDE/ATA PIO driver (mount/umount)
 - Disk space reporting - команда df для отображения использования дисков
 - Расширенные coreutils (ls, cat, cp, mv, rm, touch, head, tail, wc, write, grep, df, pwd, du, find, tree, less/more, which)
+- Полноценная навигация по директориям (cd, mkdir, rmdir) с поддержкой абсолютных и относительных путей
 - Система алиасов команд (alias/unalias) для создания пользовательских команд
 - Дополнительные утилиты (date, hostname, sleep) вдохновленные OpenComputers mod
 - Упрощённые pipes для связывания команд (cat | grep, ls | grep, cat | wc)
@@ -397,7 +406,6 @@ futures-util = "0.3.4"          # Stream utilities для async
 
 ### Планируется 📋
 
-- FAT32 subdirectory navigation (cd, mkdir, rmdir)
 - Расширенные pipes с перенаправлением ввода/вывода (>, <, 2>)
 - Пользовательское пространство (user mode processes в ring 3)
 - ACPI расширенная поддержка (обнаружение устройств)
