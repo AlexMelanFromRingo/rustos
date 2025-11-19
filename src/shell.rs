@@ -32,14 +32,28 @@ impl Shell {
         shell
     }
 
-    /// Load command history from RAM disk
+    /// Load command history from persistent storage (FAT32 if mounted, else RAM disk)
     fn load_history(&mut self) {
+        use crate::fs::fat32::FAT32;
         use crate::fs::ramdisk::RAMDISK;
         use crate::fs::vfs::FileSystem;
 
-        let ramdisk = RAMDISK.lock();
+        // Try loading from FAT32 first (persistent storage)
+        let fat32 = FAT32.lock();
+        let data = if let Some(ref fs) = *fat32 {
+            fs.read(".history").ok()
+        } else {
+            None
+        };
+        drop(fat32);
 
-        if let Ok(data) = ramdisk.read(".history") {
+        // Fallback to RAM disk if FAT32 not mounted or file not found
+        let data = data.or_else(|| {
+            let ramdisk = RAMDISK.lock();
+            ramdisk.read(".history").ok()
+        });
+
+        if let Some(data) = data {
             // Parse history file (one command per line)
             let history_text = core::str::from_utf8(&data).unwrap_or("");
 
@@ -52,12 +66,11 @@ impl Shell {
         // If file doesn't exist, start with empty history
     }
 
-    /// Save command history to RAM disk
+    /// Save command history to persistent storage (FAT32 if mounted, else RAM disk)
     fn save_history(&self) {
+        use crate::fs::fat32::FAT32;
         use crate::fs::ramdisk::RAMDISK;
         use crate::fs::vfs::FileSystem;
-
-        let mut ramdisk = RAMDISK.lock();
 
         // Create history file content (one command per line)
         let mut content = String::new();
@@ -66,8 +79,20 @@ impl Shell {
             content.push('\n');
         }
 
-        // Write to file (ignore errors - history is not critical)
-        let _ = ramdisk.write(".history", content.as_bytes().to_vec());
+        let data = content.as_bytes().to_vec();
+
+        // Try saving to FAT32 first (persistent storage)
+        let mut fat32 = FAT32.lock();
+        let _saved = if let Some(ref mut fs) = *fat32 {
+            fs.write(".history", data.clone()).is_ok()
+        } else {
+            false
+        };
+        drop(fat32);
+
+        // Always save to RAM disk as backup
+        let mut ramdisk = RAMDISK.lock();
+        let _ = ramdisk.write(".history", data);
     }
 
     pub fn print_prompt(&self) {

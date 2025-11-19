@@ -15,8 +15,9 @@
 - ✅ Асинхронность (async/await) с кооперативной многозадачностью
 - ✅ Управление питанием (shutdown/reboot через ACPI)
 - ✅ Интерактивный shell с редактируемым буфером и навигацией курсора
+- ✅ Persistent command history - история команд сохраняется между перезагрузками на FAT32
 - ✅ RAM disk - простая in-memory файловая система
-- ✅ FAT32 - чтение с диска через IDE/ATA PIO driver (mount/umount)
+- ✅ FAT32 - чтение и запись на диск через IDE/ATA PIO driver (mount/umount)
 - ✅ Базовые Unix-утилиты (ls, cat, cp, mv, rm, touch, head, tail, wc, write, grep)
 - ✅ Упрощённые pipes (конвейеры) для связывания команд
 - ✅ Встроенный текстовый редактор (edit) для построчного редактирования
@@ -285,15 +286,16 @@ rustos/
 - Shell команды: ls, cat, write, rm
 - Поддержка UTF-8 текста и бинарных данных (hex dump)
 
-**FAT32 - Чтение с диска (Stage 14):**
-- IDE/ATA PIO driver для чтения секторов с диска
+**FAT32 - Чтение и запись на диск (Stage 14):**
+- IDE/ATA PIO driver для чтения и записи секторов на диск
 - Поддержка primary IDE bus (порты 0x1F0-0x1F7)
 - Парсинг FAT32 boot sector (BPB и Extended Boot Record)
-- Чтение FAT таблицы и traversal цепочек кластеров
-- Парсинг directory entries (short file names)
-- Read-only доступ к FAT32 файловым системам
+- Чтение и запись FAT таблицы и traversal цепочек кластеров
+- Парсинг и создание directory entries (short file names)
+- Полная поддержка чтения и записи FAT32 файловых систем
 - Реализует FileSystem trait из VFS
 - Shell команды: mount/umount для монтирования FAT32 дисков
+- Persistent command history - автоматическое сохранение на FAT32
 - Тестирование через QEMU с FAT32 disk images
 
 ### Память
@@ -377,9 +379,10 @@ futures-util = "0.3.4"          # Stream utilities для async
 - Асинхронность (async/await, executor, waker, cooperative multitasking)
 - Управление питанием (shutdown/reboot через ACPI и PS/2)
 - Интерактивный shell с историей команд и Tab-автодополнением (команды и файлы)
+- Persistent command history - история команд сохраняется на FAT32 между перезагрузками
 - Virtual File System (VFS) - унифицированный интерфейс для FS
 - RAM disk файловая система с Unix-утилитами
-- FAT32 filesystem - read-only чтение с диска через IDE/ATA PIO driver (mount/umount)
+- FAT32 filesystem - чтение и запись на диск через IDE/ATA PIO driver (mount/umount)
 - Disk space reporting - команда df для отображения использования дисков
 - Базовые coreutils (ls, cat, cp, mv, rm, touch, head, tail, wc, write, grep, df)
 - Упрощённые pipes для связывания команд (cat | grep, ls | grep, cat | wc)
@@ -390,7 +393,6 @@ futures-util = "0.3.4"          # Stream utilities для async
 
 ### Планируется 📋
 
-- FAT32 write support (запись файлов на диск)
 - FAT32 subdirectory navigation (cd, mkdir, rmdir)
 - Расширенные pipes с перенаправлением ввода/вывода (>, <, 2>)
 - Пользовательское пространство (user mode processes в ring 3)
@@ -399,7 +401,6 @@ futures-util = "0.3.4"          # Stream utilities для async
 - Системные вызовы (syscall interface)
 - ELF загрузчик (запуск программ)
 - Цветной вывод в терминале (ANSI escape sequences)
-- Persistent command history (сохранение между перезагрузками)
 
 ## Производительность
 
