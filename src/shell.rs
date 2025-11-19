@@ -13,6 +13,9 @@ pub struct Shell {
     history: Vec<String>,
     history_index: Option<usize>,
     saved_buffer: String,
+    aliases: Vec<(String, String)>,  // Command aliases (alias, command)
+    current_dir: String,  // Current working directory
+    hostname: String,  // System hostname
 }
 
 impl Shell {
@@ -24,6 +27,9 @@ impl Shell {
             history: Vec::new(),
             history_index: None,
             saved_buffer: String::new(),
+            aliases: Vec::new(),
+            current_dir: String::from("/"),
+            hostname: String::from("rustos"),
         };
 
         // Load command history from file
@@ -253,10 +259,12 @@ impl Shell {
         if parts.len() == 1 {
             // Autocomplete command name
             let commands = [
-                "cat", "clear", "cp", "df", "echo", "edit", "grep", "head",
-                "hello", "help", "history", "kill", "ls", "meminfo",
-                "mount", "mv", "ps", "reboot", "rm", "shutdown", "tail", "time",
-                "touch", "umount", "uptime", "version", "wc", "write",
+                "alias", "cat", "clear", "cp", "date", "df", "du", "echo",
+                "edit", "find", "grep", "head", "hello", "help", "history",
+                "hostname", "kill", "less", "ls", "meminfo", "more", "mount",
+                "mv", "ps", "pwd", "reboot", "rm", "shutdown", "sleep", "tail",
+                "time", "touch", "tree", "umount", "unalias", "uptime",
+                "version", "wc", "which", "write",
             ];
 
             let matches: Vec<&str> = commands
@@ -429,8 +437,45 @@ impl Shell {
             "mount" => self.cmd_mount(args),
             "umount" => self.cmd_umount(args),
             "df" => self.cmd_df(),
+            "pwd" => self.cmd_pwd(),
+            "date" => self.cmd_date(),
+            "hostname" => self.cmd_hostname(args),
+            "du" => self.cmd_du(args),
+            "find" => self.cmd_find(args),
+            "tree" => self.cmd_tree(),
+            "less" => self.cmd_less(args),
+            "more" => self.cmd_less(args),  // Alias for less
+            "alias" => self.cmd_alias(args),
+            "unalias" => self.cmd_unalias(args),
+            "which" => self.cmd_which(args),
+            "sleep" => self.cmd_sleep(args),
             _ => {
-                println!("Unknown command: '{}'. Type 'help' for available commands.", cmd);
+                // Check if it's an alias
+                if let Some(expanded) = self.expand_alias(cmd) {
+                    // Re-execute with expanded command
+                    let full_command = if args.is_empty() {
+                        expanded
+                    } else {
+                        format!("{} {}", expanded, args.join(" "))
+                    };
+                    // Create a temporary shell to avoid mutable borrow issues
+                    let mut temp_shell = Shell {
+                        buffer: full_command.clone(),
+                        cursor_pos: full_command.len(),
+                        prompt: self.prompt,
+                        history: self.history.clone(),
+                        history_index: None,
+                        saved_buffer: String::new(),
+                        aliases: self.aliases.clone(),
+                        current_dir: self.current_dir.clone(),
+                        hostname: self.hostname.clone(),
+                    };
+                    temp_shell.execute();
+                    // Update history from temp shell
+                    self.history = temp_shell.history;
+                } else {
+                    println!("Unknown command: '{}'. Type 'help' for available commands.", cmd);
+                }
             }
         }
     }
@@ -442,20 +487,25 @@ impl Shell {
         println!("  echo      - Echo the arguments");
         println!("  hello     - Print a greeting");
         println!("  uptime    - Show system uptime");
+        println!("  date      - Show system uptime as date");
         println!("  time      - Show current timer ticks");
         println!("  meminfo   - Display memory information");
         println!("  version   - Show RustOS version");
         println!("  history   - Show command history");
+        println!("  hostname  - Get/set hostname (usage: hostname [name])");
         println!("  shutdown  - Shutdown the system");
         println!("  reboot    - Reboot the system");
+        println!("  sleep     - Sleep for N seconds (usage: sleep <seconds>)");
         println!();
         println!("Process management:");
         println!("  ps        - List all processes");
         println!("  kill      - Terminate a process (usage: kill <pid>)");
         println!();
         println!("File system commands:");
+        println!("  pwd       - Print working directory");
         println!("  ls        - List files in RAM disk");
         println!("  cat       - Display file contents");
+        println!("  less/more - Page through file contents");
         println!("  write     - Create/write file (usage: write filename content)");
         println!("  rm        - Remove file");
         println!("  touch     - Create empty file");
@@ -467,8 +517,16 @@ impl Shell {
         println!("  grep      - Search for pattern in file (usage: grep [-i] [-n] pattern file)");
         println!("  edit      - Simple text editor (usage: edit filename)");
         println!("  df        - Show disk space usage");
+        println!("  du        - Show file sizes (usage: du [file1 file2 ...])");
+        println!("  find      - Find files by pattern (usage: find <pattern>)");
+        println!("  tree      - Display files as tree");
         println!("  mount     - Mount FAT32 disk (usage: mount fat32)");
         println!("  umount    - Unmount FAT32 disk");
+        println!();
+        println!("Aliases:");
+        println!("  alias     - Create command alias (usage: alias <name> <command>)");
+        println!("  unalias   - Remove alias (usage: unalias <name>)");
+        println!("  which     - Show command type/location");
         println!();
         println!("Pipes and redirection:");
         println!("  cat <file> | grep <pattern>  - Search in file");
@@ -1475,5 +1533,252 @@ impl Shell {
             );
         }
         drop(fat32);
+    }
+
+    /// Helper function to expand aliases
+    fn expand_alias(&self, cmd: &str) -> Option<String> {
+        for (alias, command) in &self.aliases {
+            if alias == cmd {
+                return Some(command.clone());
+            }
+        }
+        None
+    }
+
+    fn cmd_pwd(&self) {
+        println!("{}", self.current_dir);
+    }
+
+    fn cmd_date(&self) {
+        use crate::task::timer::current_ticks;
+
+        let ticks = current_ticks();
+        let seconds = ticks / 18;
+        let minutes = seconds / 60;
+        let hours = minutes / 60;
+        let days = hours / 24;
+
+        // Simple uptime-based date (not real date)
+        println!("System uptime: {} days, {}:{:02}:{:02}",
+            days,
+            hours % 24,
+            minutes % 60,
+            seconds % 60
+        );
+        println!("(Note: RustOS does not have RTC support yet)");
+    }
+
+    fn cmd_hostname(&mut self, args: &[&str]) {
+        if args.is_empty() {
+            println!("{}", self.hostname);
+        } else {
+            self.hostname = args[0].to_string();
+            println!("Hostname set to: {}", self.hostname);
+        }
+    }
+
+    fn cmd_du(&self, args: &[&str]) {
+        use crate::fs::ramdisk::RAMDISK;
+        use crate::fs::vfs::FileSystem;
+
+        let ramdisk = RAMDISK.lock();
+        let files = ramdisk.list();
+
+        if args.is_empty() {
+            // Show all files
+            let mut total = 0;
+            for file in &files {
+                let kb = (file.size + 1023) / 1024;  // Round up to KB
+                println!("{:>6}K  {}", kb, file.name);
+                total += file.size;
+            }
+            let total_kb = (total + 1023) / 1024;
+            println!("{:>6}K  total", total_kb);
+        } else {
+            // Show specific files
+            for filename in args {
+                if let Some(file) = files.iter().find(|f| f.name == *filename) {
+                    let kb = (file.size + 1023) / 1024;
+                    println!("{:>6}K  {}", kb, file.name);
+                } else {
+                    println!("du: cannot access '{}': No such file", filename);
+                }
+            }
+        }
+    }
+
+    fn cmd_find(&self, args: &[&str]) {
+        use crate::fs::ramdisk::RAMDISK;
+        use crate::fs::vfs::FileSystem;
+
+        if args.is_empty() {
+            println!("Usage: find <pattern>");
+            println!("  Searches for files matching the pattern");
+            return;
+        }
+
+        let pattern = args[0];
+        let ramdisk = RAMDISK.lock();
+        let files = ramdisk.list();
+
+        let mut found = 0;
+        for file in &files {
+            if file.name.contains(pattern) {
+                println!("{}", file.name);
+                found += 1;
+            }
+        }
+
+        if found == 0 {
+            println!("No files matching '{}' found", pattern);
+        } else {
+            println!("\n{} file(s) found", found);
+        }
+    }
+
+    fn cmd_tree(&self) {
+        use crate::fs::ramdisk::RAMDISK;
+        use crate::fs::vfs::FileSystem;
+
+        let ramdisk = RAMDISK.lock();
+        let files = ramdisk.list();
+
+        println!("/");
+        for (i, file) in files.iter().enumerate() {
+            let is_last = i == files.len() - 1;
+            let prefix = if is_last { "└──" } else { "├──" };
+            println!("{} {}", prefix, file.name);
+        }
+
+        println!("\n{} files", files.len());
+    }
+
+    fn cmd_less(&self, args: &[&str]) {
+        use crate::fs::ramdisk::RAMDISK;
+        use crate::fs::vfs::FileSystem;
+
+        if args.is_empty() {
+            println!("Usage: less <filename>");
+            return;
+        }
+
+        let filename = args[0];
+        let ramdisk = RAMDISK.lock();
+
+        match ramdisk.read(filename) {
+            Ok(content) => {
+                match core::str::from_utf8(&content) {
+                    Ok(text) => {
+                        // Simple pager - just display all content for now
+                        // In a real implementation, this would paginate
+                        println!("{}", text);
+                        println!("\n(END)");
+                    }
+                    Err(_) => println!("Error: File is not valid UTF-8 text"),
+                }
+            }
+            Err(_) => println!("Error: File '{}' not found", filename),
+        }
+    }
+
+    fn cmd_alias(&mut self, args: &[&str]) {
+        if args.is_empty() {
+            // List all aliases
+            if self.aliases.is_empty() {
+                println!("No aliases defined");
+            } else {
+                println!("Aliases:");
+                for (alias, command) in &self.aliases {
+                    println!("  {} = {}", alias, command);
+                }
+            }
+        } else if args.len() < 2 {
+            println!("Usage: alias <name> <command>");
+            println!("       alias           (list all aliases)");
+        } else {
+            let alias = args[0].to_string();
+            let command = args[1..].join(" ");
+
+            // Remove existing alias if present
+            self.aliases.retain(|(a, _)| a != &alias);
+
+            // Add new alias
+            self.aliases.push((alias.clone(), command.clone()));
+            println!("Alias '{}' set to '{}'", alias, command);
+        }
+    }
+
+    fn cmd_unalias(&mut self, args: &[&str]) {
+        if args.is_empty() {
+            println!("Usage: unalias <name>");
+            return;
+        }
+
+        let alias = args[0];
+        let initial_len = self.aliases.len();
+        self.aliases.retain(|(a, _)| a != alias);
+
+        if self.aliases.len() < initial_len {
+            println!("Alias '{}' removed", alias);
+        } else {
+            println!("Alias '{}' not found", alias);
+        }
+    }
+
+    fn cmd_which(&self, args: &[&str]) {
+        if args.is_empty() {
+            println!("Usage: which <command>");
+            return;
+        }
+
+        let cmd = args[0];
+
+        // Check if it's an alias first
+        if let Some(expanded) = self.expand_alias(cmd) {
+            println!("{}: aliased to '{}'", cmd, expanded);
+            return;
+        }
+
+        // List of built-in commands
+        let builtins = [
+            "alias", "cat", "clear", "cp", "date", "df", "du", "echo",
+            "edit", "find", "grep", "head", "hello", "help", "history",
+            "hostname", "kill", "less", "ls", "meminfo", "more", "mount",
+            "mv", "ps", "pwd", "reboot", "rm", "shutdown", "sleep", "tail",
+            "time", "touch", "tree", "umount", "unalias", "uptime",
+            "version", "wc", "which", "write"
+        ];
+
+        if builtins.contains(&cmd) {
+            println!("{}: shell built-in command", cmd);
+        } else {
+            println!("{}: command not found", cmd);
+        }
+    }
+
+    fn cmd_sleep(&self, args: &[&str]) {
+        if args.is_empty() {
+            println!("Usage: sleep <seconds>");
+            return;
+        }
+
+        match args[0].parse::<u64>() {
+            Ok(seconds) => {
+                println!("Sleeping for {} second(s)...", seconds);
+
+                // Simple busy-wait sleep using timer ticks
+                use crate::task::timer::current_ticks;
+                let start = current_ticks();
+                let target = start + (seconds * 18);  // ~18 ticks per second
+
+                while current_ticks() < target {
+                    // Busy wait
+                    core::hint::spin_loop();
+                }
+
+                println!("Done");
+            }
+            Err(_) => println!("Error: Invalid number '{}'", args[0]),
+        }
     }
 }

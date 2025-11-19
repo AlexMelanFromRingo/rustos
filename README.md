@@ -18,7 +18,9 @@
 - ✅ Persistent command history - история команд сохраняется между перезагрузками на FAT32
 - ✅ RAM disk - простая in-memory файловая система
 - ✅ FAT32 - чтение и запись на диск через IDE/ATA PIO driver (mount/umount)
-- ✅ Базовые Unix-утилиты (ls, cat, cp, mv, rm, touch, head, tail, wc, write, grep)
+- ✅ Расширенные Unix-утилиты (ls, cat, cp, mv, rm, touch, head, tail, wc, write, grep, pwd, du, find, tree, less, which)
+- ✅ Система алиасов команд (alias/unalias) для удобства работы
+- ✅ Дополнительные утилиты: date, hostname, sleep - вдохновлено OpenComputers
 - ✅ Упрощённые pipes (конвейеры) для связывания команд
 - ✅ Встроенный текстовый редактор (edit) для построчного редактирования
 - ✅ Переключение контекста (context switching) для многозадачности
@@ -384,7 +386,9 @@ futures-util = "0.3.4"          # Stream utilities для async
 - RAM disk файловая система с Unix-утилитами
 - FAT32 filesystem - чтение и запись на диск через IDE/ATA PIO driver (mount/umount)
 - Disk space reporting - команда df для отображения использования дисков
-- Базовые coreutils (ls, cat, cp, mv, rm, touch, head, tail, wc, write, grep, df)
+- Расширенные coreutils (ls, cat, cp, mv, rm, touch, head, tail, wc, write, grep, df, pwd, du, find, tree, less/more, which)
+- Система алиасов команд (alias/unalias) для создания пользовательских команд
+- Дополнительные утилиты (date, hostname, sleep) вдохновленные OpenComputers mod
 - Упрощённые pipes для связывания команд (cat | grep, ls | grep, cat | wc)
 - Context switching - переключение между процессами (основа для многозадачности)
 - Process Scheduler - round-robin планировщик с вытесняющей многозадачностью
