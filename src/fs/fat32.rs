@@ -213,6 +213,11 @@ impl Fat32 {
     pub fn new() -> Result<Self, &'static str> {
         let mut drive = ATA_DRIVE.lock();
 
+        // Check if drive exists before attempting to read
+        if !drive.exists() {
+            return Err("No ATA drive detected");
+        }
+
         // Read boot sector
         let mut boot_sector = [0u8; SECTOR_SIZE];
         drive.read_sector(0, &mut boot_sector)?;
