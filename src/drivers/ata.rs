@@ -297,19 +297,77 @@ impl AtaDrive {
     }
 
     /// Check if a drive exists and is accessible
+    /// Check if the drive exists using IDENTIFY command
+    ///
+    /// This follows OSDev wiki recommendations:
+    /// 1. Check for floating bus (status = 0xFF)
+    /// 2. Send IDENTIFY command
+    /// 3. Check if status = 0 (no drive)
+    /// 4. Wait for DRQ and drain the data to complete IDENTIFY
     pub fn exists(&mut self) -> bool {
         unsafe {
-            // Select master drive
+            // IMPORTANT: Read status BEFORE writing anything to ports
+            // If the bus is floating (no drive), it will read as 0xFF
+            let status = self.status_port.read();
+            if status == 0xFF {
+                return false; // Floating bus - no drive
+            }
+
+            // Select master drive (0xA0)
             self.drive_port.write(0xA0);
 
-            // Small delay
+            // Small delay after drive selection (400ns as per spec)
             for _ in 0..4 {
                 self.status_port.read();
             }
 
-            // Check if status is not 0xFF (no drive)
+            // Set all registers to 0 for IDENTIFY
+            self.sector_count_port.write(0);
+            self.lba_low_port.write(0);
+            self.lba_mid_port.write(0);
+            self.lba_high_port.write(0);
+
+            // Send IDENTIFY command (0xEC)
+            self.command_port.write(0xEC);
+
+            // Read status - if it's 0, the drive does not exist
             let status = self.status_port.read();
-            status != 0xFF && status != 0x00
+            if status == 0 {
+                return false; // No drive exists
+            }
+
+            // Wait for DRQ or ERR with timeout
+            let mut timeout = 10000;
+            loop {
+                let status = self.status_port.read();
+
+                // Check for errors
+                if (status & ATA_SR_ERR) != 0 || (status & ATA_SR_DF) != 0 {
+                    return false; // Drive error
+                }
+
+                // Check if BSY cleared
+                if (status & ATA_SR_BSY) == 0 {
+                    // Check if DRQ set (data ready)
+                    if (status & ATA_SR_DRQ) != 0 {
+                        break; // Drive exists and data is ready
+                    }
+                }
+
+                timeout -= 1;
+                if timeout == 0 {
+                    return false; // Timeout
+                }
+            }
+
+            // IMPORTANT: Drain the IDENTIFY data (256 words)
+            // If we don't read this, the next command will fail
+            for _ in 0..256 {
+                self.data_port.read();
+            }
+
+            // Drive exists and responded correctly
+            true
         }
     }
 }
