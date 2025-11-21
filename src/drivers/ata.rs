@@ -183,6 +183,11 @@ impl AtaDrive {
             // Bit 7: Always 1
             self.drive_port.write(0xE0 | ((lba >> 24) & 0x0F) as u8);
 
+            // CRITICAL: 400ns delay after drive selection (15 reads)
+            for _ in 0..15 {
+                self.status_port.read();
+            }
+
             // Write sector count (1 sector)
             self.sector_count_port.write(1);
 
@@ -202,6 +207,11 @@ impl AtaDrive {
             for i in 0..256 {
                 let word = self.data_port.read();
                 buffer_ptr.add(i).write_volatile(word);
+            }
+
+            // 400ns delay after data transfer to reset DRQ bit
+            for _ in 0..15 {
+                self.status_port.read();
             }
         }
 
@@ -247,6 +257,11 @@ impl AtaDrive {
             // Select drive (master) and set LBA mode
             self.drive_port.write(0xE0 | ((lba >> 24) & 0x0F) as u8);
 
+            // CRITICAL: 400ns delay after drive selection (15 reads)
+            for _ in 0..15 {
+                self.status_port.read();
+            }
+
             // Write sector count (1 sector)
             self.sector_count_port.write(1);
 
@@ -266,6 +281,11 @@ impl AtaDrive {
             for i in 0..256 {
                 let word = buffer_ptr.add(i).read_volatile();
                 self.data_port.write(word);
+            }
+
+            // 400ns delay after data transfer to reset DRQ bit
+            for _ in 0..15 {
+                self.status_port.read();
             }
 
             // Wait for write to complete
@@ -316,8 +336,11 @@ impl AtaDrive {
             // Select master drive (0xA0)
             self.drive_port.write(0xA0);
 
-            // Small delay after drive selection (400ns as per spec)
-            for _ in 0..4 {
+            // CRITICAL: 400ns delay after drive selection
+            // OSDev Wiki: "read the Status register FIFTEEN TIMES,
+            // and only pay attention to the value returned by the last one"
+            // This creates ~420ns delay for drive to set correct values
+            for _ in 0..15 {
                 self.status_port.read();
             }
 
