@@ -212,26 +212,33 @@ impl Fat32 {
     /// Create a new FAT32 filesystem from the primary ATA drive
     pub fn new() -> Result<Self, &'static str> {
         crate::println!("[FAT32] Initializing filesystem...");
+        crate::serial_println!("[FAT32] Initializing filesystem...");
 
         let mut drive = ATA_DRIVE.lock();
 
         // Check if drive exists before attempting to read
         crate::println!("[FAT32] Checking if drive exists...");
+        crate::serial_println!("[FAT32] Checking if drive exists...");
         if !drive.exists() {
             crate::println!("[FAT32] Drive does not exist");
+            crate::serial_println!("[FAT32] Drive does not exist");
             return Err("No ATA drive detected");
         }
         crate::println!("[FAT32] Drive detected!");
+        crate::serial_println!("[FAT32] Drive detected!");
 
         // Read boot sector
         crate::println!("[FAT32] Reading boot sector...");
+        crate::serial_println!("[FAT32] Reading boot sector...");
         let mut boot_sector = [0u8; SECTOR_SIZE];
         drive.read_sector(0, &mut boot_sector)?;
         crate::println!("[FAT32] Boot sector read successfully");
+        crate::serial_println!("[FAT32] Boot sector read successfully");
 
         drop(drive);
 
         crate::println!("[FAT32] Parsing boot sector...");
+        crate::serial_println!("[FAT32] Parsing boot sector...");
 
         // Parse boot sector
         let bpb = unsafe {
@@ -243,13 +250,16 @@ impl Fat32 {
         };
 
         crate::println!("[FAT32] Verifying signature...");
+        crate::serial_println!("[FAT32] Verifying signature...");
         // Verify FAT32 signature
         let signature = u16::from_le_bytes([boot_sector[510], boot_sector[511]]);
         if signature != 0xAA55 {
             crate::println!("[FAT32] Invalid signature: 0x{:04X}", signature);
+            crate::serial_println!("[FAT32] Invalid signature: 0x{:04X}", signature);
             return Err("Invalid boot sector signature");
         }
         crate::println!("[FAT32] Valid signature: 0x{:04X}", signature);
+        crate::serial_println!("[FAT32] Valid signature: 0x{:04X}", signature);
 
         // Calculate first data sector
         let root_dir_sectors = ((bpb.root_entry_count as u32 * 32) + (bpb.bytes_per_sector as u32 - 1)) / bpb.bytes_per_sector as u32;
@@ -278,11 +288,17 @@ impl Fat32 {
         let sectors_per_clus = bpb.sectors_per_cluster;
 
         crate::println!("[FAT32] Filesystem parameters:");
+        crate::serial_println!("[FAT32] Filesystem parameters:");
         crate::println!("  Bytes/sector: {}", bytes_per_sec);
+        crate::serial_println!("  Bytes/sector: {}", bytes_per_sec);
         crate::println!("  Sectors/cluster: {}", sectors_per_clus);
+        crate::serial_println!("  Sectors/cluster: {}", sectors_per_clus);
         crate::println!("  Total sectors: {}", total_sectors);
+        crate::serial_println!("  Total sectors: {}", total_sectors);
         crate::println!("  Total clusters: {}", total_clusters);
+        crate::serial_println!("  Total clusters: {}", total_clusters);
         crate::println!("[FAT32] Initialization complete!");
+        crate::serial_println!("[FAT32] Initialization complete!");
 
         Ok(Fat32 {
             first_data_sector,
