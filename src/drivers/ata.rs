@@ -91,7 +91,7 @@ const SECONDARY_CONTROL_BASE: u16 = 0x376;
 
 /// ATA drive
 pub struct AtaDrive {
-    // I/O ports for primary channel, master drive
+    // I/O ports for primary channel, SLAVE drive (not master!)
     data_port: Port<u16>,
     #[allow(dead_code)]
     error_port: PortReadOnly<u8>,
@@ -109,7 +109,7 @@ pub struct AtaDrive {
 }
 
 impl AtaDrive {
-    /// Create a new ATA drive on the primary bus, master drive
+    /// Create a new ATA drive on the primary bus, SLAVE drive
     pub const fn new() -> Self {
         AtaDrive {
             data_port: Port::new(PRIMARY_IO_BASE),
@@ -175,13 +175,14 @@ impl AtaDrive {
             // Wait for drive to be ready
             self.wait_ready()?;
 
-            // Select drive (master) and set LBA mode
+            // Select PRIMARY SLAVE drive and set LBA mode
             // Bits 0-3: LBA bits 24-27
-            // Bit 4: 0 = master, 1 = slave
+            // Bit 4: 0 = master, 1 = slave (we use SLAVE = 1)
             // Bit 5: Always 1
             // Bit 6: 1 = LBA mode, 0 = CHS mode
             // Bit 7: Always 1
-            self.drive_port.write(0xE0 | ((lba >> 24) & 0x0F) as u8);
+            // 0xF0 = 0xE0 | 0x10 (bit 4 set for slave)
+            self.drive_port.write(0xF0 | ((lba >> 24) & 0x0F) as u8);
 
             // CRITICAL: 400ns delay after drive selection (15 reads)
             for _ in 0..15 {
@@ -254,8 +255,9 @@ impl AtaDrive {
             // Wait for drive to be ready
             self.wait_ready()?;
 
-            // Select drive (master) and set LBA mode
-            self.drive_port.write(0xE0 | ((lba >> 24) & 0x0F) as u8);
+            // Select PRIMARY SLAVE drive and set LBA mode
+            // 0xF0 = slave + LBA mode (bit 4 set)
+            self.drive_port.write(0xF0 | ((lba >> 24) & 0x0F) as u8);
 
             // CRITICAL: 400ns delay after drive selection (15 reads)
             for _ in 0..15 {
@@ -333,8 +335,9 @@ impl AtaDrive {
                 return false; // Floating bus - no drive
             }
 
-            // Select master drive (0xA0)
-            self.drive_port.write(0xA0);
+            // Select PRIMARY SLAVE drive (0xB0)
+            // We use slave because master is the boot disk
+            self.drive_port.write(0xB0);
 
             // CRITICAL: 400ns delay after drive selection
             // OSDev Wiki: "read the Status register FIFTEEN TIMES,
@@ -403,8 +406,8 @@ pub fn init() {
     let mut drive = ATA_DRIVE.lock();
 
     if drive.exists() {
-        crate::println!("[ATA] Primary master drive detected");
+        crate::println!("[ATA] Primary slave drive detected (FAT32 disk)");
     } else {
-        crate::println!("[ATA] No primary master drive found");
+        crate::println!("[ATA] No primary slave drive found");
     }
 }
