@@ -144,17 +144,20 @@ impl AtaDrive {
     fn wait_data(&mut self) -> Result<(), &'static str> {
         unsafe {
             // Wait for BSY to clear and DRQ to set
-            let mut status;
-            for _ in 0..1000 {
-                status = self.status_port.read();
-                if (status & ATA_SR_BSY) == 0 && (status & ATA_SR_DRQ) != 0 {
-                    return Ok(());
-                }
+            for _ in 0..10000 {
+                let status = self.status_port.read();
+
+                // Check for errors first
                 if (status & ATA_SR_ERR) != 0 {
                     return Err("ATA error");
                 }
                 if (status & ATA_SR_DF) != 0 {
                     return Err("ATA drive fault");
+                }
+
+                // Check if ready (BSY=0, DRQ=1)
+                if (status & ATA_SR_BSY) == 0 && (status & ATA_SR_DRQ) != 0 {
+                    return Ok(());
                 }
             }
             Err("ATA timeout waiting for data")
@@ -356,13 +359,30 @@ impl AtaDrive {
             // Send IDENTIFY command (0xEC)
             self.command_port.write(0xEC);
 
-            // Read status - if it's 0, the drive does not exist
-            let status = self.status_port.read();
-            if status == 0 {
-                return false; // No drive exists
+            // CRITICAL: Poll status until BSY clears OR timeout
+            // OSDev Wiki: Must poll BSY first, then check if status == 0
+            let mut timeout = 10000;
+            loop {
+                let status = self.status_port.read();
+
+                // If status is 0, no drive exists
+                if status == 0 {
+                    return false;
+                }
+
+                // If BSY cleared, drive responded - break and continue
+                if (status & ATA_SR_BSY) == 0 {
+                    break;
+                }
+
+                timeout -= 1;
+                if timeout == 0 {
+                    return false; // Timeout waiting for BSY to clear
+                }
             }
 
-            // Wait for DRQ or ERR with timeout
+            // Now wait for DRQ (data ready) or ERR
+            // BSY already cleared in previous loop
             let mut timeout = 10000;
             loop {
                 let status = self.status_port.read();
@@ -372,17 +392,14 @@ impl AtaDrive {
                     return false; // Drive error
                 }
 
-                // Check if BSY cleared
-                if (status & ATA_SR_BSY) == 0 {
-                    // Check if DRQ set (data ready)
-                    if (status & ATA_SR_DRQ) != 0 {
-                        break; // Drive exists and data is ready
-                    }
+                // Check if DRQ set (data ready)
+                if (status & ATA_SR_DRQ) != 0 {
+                    break; // Drive exists and data is ready
                 }
 
                 timeout -= 1;
                 if timeout == 0 {
-                    return false; // Timeout
+                    return false; // Timeout waiting for DRQ
                 }
             }
 

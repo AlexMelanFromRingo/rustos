@@ -25,11 +25,11 @@ echo "   Для выхода: Ctrl+A, затем X"
 echo ""
 
 # Запуск QEMU с двумя IDE дисками:
-# - IDE Primary Master (index=0): rustos.bin - загрузочный диск
-# - IDE Primary Slave (index=1): disk.img - FAT32 для данных
+# - Primary Master (-hda): rustos.bin - загрузочный диск
+# - Primary Slave (-hdb): disk.img - FAT32 для данных
 # ATA драйвер настроен на чтение Slave (0xB0), не Master (0xA0)
 qemu-system-x86_64 \
-    -drive format=raw,file=rustos.bin,if=ide,index=0 \
-    -drive format=raw,file=disk.img,if=ide,index=1 \
+    -hda rustos.bin \
+    -hdb disk.img \
     -serial stdio \
     "$@"
