@@ -17,7 +17,7 @@
 - ✅ Интерактивный shell с редактируемым буфером и навигацией курсора
 - ✅ Persistent command history - история команд сохраняется между перезагрузками на FAT32
 - ✅ RAM disk - простая in-memory файловая система
-- ✅ FAT32 - полная поддержка чтения/записи и вложенных директорий через IDE/ATA PIO driver
+- ✅ FAT32 - полная поддержка чтения/записи и вложенных директорий с автомонтированием при загрузке
 - ✅ Расширенные Unix-утилиты (ls, cat, cp, mv, rm, touch, head, tail, wc, write, grep, pwd, du, find, tree, less, which)
 - ✅ Полноценная навигация по директориям (cd, mkdir, rmdir) с поддержкой путей и вложенных папок
 - ✅ Система алиасов команд (alias/unalias) для удобства работы
@@ -403,6 +403,95 @@ futures-util = "0.3.4"          # Stream utilities для async
 - Process Scheduler - round-robin планировщик с вытесняющей многозадачностью
 - Управление процессами - команды ps и kill для мониторинга и управления процессами
 - Комплексная система тестирования (VFS, heap, integration, panic tests)
+
+## Работа с файловой системой
+
+### Автоматическое монтирование FAT32
+
+RustOS **автоматически пытается смонтировать FAT32** при загрузке:
+
+- ✅ **Если FAT32 диск найден** → монтируется автоматически
+  - Все файлы и история команд сохраняются между перезагрузками
+  - Текущая директория работает с FAT32
+  - `ls`, `cd`, `mkdir` и другие команды работают с диском
+
+- ⚠️ **Если FAT32 не найден** → используется RAM disk
+  - Данные теряются при перезагрузке
+  - Можно смонтировать вручную: `mount fat32`
+  - Полезно для тестирования без диска
+
+### Создание FAT32 диска для QEMU
+
+Чтобы данные сохранялись между перезагрузками, создайте виртуальный диск:
+
+```bash
+# 1. Создать образ диска 100MB
+dd if=/dev/zero of=disk.img bs=1M count=100
+
+# 2. Отформатировать в FAT32
+mkfs.fat -F 32 disk.img
+
+# 3. Запустить QEMU с двумя дисками
+qemu-system-x86_64 \
+    -drive format=raw,file=target/x86_64-rustos/release/bootimage-rustos.bin \
+    -drive format=raw,file=disk.img \
+    -serial stdio
+```
+
+**Что произойдет при загрузке:**
+1. ✓ RustOS автоматически найдет FAT32 на втором диске
+2. ✓ Смонтирует его и загрузит `.history`
+3. ✓ Все созданные файлы сохранятся на диск
+4. ✓ При следующей загрузке все файлы будут на месте!
+
+### Пример работы с постоянным хранилищем
+
+```bash
+# После автомонтирования FAT32:
+> pwd
+/
+
+> mkdir projects
+Directory 'projects' created
+
+> cd projects
+Changed directory to: /projects
+
+> write hello.txt "Hello from persistent storage!"
+> cat hello.txt
+Hello from persistent storage!
+
+> reboot
+
+# После перезагрузки:
+> ls
+/ (2 items):
+  projects - <DIR>
+  .history - 125 bytes
+
+> cd projects
+> ls
+/projects (1 items):
+  hello.txt - 32 bytes
+
+> cat hello.txt
+Hello from persistent storage!
+```
+
+### Структура файловой системы
+
+```
+/ (FAT32 - постоянное хранилище)
+├── .history          # История команд (автосохранение)
+├── projects/         # Ваши проекты
+│   └── rustos/
+│       ├── src/
+│       │   └── main.rs
+│       └── docs/
+│           └── readme.txt
+├── data/             # Любые данные
+└── config/           # Конфигурация
+```
 
 ### Планируется 📋
 

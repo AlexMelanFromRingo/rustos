@@ -115,6 +115,21 @@ async fn status_task() {
     }
 }
 
+/// Try to mount FAT32 filesystem automatically at startup
+fn try_mount_fat32() -> Result<(), &'static str> {
+    use rustos::fs::fat32::{Fat32, FAT32};
+
+    // Try to create FAT32 instance (this reads boot sector and validates)
+    let fat32_fs = Fat32::new()?;
+
+    // Store in global singleton
+    let mut fat32 = FAT32.lock();
+    *fat32 = Some(fat32_fs);
+    drop(fat32);
+
+    Ok(())
+}
+
 async fn keyboard_task() {
     use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
     use futures_util::stream::StreamExt;
@@ -122,6 +137,21 @@ async fn keyboard_task() {
     use rustos::shell::Shell;
     use rustos::vga_buffer::WRITER;
     use x86_64::instructions::interrupts;
+
+    // Try to auto-mount FAT32 at startup
+    println!("Attempting to mount FAT32 filesystem...");
+    match try_mount_fat32() {
+        Ok(()) => {
+            println!("✓ FAT32 filesystem mounted successfully!");
+            println!("  Files and command history will persist across reboots.");
+        }
+        Err(e) => {
+            println!("⚠ Could not mount FAT32: {}", e);
+            println!("  Using RAM disk (data will be lost on reboot).");
+            println!("  Use 'mount fat32' to mount manually later.");
+        }
+    }
+    println!();
 
     let mut scancodes = ScancodeStream::new();
     let mut keyboard = Keyboard::new(
