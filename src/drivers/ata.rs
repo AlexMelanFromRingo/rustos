@@ -127,11 +127,16 @@ impl AtaDrive {
     }
 
     /// Wait for the drive to be ready (not busy)
-    fn wait_ready(&mut self) {
+    fn wait_ready(&mut self) -> Result<(), &'static str> {
         unsafe {
-            while (self.status_port.read() & ATA_SR_BSY) != 0 {
+            for _ in 0..10000 {
+                let status = self.status_port.read();
+                if (status & ATA_SR_BSY) == 0 {
+                    return Ok(());
+                }
                 x86_64::instructions::nop();
             }
+            Err("ATA timeout waiting for drive ready")
         }
     }
 
@@ -168,7 +173,7 @@ impl AtaDrive {
 
         unsafe {
             // Wait for drive to be ready
-            self.wait_ready();
+            self.wait_ready()?;
 
             // Select drive (master) and set LBA mode
             // Bits 0-3: LBA bits 24-27
@@ -237,7 +242,7 @@ impl AtaDrive {
 
         unsafe {
             // Wait for drive to be ready
-            self.wait_ready();
+            self.wait_ready()?;
 
             // Select drive (master) and set LBA mode
             self.drive_port.write(0xE0 | ((lba >> 24) & 0x0F) as u8);
@@ -264,7 +269,7 @@ impl AtaDrive {
             }
 
             // Wait for write to complete
-            self.wait_ready();
+            self.wait_ready()?;
         }
 
         Ok(())
