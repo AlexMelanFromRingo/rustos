@@ -160,6 +160,7 @@ async fn keyboard_task() {
     while let Some(scancode) = scancodes.next().await {
         if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
             if let Some(key) = keyboard.process_keyevent(key_event) {
+                let prompt_len = shell.prompt_len();  // Cache prompt length
                 match key {
                     DecodedKey::Unicode(character) => {
                         if character == '\n' {
@@ -171,7 +172,7 @@ async fn keyboard_task() {
                             shell.move_cursor_home();
                             interrupts::without_interrupts(|| {
                                 let mut writer = WRITER.lock();
-                                writer.set_cursor_column(2);
+                                writer.set_cursor_column(prompt_len);
                             });
                         } else if character == '\u{0005}' {
                             // Ctrl+E - Move to end of line
@@ -179,7 +180,7 @@ async fn keyboard_task() {
                             shell.move_cursor_end();
                             interrupts::without_interrupts(|| {
                                 let mut writer = WRITER.lock();
-                                writer.set_cursor_column(2 + buffer_len);
+                                writer.set_cursor_column(prompt_len + buffer_len);
                             });
                         } else if character == '\u{0015}' {
                             // Ctrl+U - Delete from cursor to beginning
@@ -191,7 +192,7 @@ async fn keyboard_task() {
                                 interrupts::without_interrupts(|| {
                                     let mut writer = WRITER.lock();
                                     // Move cursor to start of buffer (after prompt "> ")
-                                    writer.set_cursor_column(2);
+                                    writer.set_cursor_column(prompt_len);
                                     drop(writer);
 
                                     // Print new text
@@ -203,7 +204,7 @@ async fn keyboard_task() {
 
                                     // Set cursor to beginning (after prompt)
                                     writer = WRITER.lock();
-                                    writer.set_cursor_column(2);
+                                    writer.set_cursor_column(prompt_len);
                                 });
                             }
                         } else if character == '\u{0017}' {
@@ -217,7 +218,7 @@ async fn keyboard_task() {
                                 interrupts::without_interrupts(|| {
                                     let mut writer = WRITER.lock();
                                     // Move cursor to start of buffer (after prompt "> ")
-                                    writer.set_cursor_column(2);
+                                    writer.set_cursor_column(prompt_len);
                                     drop(writer);
 
                                     // Print new text
@@ -229,7 +230,7 @@ async fn keyboard_task() {
 
                                     // Set cursor to correct position
                                     writer = WRITER.lock();
-                                    writer.set_cursor_column(2 + cursor_pos);
+                                    writer.set_cursor_column(prompt_len + cursor_pos);
                                 });
                             }
                         } else if character == '\u{0008}' {
@@ -243,7 +244,7 @@ async fn keyboard_task() {
                                 interrupts::without_interrupts(|| {
                                     let mut writer = WRITER.lock();
                                     // Move cursor to start of buffer (after prompt "> ")
-                                    writer.set_cursor_column(2);
+                                    writer.set_cursor_column(prompt_len);
                                     drop(writer);
 
                                     // Print new text
@@ -255,7 +256,7 @@ async fn keyboard_task() {
 
                                     // Set cursor to correct position
                                     writer = WRITER.lock();
-                                    writer.set_cursor_column(2 + cursor_pos);
+                                    writer.set_cursor_column(prompt_len + cursor_pos);
                                 });
                             }
                         } else if character == '\t' {
@@ -267,7 +268,7 @@ async fn keyboard_task() {
                                 interrupts::without_interrupts(|| {
                                     let mut writer = WRITER.lock();
                                     // Move cursor to start of buffer (after prompt "> ")
-                                    writer.set_cursor_column(2);
+                                    writer.set_cursor_column(prompt_len);
                                     drop(writer);
 
                                     // Print completed command
@@ -281,7 +282,7 @@ async fn keyboard_task() {
 
                                     // Set cursor to end of completed text
                                     writer = WRITER.lock();
-                                    writer.set_cursor_column(2 + new_len);
+                                    writer.set_cursor_column(prompt_len + new_len);
                                 });
                                 shell.set_buffer(completed);
                             }
@@ -298,7 +299,7 @@ async fn keyboard_task() {
                             interrupts::without_interrupts(|| {
                                 let mut writer = WRITER.lock();
                                 // Move cursor to start of buffer (after prompt "> ")
-                                writer.set_cursor_column(2);
+                                writer.set_cursor_column(prompt_len);
                                 drop(writer);
 
                                 // Print new text
@@ -312,7 +313,7 @@ async fn keyboard_task() {
 
                                 // Set cursor to correct position (prompt + cursor_pos)
                                 writer = WRITER.lock();
-                                writer.set_cursor_column(2 + cursor_pos);
+                                writer.set_cursor_column(prompt_len + cursor_pos);
                             });
                         }
                         // Ignore other control characters
@@ -331,7 +332,7 @@ async fn keyboard_task() {
                                     interrupts::without_interrupts(|| {
                                         let mut writer = WRITER.lock();
                                         // Move cursor to start of buffer (after prompt "> ")
-                                        writer.set_cursor_column(2);
+                                        writer.set_cursor_column(prompt_len);
                                         drop(writer);
 
                                         // Print new text
@@ -343,7 +344,7 @@ async fn keyboard_task() {
 
                                         // Set cursor to correct position
                                         writer = WRITER.lock();
-                                        writer.set_cursor_column(2 + cursor_pos);
+                                        writer.set_cursor_column(prompt_len + cursor_pos);
                                     });
                                 }
                             }
@@ -358,7 +359,7 @@ async fn keyboard_task() {
                                     interrupts::without_interrupts(|| {
                                         let mut writer = WRITER.lock();
                                         // Move cursor to start of buffer (after prompt "> ")
-                                        writer.set_cursor_column(2);
+                                        writer.set_cursor_column(prompt_len);
                                         drop(writer);
 
                                         // Print new text
@@ -370,7 +371,7 @@ async fn keyboard_task() {
 
                                         // Set cursor to correct position
                                         writer = WRITER.lock();
-                                        writer.set_cursor_column(2 + cursor_pos);
+                                        writer.set_cursor_column(prompt_len + cursor_pos);
                                     });
                                 }
                             }
@@ -381,7 +382,7 @@ async fn keyboard_task() {
                                     interrupts::without_interrupts(|| {
                                         let mut writer = WRITER.lock();
                                         // Set cursor to absolute position (prompt + cursor_pos)
-                                        writer.set_cursor_column(2 + cursor_pos);
+                                        writer.set_cursor_column(prompt_len + cursor_pos);
                                     });
                                 }
                             }
@@ -392,7 +393,7 @@ async fn keyboard_task() {
                                     interrupts::without_interrupts(|| {
                                         let mut writer = WRITER.lock();
                                         // Set cursor to absolute position (prompt + cursor_pos)
-                                        writer.set_cursor_column(2 + cursor_pos);
+                                        writer.set_cursor_column(prompt_len + cursor_pos);
                                     });
                                 }
                             }
@@ -402,7 +403,7 @@ async fn keyboard_task() {
                                 // Set VGA cursor to prompt position (2 chars for "> ")
                                 interrupts::without_interrupts(|| {
                                     let mut writer = WRITER.lock();
-                                    writer.set_cursor_column(2);
+                                    writer.set_cursor_column(prompt_len);
                                 });
                             }
                             KeyCode::End => {
@@ -412,7 +413,7 @@ async fn keyboard_task() {
                                 // Set VGA cursor to prompt + buffer length
                                 interrupts::without_interrupts(|| {
                                     let mut writer = WRITER.lock();
-                                    writer.set_cursor_column(2 + buffer_len);
+                                    writer.set_cursor_column(prompt_len + buffer_len);
                                 });
                             }
                             KeyCode::ArrowUp => {
@@ -423,7 +424,7 @@ async fn keyboard_task() {
                                     interrupts::without_interrupts(|| {
                                         let mut writer = WRITER.lock();
                                         // Move cursor to start of buffer (after prompt "> ")
-                                        writer.set_cursor_column(2);
+                                        writer.set_cursor_column(prompt_len);
                                         drop(writer);
 
                                         // Print new command
@@ -437,7 +438,7 @@ async fn keyboard_task() {
 
                                         // Set cursor to end of new command
                                         writer = WRITER.lock();
-                                        writer.set_cursor_column(2 + new_len);
+                                        writer.set_cursor_column(prompt_len + new_len);
                                     });
                                     shell.set_buffer(cmd);
                                 }
@@ -450,7 +451,7 @@ async fn keyboard_task() {
                                     interrupts::without_interrupts(|| {
                                         let mut writer = WRITER.lock();
                                         // Move cursor to start of buffer (after prompt "> ")
-                                        writer.set_cursor_column(2);
+                                        writer.set_cursor_column(prompt_len);
                                         drop(writer);
 
                                         // Print new command
@@ -464,7 +465,7 @@ async fn keyboard_task() {
 
                                         // Set cursor to end of new command
                                         writer = WRITER.lock();
-                                        writer.set_cursor_column(2 + new_len);
+                                        writer.set_cursor_column(prompt_len + new_len);
                                     });
                                     shell.set_buffer(cmd);
                                 }
@@ -478,7 +479,7 @@ async fn keyboard_task() {
                                     interrupts::without_interrupts(|| {
                                         let mut writer = WRITER.lock();
                                         // Move cursor to start of buffer (after prompt "> ")
-                                        writer.set_cursor_column(2);
+                                        writer.set_cursor_column(prompt_len);
                                         drop(writer);
 
                                         // Print completed command
@@ -492,7 +493,7 @@ async fn keyboard_task() {
 
                                         // Set cursor to end of completed text
                                         writer = WRITER.lock();
-                                        writer.set_cursor_column(2 + new_len);
+                                        writer.set_cursor_column(prompt_len + new_len);
                                     });
                                     shell.set_buffer(completed);
                                 }

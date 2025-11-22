@@ -31,9 +31,9 @@ const EM_X86_64: u16 = 62;  // AMD x86-64
 const PT_LOAD: u32 = 1;  // Loadable segment
 
 /// Program header flags
-const PF_X: u32 = 1;  // Executable
-const PF_W: u32 = 2;  // Writable
-const PF_R: u32 = 4;  // Readable
+const _PF_X: u32 = 1;  // Executable
+const _PF_W: u32 = 2;  // Writable
+const _PF_R: u32 = 4;  // Readable
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]

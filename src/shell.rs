@@ -154,6 +154,11 @@ impl Shell {
         self.cursor_pos = self.buffer.len();
     }
 
+    /// Get the display length of the prompt (current_dir + "> ")
+    pub fn prompt_len(&self) -> usize {
+        self.current_dir.len() + self.prompt.len()
+    }
+
     pub fn get_cursor_pos(&self) -> usize {
         self.cursor_pos
     }
@@ -1963,12 +1968,13 @@ impl Shell {
     }
 
     /// Test user mode (Ring 3) and system calls
+    #[allow(unreachable_code)]
     fn cmd_usermode(&mut self) {
         println!("Testing Ring 3 user mode with real privilege separation!");
         println!();
 
         // Get function pointer and size
-        let fn_ptr = crate::userspace::user_mode_demo as usize;
+        let fn_ptr = crate::userspace::user_mode_demo as *const () as usize;
         let fn_size = crate::userspace::get_demo_size();
 
         println!("Kernel -> User Mode Transition:");

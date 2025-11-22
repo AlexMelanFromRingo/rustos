@@ -45,7 +45,7 @@ lazy_static! {
 
         (gdt, Selectors {
             kernel_code_selector,
-            kernel_data_selector,
+            _kernel_data_selector: kernel_data_selector,
             user_code_selector,
             user_data_selector,
             tss_selector,
@@ -55,7 +55,7 @@ lazy_static! {
 
 struct Selectors {
     kernel_code_selector: SegmentSelector,
-    kernel_data_selector: SegmentSelector,
+    _kernel_data_selector: SegmentSelector,
     user_code_selector: SegmentSelector,
     user_data_selector: SegmentSelector,
     tss_selector: SegmentSelector,
@@ -100,7 +100,7 @@ pub fn init_syscall() {
         Msr::new(IA32_STAR).write(star_value);
 
         // LSTAR - syscall handler entry point
-        Msr::new(IA32_LSTAR).write(syscall_handler as u64);
+        Msr::new(IA32_LSTAR).write(syscall_handler as *const () as u64);
 
         // FMASK - mask RFLAGS.IF (bit 9) during syscall to disable interrupts
         Msr::new(IA32_FMASK).write(0x200); // IF flag
@@ -125,10 +125,8 @@ static mut SYSCALL_STACK: [u8; 4096 * 4] = [0; 4096 * 4];
 
 /// Get kernel stack pointer for syscalls
 fn get_kernel_stack_ptr() -> u64 {
-    unsafe {
-        let stack_start = SYSCALL_STACK.as_ptr() as u64;
-        stack_start + (SYSCALL_STACK.len() as u64)
-    }
+    let stack_start = core::ptr::addr_of!(SYSCALL_STACK) as u64;
+    stack_start + (4096 * 4)
 }
 
 /// Syscall handler entry point

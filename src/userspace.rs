@@ -98,19 +98,19 @@ pub extern "C" fn user_mode_demo() {
     // We need to use stack-allocated arrays instead
 
     // Message 1
-    let mut msg1 = *b"Hello from Ring 3 user space!\n\0";
+    let msg1 = *b"Hello from Ring 3 user space!\n\0";
     syscall_write(1, msg1.as_ptr(), msg1.len() - 1);
 
     // Message 2
-    let mut msg2 = *b"System calls are working!\n\0";
+    let msg2 = *b"System calls are working!\n\0";
     syscall_write(1, msg2.as_ptr(), msg2.len() - 1);
 
     // Get PID
-    let pid = syscall_getpid();
+    let _pid = syscall_getpid();
     // Can't print PID easily without kernel functions, so just call it
 
     // Message 3
-    let mut msg3 = *b"Exiting from user mode...\n\0";
+    let msg3 = *b"Exiting from user mode...\n\0";
     syscall_write(1, msg3.as_ptr(), msg3.len() - 1);
 
     // Exit
