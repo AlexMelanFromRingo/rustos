@@ -222,12 +222,10 @@ pub fn sys_exit(exit_code: usize) -> isize {
     crate::process::scheduler::schedule();
 
     // If we reach here, there are no other processes to run
-    // Print message and halt gracefully
-    println!("\n[Kernel] All processes exited. System halted.");
-    println!("Press Ctrl+Alt+Del to reboot.");
-
-    // Enter kernel idle loop
-    crate::hlt_loop();
+    // Restore kernel context and return to shell
+    unsafe {
+        crate::userspace::restore_kernel_context_and_return();
+    }
 }
 
 /// sys_fork - create child process (copy of current)

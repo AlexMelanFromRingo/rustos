@@ -8,6 +8,33 @@
 use crate::gdt;
 use crate::memory::user_allocator;
 use x86_64::VirtAddr;
+use core::sync::atomic::{AtomicBool, Ordering};
+
+/// Saved kernel context for returning from user mode
+///
+/// This structure holds all callee-saved registers according to
+/// the System V AMD64 ABI calling convention.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct KernelContext {
+    // Callee-saved registers (must be preserved across function calls)
+    rbx: u64,
+    rbp: u64,
+    r12: u64,
+    r13: u64,
+    r14: u64,
+    r15: u64,
+    rsp: u64,
+    rip: u64,  // Return address
+}
+
+/// Global storage for saved kernel context
+static mut SAVED_CONTEXT: KernelContext = KernelContext {
+    rbx: 0, rbp: 0, r12: 0, r13: 0, r14: 0, r15: 0, rsp: 0, rip: 0,
+};
+
+/// Flag indicating whether we have a saved context
+static HAS_SAVED_CONTEXT: AtomicBool = AtomicBool::new(false);
 
 /// Copy code to user space
 ///
@@ -227,4 +254,84 @@ pub unsafe fn jump_to_ring3(entry_point: u64, stack_addr: u64, stack_size: u64) 
         rip = in(reg) entry_point,
         options(noreturn)
     );
+}
+
+/// Save current kernel context before jumping to user mode
+///
+/// This function saves all callee-saved registers so we can return
+/// to the exact same point after the user process exits.
+///
+/// # Safety
+/// Must be called from a function that will later call jump_to_ring3
+unsafe fn save_kernel_context_full() {
+    core::arch::asm!(
+        // Save all callee-saved registers to SAVED_CONTEXT
+        "lea rax, [rip + {saved_context}]",
+        "mov [rax + 0], rbx",      // offset 0: rbx
+        "mov [rax + 8], rbp",      // offset 8: rbp
+        "mov [rax + 16], r12",     // offset 16: r12
+        "mov [rax + 24], r13",     // offset 24: r13
+        "mov [rax + 32], r14",     // offset 32: r14
+        "mov [rax + 40], r15",     // offset 40: r15
+        "mov [rax + 48], rsp",     // offset 48: rsp
+        // Save return address (top of stack)
+        "mov rcx, [rsp]",
+        "mov [rax + 56], rcx",     // offset 56: rip (return address)
+        saved_context = sym SAVED_CONTEXT,
+        out("rax") _,
+        out("rcx") _,
+    );
+    
+    HAS_SAVED_CONTEXT.store(true, Ordering::SeqCst);
+}
+
+/// Restore kernel context and return from user mode
+///
+/// This function restores all saved registers and jumps back to
+/// the point where save_kernel_context_full was called.
+///
+/// # Safety
+/// Must only be called from sys_exit when process has cleanly exited
+pub unsafe fn restore_kernel_context_and_return() -> ! {
+    if !HAS_SAVED_CONTEXT.load(Ordering::SeqCst) {
+        // No saved context - halt system
+        crate::println!("\n[Kernel] No saved context. System halted.");
+        crate::hlt_loop();
+    }
+    
+    HAS_SAVED_CONTEXT.store(false, Ordering::SeqCst);
+    
+    core::arch::asm!(
+        // Load address of SAVED_CONTEXT
+        "lea rax, [rip + {saved_context}]",
+        // Restore all callee-saved registers
+        "mov rbx, [rax + 0]",
+        "mov rbp, [rax + 8]",
+        "mov r12, [rax + 16]",
+        "mov r13, [rax + 24]",
+        "mov r14, [rax + 32]",
+        "mov r15, [rax + 40]",
+        "mov rsp, [rax + 48]",
+        "mov rcx, [rax + 56]",    // Load return address
+        // Jump to return address (back to exec_with_return_proper)
+        "jmp rcx",
+        saved_context = sym SAVED_CONTEXT,
+        options(noreturn)
+    );
+}
+
+/// Execute user code with proper context saving
+///
+/// This wrapper saves full kernel context before jumping to ring 3,
+/// allowing sys_exit to restore everything and return cleanly.
+pub unsafe fn exec_with_return_proper(entry_point: u64, stack_bottom: u64, stack_size: u64) {
+    // Save ALL callee-saved registers
+    save_kernel_context_full();
+    
+    // Jump to user mode - if process calls exit, restore_kernel_context_and_return()
+    // will restore our registers and jump back here
+    jump_to_ring3(entry_point, stack_bottom, stack_size);
+    
+    // We'll return here after process exits!
+    // jump_to_ring3 is marked noreturn, but we manually jump back
 }
