@@ -67,16 +67,6 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // Initialize syscall support (after heap and GDT)
     rustos::init_syscall();
 
-    // Load embedded ELF binaries into RAMDISK
-    {
-        use rustos::fs::ramdisk::RAMDISK;
-        use rustos::embedded;
-
-        RAMDISK.lock().write_file("hello.elf", embedded::HELLO_ELF.to_vec())
-            .expect("Failed to write hello.elf to RAMDISK");
-        println!("Loaded hello.elf ({} bytes) into RAMDISK", embedded::HELLO_ELF.len());
-    }
-
     println!("Kernel initialized successfully!");
     println!();
 
