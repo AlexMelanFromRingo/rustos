@@ -186,7 +186,7 @@ impl<'a> ElfLoader<'a> {
         let mut lowest_addr = u64::MAX;
         let mut highest_addr = 0u64;
 
-        // First pass: find address range
+        // First pass: find address range (only consider segments in user space)
         for phdr in phdrs {
             if phdr.p_type != PT_LOAD {
                 continue;
@@ -194,6 +194,11 @@ impl<'a> ElfLoader<'a> {
 
             let start = phdr.p_vaddr;
             let end = phdr.p_vaddr + phdr.p_memsz;
+
+            // Skip segments outside user space (e.g., ELF metadata at low addresses)
+            if start < super::memory::userspace::USER_SPACE_START {
+                continue;
+            }
 
             if start < lowest_addr {
                 lowest_addr = start;
@@ -227,6 +232,11 @@ impl<'a> ElfLoader<'a> {
         // Second pass: load segments
         for phdr in phdrs {
             if phdr.p_type != PT_LOAD {
+                continue;
+            }
+
+            // Skip segments outside user space (same as first pass)
+            if phdr.p_vaddr < super::memory::userspace::USER_SPACE_START {
                 continue;
             }
 
