@@ -15,6 +15,9 @@ pub static PICS: spin::Mutex<ChainedPics> =
 pub enum InterruptIndex {
     Timer = PIC_1_OFFSET,
     Keyboard,
+    // Add more IRQs as needed
+    PrimaryATA = PIC_2_OFFSET + 6,   // IRQ14 (0x2E = 46)
+    SecondaryATA = PIC_2_OFFSET + 7, // IRQ15 (0x2F = 47)
 }
 
 impl InterruptIndex {
@@ -41,6 +44,10 @@ lazy_static! {
             .set_handler_fn(timer_interrupt_handler);
         idt[InterruptIndex::Keyboard.as_usize()]
             .set_handler_fn(keyboard_interrupt_handler);
+        idt[InterruptIndex::PrimaryATA.as_usize()]
+            .set_handler_fn(primary_ata_interrupt_handler);
+        idt[InterruptIndex::SecondaryATA.as_usize()]
+            .set_handler_fn(secondary_ata_interrupt_handler);
         idt
     };
 }
@@ -113,6 +120,31 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(
     unsafe {
         PICS.lock()
             .notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8());
+    }
+}
+
+extern "x86-interrupt" fn primary_ata_interrupt_handler(
+    _stack_frame: InterruptStackFrame)
+{
+    // ATA interrupt fired - acknowledge it by reading status register
+    // This is handled in the ATA driver itself, so we just acknowledge the IRQ
+    crate::serial_println!("[IRQ] Primary ATA interrupt (IRQ14)");
+
+    unsafe {
+        PICS.lock()
+            .notify_end_of_interrupt(InterruptIndex::PrimaryATA.as_u8());
+    }
+}
+
+extern "x86-interrupt" fn secondary_ata_interrupt_handler(
+    _stack_frame: InterruptStackFrame)
+{
+    // Secondary ATA interrupt
+    crate::serial_println!("[IRQ] Secondary ATA interrupt (IRQ15)");
+
+    unsafe {
+        PICS.lock()
+            .notify_end_of_interrupt(InterruptIndex::SecondaryATA.as_u8());
     }
 }
 
