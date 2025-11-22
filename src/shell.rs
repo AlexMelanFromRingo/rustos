@@ -1959,16 +1959,40 @@ impl Shell {
 
     /// Test user mode (Ring 3) and system calls
     fn cmd_usermode(&mut self) {
-        println!("Testing user mode (Ring 3) and system calls...");
-        println!("Transitioning from kernel mode (Ring 0) to user mode (Ring 3)");
+        println!("Testing system calls infrastructure...");
+        println!("NOTE: Full Ring 3 transition requires identity-mapped user memory");
+        println!("For now, testing syscall dispatcher directly from kernel mode:");
         println!();
 
-        // Jump to user mode and execute demo function
-        unsafe {
-            crate::userspace::jump_to_usermode(crate::userspace::user_mode_demo as usize);
-        }
+        // Test syscall dispatcher directly (without Ring 3 transition)
+        println!("[Test 1] Testing sys_getpid...");
+        let result = crate::syscall::syscall_dispatcher(39, 0, 0, 0, 0, 0, 0);
+        println!("  getpid() = {}", result);
+        println!();
 
-        // Should never reach here - user_mode_demo calls exit syscall
-        println!("ERROR: Returned from user mode unexpectedly!");
+        println!("[Test 2] Testing sys_write to STDOUT...");
+        let msg = b"Hello from syscall test!\n";
+        let result = crate::syscall::syscall_dispatcher(
+            1,  // SYS_WRITE
+            1,  // STDOUT
+            msg.as_ptr() as usize,
+            msg.len(),
+            0, 0, 0
+        );
+        println!("  write() returned {}", result);
+        println!();
+
+        println!("[Test 3] Testing invalid syscall...");
+        let result = crate::syscall::syscall_dispatcher(999, 0, 0, 0, 0, 0, 0);
+        println!("  Invalid syscall returned: {}", result);
+        println!();
+
+        println!("Syscall infrastructure tests completed!");
+        println!();
+        println!("To enable full Ring 3 user mode, we need to:");
+        println!("  1. Create identity-mapped memory for user space (0x00000000-0x7FFFFFFF)");
+        println!("  2. Allocate user stack in identity-mapped region");
+        println!("  3. Map user code to identity-mapped addresses");
+        println!("  4. Then use IRETQ to transition to Ring 3");
     }
 }
