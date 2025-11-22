@@ -59,7 +59,7 @@ impl UserAllocator {
         }
 
         let stack_bottom = self.next_stack_top - USER_STACK_SIZE;
-        let stack_top = self.next_stack_top;
+        let _stack_top = self.next_stack_top;
 
         // Reserve space for next stack (with 4KB guard page)
         self.next_stack_top = stack_bottom - 4096;  // Guard page
