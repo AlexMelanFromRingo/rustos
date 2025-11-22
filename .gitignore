@@ -3,5 +3,6 @@ Cargo.lock
 *.bin
 !rustos.bin
 *.iso
+*.elf
 disk.img
 userspace/target/
