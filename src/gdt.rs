@@ -192,8 +192,10 @@ extern "C" fn syscall_handler() {
 
         // DEBUG: Print SYSRET info (stack: [user_rip, user_rflags, user_rsp])
         "push rax",              // Save result
-        "mov rdi, [rsp + 8]",    // arg1: user_rip (skip saved rax)
+        "mov rdi, [rsp + 8]",    // arg1: user_rip
         "mov rsi, rax",          // arg2: result
+        "mov rdx, [rsp + 24]",   // arg3: user_rsp (skip rax, rip, rflags)
+        "mov rcx, [rsp + 16]",   // arg4: user_rflags (skip rax, rip)
         "call {debug_sysret}",
         "pop rax",               // Restore result
 
@@ -215,10 +217,11 @@ extern "C" fn syscall_handler() {
 /// Kernel stack pointer (initialized at boot)
 static mut KERNEL_STACK_PTR: u64 = 0;
 
-/// Debug: Print SYSRET info
+/// Debug: Print SYSRET info with full state
 #[no_mangle]
-extern "C" fn debug_print_sysret(user_rip: u64, result: isize) {
-    crate::println!("[SYSRET] returning to {:#x}, result={}", user_rip, result);
+extern "C" fn debug_print_sysret(user_rip: u64, result: isize, user_rsp: u64, user_rflags: u64) {
+    crate::println!("[SYSRET] RIP={:#x}, RSP={:#x}, RFLAGS={:#x}, result={}",
+                    user_rip, user_rsp, user_rflags, result);
 }
 
 /// Initialize kernel stack pointer for syscalls
