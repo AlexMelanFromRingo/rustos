@@ -309,11 +309,8 @@ pub fn load_and_exec(path: &str) -> Result<(), ElfError> {
     let (stack_bottom, stack_size) = user_allocator::allocate_user_stack()
         .ok_or(ElfError::AllocationFailed)?;
 
-    // Execute in user mode - this will return when process calls exit()
+    // Jump to user mode at entry point
     unsafe {
-        crate::userspace::exec_with_return(entry_point.as_u64(), stack_bottom.as_u64(), stack_size);
+        crate::userspace::jump_to_ring3(entry_point.as_u64(), stack_bottom.as_u64(), stack_size);
     }
-
-    // Process exited, return Ok
-    Ok(())
 }
