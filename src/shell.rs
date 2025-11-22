@@ -425,6 +425,7 @@ impl Shell {
             "cd" => self.cmd_cd(args),
             "mkdir" => self.cmd_mkdir(args),
             "rmdir" => self.cmd_rmdir(args),
+            "usermode" => self.cmd_usermode(),
             _ => {
                 // Check if it's an alias
                 if let Some(expanded) = self.expand_alias(cmd) {
@@ -472,6 +473,7 @@ impl Shell {
         println!("  shutdown  - Shutdown the system");
         println!("  reboot    - Reboot the system");
         println!("  sleep     - Sleep for N seconds (usage: sleep <seconds>)");
+        println!("  usermode  - Test user mode (Ring 3) and system calls");
         println!();
         println!("Process management:");
         println!("  ps        - List all processes");
@@ -1953,5 +1955,20 @@ impl Shell {
         } else {
             println!("rmdir: FAT32 filesystem not mounted");
         }
+    }
+
+    /// Test user mode (Ring 3) and system calls
+    fn cmd_usermode(&mut self) {
+        println!("Testing user mode (Ring 3) and system calls...");
+        println!("Transitioning from kernel mode (Ring 0) to user mode (Ring 3)");
+        println!();
+
+        // Jump to user mode and execute demo function
+        unsafe {
+            crate::userspace::jump_to_usermode(crate::userspace::user_mode_demo as usize);
+        }
+
+        // Should never reach here - user_mode_demo calls exit syscall
+        println!("ERROR: Returned from user mode unexpectedly!");
     }
 }

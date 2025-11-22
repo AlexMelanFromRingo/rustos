@@ -24,6 +24,8 @@ pub mod fs;
 pub mod process;
 pub mod editor;
 pub mod drivers;
+pub mod syscall;
+pub mod userspace;
 
 pub fn init() {
     gdt::init();
@@ -33,6 +35,11 @@ pub fn init() {
     // NOTE: ATA driver initialization moved to after heap init
     // because it requires memory allocations and may cause issues
     // if called too early in boot process
+}
+
+/// Initialize syscall support (must be called after init())
+pub fn init_syscall() {
+    gdt::init_syscall();
 }
 
 pub fn hlt_loop() -> ! {

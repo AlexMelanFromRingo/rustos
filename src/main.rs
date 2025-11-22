@@ -57,6 +57,9 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // Initialize ATA driver AFTER heap is ready
     rustos::drivers::ata::init();
 
+    // Initialize syscall support (after heap and GDT)
+    rustos::init_syscall();
+
     println!("Kernel initialized successfully!");
     println!();
 
