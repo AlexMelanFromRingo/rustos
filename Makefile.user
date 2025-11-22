@@ -19,14 +19,35 @@ hello.elf: hello.c user.ld
 	@echo "✓ Compiled hello.elf"
 	@readelf -h hello.elf | grep Entry || true
 
-# Install to disk image
+# Install to disk image (using mcopy - requires mtools)
 install: hello.elf
 	@if [ ! -f disk.img ]; then \
 		echo "❌ disk.img not found. Run ./run.sh first to create it."; \
 		exit 1; \
 	fi
-	mcopy -i disk.img -o hello.elf ::hello.elf
-	@echo "✓ Copied hello.elf to disk.img"
+	@if command -v mcopy >/dev/null 2>&1; then \
+		mcopy -i disk.img -o hello.elf ::hello.elf; \
+		echo "✓ Copied hello.elf to disk.img (via mcopy)"; \
+	else \
+		echo "❌ mcopy not found. Install mtools: sudo apt-get install mtools"; \
+		echo "   Or use: make -f Makefile.user install-mount"; \
+		exit 1; \
+	fi
+	@echo "  Run in RustOS: exec hello.elf"
+
+# Install to disk image (using mount - requires sudo)
+install-mount: hello.elf
+	@if [ ! -f disk.img ]; then \
+		echo "❌ disk.img not found. Run ./run.sh first to create it."; \
+		exit 1; \
+	fi
+	@echo "Mounting disk.img (requires sudo)..."
+	@mkdir -p /tmp/rustos_mount
+	@sudo mount -o loop disk.img /tmp/rustos_mount
+	@sudo cp hello.elf /tmp/rustos_mount/
+	@sudo umount /tmp/rustos_mount
+	@rmdir /tmp/rustos_mount
+	@echo "✓ Copied hello.elf to disk.img (via mount)"
 	@echo "  Run in RustOS: exec hello.elf"
 
 # Show info about the ELF
