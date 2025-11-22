@@ -29,7 +29,7 @@ extern "C" fn debug_print_exec_entry(entry: u64, stack_bottom: u64, stack_size: 
     crate::println!("  stack_size   = {:#x}", stack_size);
     crate::println!("  stack_top    = {:#x}", stack_bottom + stack_size);
     crate::println!("  saved_rsp    = {:#x}", saved_rsp);
-    crate::println!("  selectors: data=0x23, code=0x1b");
+    crate::println!("  selectors: data=0x1b, code=0x23 (FIXED for SYSRET!)");
 }
 
 /// Debug helper to print context restore information
@@ -341,11 +341,12 @@ pub unsafe extern "C" fn exec_with_return_proper(entry_point: u64, stack_bottom:
         "mov rax, rsi",
         "add rax, rdx",           // rax = stack_top
 
-        // Get user segment selectors (match GDT layout)
-        // GDT order: null(0), kernel_code(1), kernel_data(2), user_code(3), user_data(4), TSS(5)
+        // Get user segment selectors (match GDT layout for SYSRET)
+        // GDT order: null(0), kernel_code(1), kernel_data(2), user_data(3), user_code(4), TSS(5)
+        // CRITICAL: user_data BEFORE user_code for SYSRET to work!
         // Selectors: index * 8 + RPL(3)
-        "mov r8, 0x23",           // User data selector: index 4, RPL=3 → 4*8+3 = 0x23
-        "mov r9, 0x1b",           // User code selector: index 3, RPL=3 → 3*8+3 = 0x1b (NOT 0x2b!)
+        "mov r8, 0x1b",           // User data selector: index 3, RPL=3 → 3*8+3 = 0x1b
+        "mov r9, 0x23",           // User code selector: index 4, RPL=3 → 4*8+3 = 0x23
 
         // Set user data segments
         "mov ds, r8w",

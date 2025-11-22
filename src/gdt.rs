@@ -34,14 +34,17 @@ lazy_static! {
         // 1. Null descriptor (index 0)
         // 2. Kernel code (index 1) - used by SYSCALL
         // 3. Kernel data (index 2)
-        // 4. User code (index 3) - used by SYSRET
-        // 5. User data (index 4)
+        // 4. User data (index 3) - MUST be before user code for SYSRET!
+        // 5. User code (index 4) - used by SYSRET
         // 6. TSS
+        //
+        // SYSRET sets: CS = STAR[63:48] + 16, SS = STAR[63:48] + 8
+        // So user_data must be 8 bytes before user_code in GDT
 
         let kernel_code_selector = gdt.add_entry(Descriptor::kernel_code_segment());
         let kernel_data_selector = gdt.add_entry(Descriptor::kernel_data_segment());
-        let user_code_selector = gdt.add_entry(Descriptor::user_code_segment());
         let user_data_selector = gdt.add_entry(Descriptor::user_data_segment());
+        let user_code_selector = gdt.add_entry(Descriptor::user_code_segment());
         let tss_selector = gdt.add_entry(Descriptor::tss_segment(&TSS));
 
         (gdt, Selectors {
