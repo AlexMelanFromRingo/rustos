@@ -1,4 +1,6 @@
 /target
 Cargo.lock
 *.bin
+!rustos.bin
 *.iso
+disk.img

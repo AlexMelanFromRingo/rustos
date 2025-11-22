@@ -752,8 +752,7 @@ impl Shell {
     }
 
     fn cmd_cat(&self, args: &[&str]) {
-        use crate::fs::ramdisk::RAMDISK;
-        use crate::fs::vfs::FileSystem;
+        use crate::fs::vfs::VfsContext;
 
         if args.is_empty() {
             println!("Usage: cat <filename>");
@@ -761,9 +760,8 @@ impl Shell {
         }
 
         let filename = args[0];
-        let ramdisk = RAMDISK.lock();
 
-        match ramdisk.read(filename) {
+        match VfsContext::read(filename) {
             Ok(content) => {
                 // Try to display as UTF-8 text
                 match core::str::from_utf8(&content) {
@@ -786,8 +784,7 @@ impl Shell {
     }
 
     fn cmd_write(&self, args: &[&str]) {
-        use crate::fs::ramdisk::RAMDISK;
-        use crate::fs::vfs::{FileSystem, VfsError};
+        use crate::fs::vfs::{VfsContext, VfsError};
 
         if args.len() < 2 {
             println!("Usage: write <filename> <content>");
@@ -798,9 +795,9 @@ impl Shell {
         let content = args[1..].join(" ");
         let bytes = content.as_bytes().to_vec();
 
-        let mut ramdisk = RAMDISK.lock();
-        match ramdisk.write(filename, bytes) {
-            Ok(_) => println!("File '{}' written ({} bytes)", filename, content.len()),
+        match VfsContext::write(filename, bytes) {
+            Ok(_) => println!("File '{}' written ({} bytes) [{}]",
+                            filename, content.len(), VfsContext::filesystem_name()),
             Err(e) => {
                 let msg = match e {
                     VfsError::InvalidName => "Invalid filename",
@@ -815,8 +812,7 @@ impl Shell {
     }
 
     fn cmd_rm(&self, args: &[&str]) {
-        use crate::fs::ramdisk::RAMDISK;
-        use crate::fs::vfs::{FileSystem, VfsError};
+        use crate::fs::vfs::{VfsContext, VfsError};
 
         if args.is_empty() {
             println!("Usage: rm <filename>");
@@ -824,10 +820,9 @@ impl Shell {
         }
 
         let filename = args[0];
-        let mut ramdisk = RAMDISK.lock();
 
-        match ramdisk.delete(filename) {
-            Ok(_) => println!("File '{}' deleted", filename),
+        match VfsContext::delete(filename) {
+            Ok(_) => println!("File '{}' deleted [{}]", filename, VfsContext::filesystem_name()),
             Err(e) => {
                 let msg = match e {
                     VfsError::FileNotFound => "File not found",

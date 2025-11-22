@@ -5,6 +5,8 @@
 
 use alloc::vec::Vec;
 use alloc::string::String;
+use crate::fs::fat32::FAT32;
+use crate::fs::ramdisk::RAMDISK;
 
 /// Information about a file in the filesystem
 #[derive(Debug, Clone)]
@@ -68,5 +70,134 @@ pub trait FileSystem {
     /// Get free space (in bytes)
     fn free_space(&self) -> usize {
         self.total_space().saturating_sub(self.used_space())
+    }
+}
+
+/// Unified VFS context that automatically selects between FAT32 and RAMDISK
+///
+/// This provides a single interface for filesystem operations, automatically
+/// using FAT32 if mounted, falling back to RAMDISK otherwise.
+pub struct VfsContext;
+
+impl VfsContext {
+    /// Read a file from the active filesystem
+    pub fn read(path: &str) -> VfsResult<Vec<u8>> {
+        // Try FAT32 first if mounted
+        let fat32 = FAT32.lock();
+        if let Some(ref fs) = *fat32 {
+            match fs.read(path) {
+                Ok(data) => return Ok(data),
+                Err(VfsError::FileNotFound) => {
+                    // File not found in FAT32, try RAMDISK
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        drop(fat32);
+
+        // Fall back to RAMDISK
+        RAMDISK.lock().read(path)
+    }
+
+    /// Write a file to the active filesystem
+    pub fn write(path: &str, data: Vec<u8>) -> VfsResult<()> {
+        // Try FAT32 first if mounted
+        let mut fat32 = FAT32.lock();
+        if let Some(ref mut fs) = *fat32 {
+            return fs.write(path, data);
+        }
+        drop(fat32);
+
+        // Fall back to RAMDISK
+        RAMDISK.lock().write(path, data)
+    }
+
+    /// Delete a file from the active filesystem
+    pub fn delete(path: &str) -> VfsResult<()> {
+        // Try FAT32 first if mounted
+        let mut fat32 = FAT32.lock();
+        if let Some(ref mut fs) = *fat32 {
+            match fs.delete(path) {
+                Ok(()) => return Ok(()),
+                Err(VfsError::FileNotFound) => {
+                    // File not found in FAT32, try RAMDISK
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        drop(fat32);
+
+        // Fall back to RAMDISK
+        RAMDISK.lock().delete(path)
+    }
+
+    /// List files from the active filesystem
+    pub fn list() -> Vec<FileInfo> {
+        // Try FAT32 first if mounted
+        let fat32 = FAT32.lock();
+        if let Some(ref fs) = *fat32 {
+            let files = fs.list();
+            drop(fat32);
+            return files;
+        }
+        drop(fat32);
+
+        // Fall back to RAMDISK
+        RAMDISK.lock().list()
+    }
+
+    /// Check if a file exists in either filesystem
+    pub fn exists(path: &str) -> bool {
+        // Check FAT32 first
+        let fat32 = FAT32.lock();
+        if let Some(ref fs) = *fat32 {
+            if fs.exists(path) {
+                return true;
+            }
+        }
+        drop(fat32);
+
+        // Check RAMDISK
+        RAMDISK.lock().exists(path)
+    }
+
+    /// Get used space from the active filesystem
+    pub fn used_space() -> usize {
+        let fat32 = FAT32.lock();
+        if let Some(ref fs) = *fat32 {
+            let space = fs.used_space();
+            drop(fat32);
+            return space;
+        }
+        drop(fat32);
+
+        RAMDISK.lock().used_space()
+    }
+
+    /// Get total space from the active filesystem
+    pub fn total_space() -> usize {
+        let fat32 = FAT32.lock();
+        if let Some(ref fs) = *fat32 {
+            let space = fs.total_space();
+            drop(fat32);
+            return space;
+        }
+        drop(fat32);
+
+        RAMDISK.lock().total_space()
+    }
+
+    /// Check if FAT32 is currently mounted
+    pub fn is_fat32_mounted() -> bool {
+        FAT32.lock().is_some()
+    }
+
+    /// Get the name of the active filesystem
+    pub fn filesystem_name() -> &'static str {
+        if Self::is_fat32_mounted() {
+            "FAT32"
+        } else {
+            "RAMDISK"
+        }
     }
 }
