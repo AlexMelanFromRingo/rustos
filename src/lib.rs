@@ -40,6 +40,7 @@ pub fn init() {
 /// Initialize syscall support (must be called after init())
 pub fn init_syscall() {
     gdt::init_syscall();
+    syscall::filedesc::init();
 }
 
 pub fn hlt_loop() -> ! {

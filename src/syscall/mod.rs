@@ -6,6 +6,7 @@
 
 pub mod numbers;
 pub mod handler;
+pub mod filedesc;
 
 /// System call numbers
 /// Based on Linux syscall ABI for x86_64
