@@ -129,7 +129,8 @@ impl AtaDrive {
     /// Wait for the drive to be ready (not busy)
     fn wait_ready(&mut self) -> Result<(), &'static str> {
         unsafe {
-            for _ in 0..10000 {
+            // Increased timeout for slower QEMU/virtualized environments
+            for _ in 0..100000 {
                 let status = self.status_port.read();
                 if (status & ATA_SR_BSY) == 0 {
                     return Ok(());
@@ -144,7 +145,8 @@ impl AtaDrive {
     fn wait_data(&mut self) -> Result<(), &'static str> {
         unsafe {
             // Wait for BSY to clear and DRQ to set
-            for _ in 0..10000 {
+            // Increased timeout for slower QEMU/virtualized environments
+            for _ in 0..100000 {
                 let status = self.status_port.read();
 
                 // Check for errors first
@@ -361,7 +363,8 @@ impl AtaDrive {
 
             // CRITICAL: Poll status until BSY clears OR timeout
             // OSDev Wiki: Must poll BSY first, then check if status == 0
-            let mut timeout = 10000;
+            // Increased timeout for slower QEMU/virtualized environments
+            let mut timeout = 100000;
             loop {
                 let status = self.status_port.read();
 
@@ -383,7 +386,7 @@ impl AtaDrive {
 
             // Now wait for DRQ (data ready) or ERR
             // BSY already cleared in previous loop
-            let mut timeout = 10000;
+            let mut timeout = 100000;
             loop {
                 let status = self.status_port.read();
 
@@ -407,6 +410,20 @@ impl AtaDrive {
             // If we don't read this, the next command will fail
             for _ in 0..256 {
                 self.data_port.read();
+            }
+
+            // Wait for DRQ to clear after reading IDENTIFY data
+            // This ensures the drive is ready for the next command
+            let mut timeout = 100000;
+            loop {
+                let status = self.status_port.read();
+                if (status & ATA_SR_DRQ) == 0 && (status & ATA_SR_BSY) == 0 {
+                    break;
+                }
+                timeout -= 1;
+                if timeout == 0 {
+                    break; // Continue anyway, drive might be ready
+                }
             }
 
             // Drive exists and responded correctly

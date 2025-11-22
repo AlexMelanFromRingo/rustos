@@ -218,6 +218,12 @@ impl Fat32 {
             return Err("No ATA drive detected");
         }
 
+        // IMPORTANT: Small delay after IDENTIFY before first READ
+        // The drive needs time to reset after IDENTIFY command
+        for _ in 0..1000 {
+            core::hint::spin_loop();
+        }
+
         // Read boot sector
         let mut boot_sector = [0u8; SECTOR_SIZE];
         drive.read_sector(0, &mut boot_sector)?;
