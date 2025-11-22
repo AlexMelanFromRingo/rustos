@@ -256,35 +256,6 @@ pub unsafe fn jump_to_ring3(entry_point: u64, stack_addr: u64, stack_size: u64) 
     );
 }
 
-/// Save current kernel context before jumping to user mode
-///
-/// This function saves all callee-saved registers so we can return
-/// to the exact same point after the user process exits.
-///
-/// # Safety
-/// Must be called from a function that will later call jump_to_ring3
-unsafe fn save_kernel_context_full() {
-    core::arch::asm!(
-        // Save all callee-saved registers to SAVED_CONTEXT
-        "lea rax, [rip + {saved_context}]",
-        "mov [rax + 0], rbx",      // offset 0: rbx
-        "mov [rax + 8], rbp",      // offset 8: rbp
-        "mov [rax + 16], r12",     // offset 16: r12
-        "mov [rax + 24], r13",     // offset 24: r13
-        "mov [rax + 32], r14",     // offset 32: r14
-        "mov [rax + 40], r15",     // offset 40: r15
-        "mov [rax + 48], rsp",     // offset 48: rsp
-        // Save return address (top of stack)
-        "mov rcx, [rsp]",
-        "mov [rax + 56], rcx",     // offset 56: rip (return address)
-        saved_context = sym SAVED_CONTEXT,
-        out("rax") _,
-        out("rcx") _,
-    );
-    
-    HAS_SAVED_CONTEXT.store(true, Ordering::SeqCst);
-}
-
 /// Restore kernel context and return from user mode
 ///
 /// This function restores all saved registers and jumps back to
@@ -324,14 +295,34 @@ pub unsafe fn restore_kernel_context_and_return() -> ! {
 ///
 /// This wrapper saves full kernel context before jumping to ring 3,
 /// allowing sys_exit to restore everything and return cleanly.
+#[inline(never)]
 pub unsafe fn exec_with_return_proper(entry_point: u64, stack_bottom: u64, stack_size: u64) {
-    // Save ALL callee-saved registers
-    save_kernel_context_full();
-    
+    // Save ALL callee-saved registers inline to capture correct return address
+    // After function prologue, return address is at [rbp + 8]
+    core::arch::asm!(
+        // Save all callee-saved registers to SAVED_CONTEXT
+        "lea rax, [rip + {saved_context}]",
+        "mov [rax + 0], rbx",      // offset 0: rbx
+        "mov [rax + 8], rbp",      // offset 8: rbp
+        "mov [rax + 16], r12",     // offset 16: r12
+        "mov [rax + 24], r13",     // offset 24: r13
+        "mov [rax + 32], r14",     // offset 32: r14
+        "mov [rax + 40], r15",     // offset 40: r15
+        "mov [rax + 48], rsp",     // offset 48: rsp
+        // CRITICAL: Return address is at [rbp + 8] after function prologue
+        "mov rcx, [rbp + 8]",
+        "mov [rax + 56], rcx",     // offset 56: rip (return address to load_and_exec)
+        saved_context = sym SAVED_CONTEXT,
+        out("rax") _,
+        out("rcx") _,
+    );
+
+    HAS_SAVED_CONTEXT.store(true, Ordering::SeqCst);
+
     // Jump to user mode - if process calls exit, restore_kernel_context_and_return()
     // will restore our registers and jump back here
     jump_to_ring3(entry_point, stack_bottom, stack_size);
-    
+
     // We'll return here after process exits!
     // jump_to_ring3 is marked noreturn, but we manually jump back
 }
