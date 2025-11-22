@@ -22,11 +22,13 @@ impl UserAllocator {
         // Code region: from USER_CODE_START to stack region
         // Stack region: top 1 MB of user space
         const STACK_REGION_SIZE: u64 = 1024 * 1024;  // 1 MB for all stacks
+        const GUARD_PAGE_SIZE: u64 = 4096;  // 4 KB guard page at end
 
         UserAllocator {
             next_code_addr: USER_CODE_START,
             code_region_end: USER_SPACE_END - STACK_REGION_SIZE,
-            next_stack_top: USER_SPACE_END,
+            // Start stacks below USER_SPACE_END to avoid unmapped memory
+            next_stack_top: USER_SPACE_END - GUARD_PAGE_SIZE,
         }
     }
 

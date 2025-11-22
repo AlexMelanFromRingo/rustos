@@ -78,7 +78,8 @@ impl Shell {
     }
 
     pub fn print_prompt(&self) {
-        print!("{}", self.prompt);
+        // Print current directory and prompt
+        print!("{} {} ", self.current_dir, self.prompt);
     }
 
     pub fn add_char(&mut self, c: char) {
