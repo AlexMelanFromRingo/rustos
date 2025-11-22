@@ -10,28 +10,12 @@ use crate::memory::user_allocator;
 use x86_64::VirtAddr;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-/// Saved kernel context for returning from user mode
+/// Global storage for saved kernel stack pointer
 ///
-/// This structure holds all callee-saved registers according to
-/// the System V AMD64 ABI calling convention.
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-struct KernelContext {
-    // Callee-saved registers (must be preserved across function calls)
-    rbx: u64,
-    rbp: u64,
-    r12: u64,
-    r13: u64,
-    r14: u64,
-    r15: u64,
-    rsp: u64,
-    rip: u64,  // Return address
-}
-
-/// Global storage for saved kernel context
-static mut SAVED_CONTEXT: KernelContext = KernelContext {
-    rbx: 0, rbp: 0, r12: 0, r13: 0, r14: 0, r15: 0, rsp: 0, rip: 0,
-};
+/// When we context switch to user mode, all callee-saved registers
+/// are pushed onto the stack, and RSP is saved here.
+/// On return from user mode, we restore RSP and pop all registers.
+static mut SAVED_RSP: u64 = 0;
 
 /// Flag indicating whether we have a saved context
 static HAS_SAVED_CONTEXT: AtomicBool = AtomicBool::new(false);
@@ -258,8 +242,8 @@ pub unsafe fn jump_to_ring3(entry_point: u64, stack_addr: u64, stack_size: u64) 
 
 /// Restore kernel context and return from user mode
 ///
-/// This function restores all saved registers and jumps back to
-/// the point where save_kernel_context_full was called.
+/// This function restores RSP and pops all callee-saved registers,
+/// then returns to the caller of exec_with_return_proper.
 ///
 /// # Safety
 /// Must only be called from sys_exit when process has cleanly exited
@@ -269,60 +253,57 @@ pub unsafe fn restore_kernel_context_and_return() -> ! {
         crate::println!("\n[Kernel] No saved context. System halted.");
         crate::hlt_loop();
     }
-    
+
     HAS_SAVED_CONTEXT.store(false, Ordering::SeqCst);
-    
+
     core::arch::asm!(
-        // Load address of SAVED_CONTEXT
-        "lea rax, [rip + {saved_context}]",
-        // Restore all callee-saved registers
-        "mov rbx, [rax + 0]",
-        "mov rbp, [rax + 8]",
-        "mov r12, [rax + 16]",
-        "mov r13, [rax + 24]",
-        "mov r14, [rax + 32]",
-        "mov r15, [rax + 40]",
-        "mov rsp, [rax + 48]",
-        "mov rcx, [rax + 56]",    // Load return address
-        // Jump to return address (back to exec_with_return_proper)
-        "jmp rcx",
-        saved_context = sym SAVED_CONTEXT,
+        // Restore stack pointer
+        "lea rax, [rip + {saved_rsp}]",
+        "mov rsp, [rax]",
+        // Pop all callee-saved registers in reverse order
+        "pop r15",
+        "pop r14",
+        "pop r13",
+        "pop r12",
+        "pop rbx",
+        "pop rbp",
+        // Return to caller of exec_with_return_proper
+        // (return address is now on top of stack)
+        "ret",
+        saved_rsp = sym SAVED_RSP,
         options(noreturn)
     );
 }
 
 /// Execute user code with proper context saving
 ///
-/// This wrapper saves full kernel context before jumping to ring 3,
-/// allowing sys_exit to restore everything and return cleanly.
+/// Uses push/pop mechanism for reliable context switching.
+/// All callee-saved registers are pushed onto stack, then RSP is saved.
+/// On return from user mode, RSP is restored and registers are popped.
 #[inline(never)]
 pub unsafe fn exec_with_return_proper(entry_point: u64, stack_bottom: u64, stack_size: u64) {
-    // Save ALL callee-saved registers inline to capture correct return address
-    // After function prologue, return address is at [rbp + 8]
+    // Save all callee-saved registers by pushing them onto the stack
+    // This is the standard context switching mechanism
     core::arch::asm!(
-        // Save all callee-saved registers to SAVED_CONTEXT
-        "lea rax, [rip + {saved_context}]",
-        "mov [rax + 0], rbx",      // offset 0: rbx
-        "mov [rax + 8], rbp",      // offset 8: rbp
-        "mov [rax + 16], r12",     // offset 16: r12
-        "mov [rax + 24], r13",     // offset 24: r13
-        "mov [rax + 32], r14",     // offset 32: r14
-        "mov [rax + 40], r15",     // offset 40: r15
-        "mov [rax + 48], rsp",     // offset 48: rsp
-        // CRITICAL: Return address is at [rbp + 8] after function prologue
-        "mov rcx, [rbp + 8]",
-        "mov [rax + 56], rcx",     // offset 56: rip (return address to load_and_exec)
-        saved_context = sym SAVED_CONTEXT,
+        // Push all callee-saved registers onto stack
+        "push rbp",
+        "push rbx",
+        "push r12",
+        "push r13",
+        "push r14",
+        "push r15",
+        // Save current stack pointer
+        "lea rax, [rip + {saved_rsp}]",
+        "mov [rax], rsp",
+        saved_rsp = sym SAVED_RSP,
         out("rax") _,
-        out("rcx") _,
     );
 
     HAS_SAVED_CONTEXT.store(true, Ordering::SeqCst);
 
     // Jump to user mode - if process calls exit, restore_kernel_context_and_return()
-    // will restore our registers and jump back here
+    // will restore RSP, pop all registers, and return
     jump_to_ring3(entry_point, stack_bottom, stack_size);
 
-    // We'll return here after process exits!
-    // jump_to_ring3 is marked noreturn, but we manually jump back
+    // We never reach here - jump_to_ring3 is noreturn
 }
