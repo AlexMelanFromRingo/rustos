@@ -1959,40 +1959,26 @@ impl Shell {
 
     /// Test user mode (Ring 3) and system calls
     fn cmd_usermode(&mut self) {
-        println!("Testing system calls infrastructure...");
-        println!("NOTE: Full Ring 3 transition requires identity-mapped user memory");
-        println!("For now, testing syscall dispatcher directly from kernel mode:");
+        println!("Testing Ring 3 user mode with real privilege separation!");
         println!();
 
-        // Test syscall dispatcher directly (without Ring 3 transition)
-        println!("[Test 1] Testing sys_getpid...");
-        let result = crate::syscall::syscall_dispatcher(39, 0, 0, 0, 0, 0, 0);
-        println!("  getpid() = {}", result);
+        // Get function pointer and size
+        let fn_ptr = crate::userspace::user_mode_demo as usize;
+        let fn_size = crate::userspace::get_demo_size();
+
+        println!("Kernel -> User Mode Transition:");
+        println!("  Function: 0x{:016X} (kernel space)", fn_ptr);
+        println!("  Size: {} bytes", fn_size);
+        println!("  Copying to identity-mapped user space...");
+        println!("  Switching to Ring 3...");
         println!();
 
-        println!("[Test 2] Testing sys_write to STDOUT...");
-        let msg = b"Hello from syscall test!\n";
-        let result = crate::syscall::syscall_dispatcher(
-            1,  // SYS_WRITE
-            1,  // STDOUT
-            msg.as_ptr() as usize,
-            msg.len(),
-            0, 0, 0
-        );
-        println!("  write() returned {}", result);
-        println!();
+        // Jump to user mode - this will execute the demo and exit via syscall
+        unsafe {
+            crate::userspace::jump_to_usermode(fn_ptr, fn_size);
+        }
 
-        println!("[Test 3] Testing invalid syscall...");
-        let result = crate::syscall::syscall_dispatcher(999, 0, 0, 0, 0, 0, 0);
-        println!("  Invalid syscall returned: {}", result);
-        println!();
-
-        println!("Syscall infrastructure tests completed!");
-        println!();
-        println!("To enable full Ring 3 user mode, we need to:");
-        println!("  1. Create identity-mapped memory for user space (0x00000000-0x7FFFFFFF)");
-        println!("  2. Allocate user stack in identity-mapped region");
-        println!("  3. Map user code to identity-mapped addresses");
-        println!("  4. Then use IRETQ to transition to Ring 3");
+        // Should never reach here - user_mode_demo calls sys_exit
+        println!("ERROR: Returned from user mode unexpectedly!");
     }
 }

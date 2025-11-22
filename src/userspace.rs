@@ -6,29 +6,45 @@
 /// - Making system calls from user space
 
 use crate::gdt;
-use alloc::vec::Vec;
+use crate::memory::user_allocator;
+use x86_64::VirtAddr;
 
-/// User space stack size (16 KB)
-const USER_STACK_SIZE: usize = 4096 * 4;
+/// Copy code to user space
+///
+/// Copies kernel code to identity-mapped user space so it can run in Ring 3.
+unsafe fn copy_to_user_space(code_ptr: *const u8, code_size: usize) -> Option<VirtAddr> {
+    // Allocate user space memory
+    let user_addr = user_allocator::allocate_user_code(code_size)?;
+
+    // Copy code to user space
+    let user_ptr = user_addr.as_u64() as *mut u8;
+    core::ptr::copy_nonoverlapping(code_ptr, user_ptr, code_size);
+
+    Some(user_addr)
+}
 
 /// Jump to user mode and execute a function
 ///
 /// This function transitions the CPU from Ring 0 (kernel) to Ring 3 (user)
-/// and executes the provided function pointer in user mode.
+/// and executes the provided function in user mode.
+///
+/// The function is copied to identity-mapped user space and executed there.
 ///
 /// # Safety
 /// This is unsafe because:
 /// - It manipulates CPU privilege levels
 /// - It switches stacks
-/// - The user function must be trusted not to corrupt kernel memory
-pub unsafe fn jump_to_usermode(user_fn: usize) -> ! {
-    // Allocate user stack
-    let mut user_stack = Vec::with_capacity(USER_STACK_SIZE);
-    user_stack.resize(USER_STACK_SIZE, 0);
-    let user_stack_top = user_stack.as_ptr() as u64 + USER_STACK_SIZE as u64;
+/// - The user function must be position-independent
+pub unsafe fn jump_to_usermode(kernel_fn: usize, fn_size: usize) -> ! {
+    // Copy function to user space
+    let user_fn_addr = copy_to_user_space(kernel_fn as *const u8, fn_size)
+        .expect("Failed to allocate user space for code");
 
-    // Leak the stack so it doesn't get dropped
-    core::mem::forget(user_stack);
+    // Allocate user stack in identity-mapped region
+    let (stack_bottom, stack_size) = user_allocator::allocate_user_stack()
+        .expect("Failed to allocate user stack");
+
+    let stack_top = stack_bottom.as_u64() + stack_size;
 
     // Get user segment selectors
     let user_cs = gdt::user_code_selector().0 as u64;
@@ -64,67 +80,98 @@ pub unsafe fn jump_to_usermode(user_fn: usize) -> ! {
         "iretq",
 
         ss = in(reg) user_ds,
-        rsp = in(reg) user_stack_top,
+        rsp = in(reg) stack_top,
         rflags = in(reg) rflags,
         cs = in(reg) user_cs,
-        rip = in(reg) user_fn,
+        rip = in(reg) user_fn_addr.as_u64(),
         options(noreturn)
     );
 }
 
 /// Example user mode function that makes syscalls
 ///
-/// This runs in Ring 3 and can only access kernel via syscalls
+/// This runs in Ring 3 and can only access kernel via syscalls.
+/// Must be position-independent (no absolute addresses).
 #[no_mangle]
 pub extern "C" fn user_mode_demo() {
-    // Make a sys_write syscall to print a message
-    let message = b"Hello from user space!\n";
+    // Static strings are in .rodata, which is in kernel space
+    // We need to use stack-allocated arrays instead
 
-    // Syscall: write(STDOUT, message, len)
-    // rax = syscall number (1 = write)
-    // rdi = fd (1 = STDOUT)
-    // rsi = buffer pointer
-    // rdx = length
+    // Message 1
+    let mut msg1 = *b"Hello from Ring 3 user space!\n\0";
+    syscall_write(1, msg1.as_ptr(), msg1.len() - 1);
+
+    // Message 2
+    let mut msg2 = *b"System calls are working!\n\0";
+    syscall_write(1, msg2.as_ptr(), msg2.len() - 1);
+
+    // Get PID
+    let pid = syscall_getpid();
+    // Can't print PID easily without kernel functions, so just call it
+
+    // Message 3
+    let mut msg3 = *b"Exiting from user mode...\n\0";
+    syscall_write(1, msg3.as_ptr(), msg3.len() - 1);
+
+    // Exit
+    syscall_exit(0);
+}
+
+/// Syscall helper: write
+#[inline(always)]
+fn syscall_write(fd: usize, buf: *const u8, count: usize) -> isize {
     let result: isize;
     unsafe {
         core::arch::asm!(
             "mov rax, 1",              // SYS_WRITE
-            "mov rdi, 1",              // STDOUT
-            "mov rsi, {buf}",          // message buffer
-            "mov rdx, {len}",          // message length
-            "syscall",                 // Make the system call
-            buf = in(reg) message.as_ptr(),
-            len = in(reg) message.len(),
-            lateout("rax") result,
-            lateout("rcx") _,  // SYSCALL clobbers RCX
-            lateout("r11") _,  // SYSCALL clobbers R11
-        );
-    }
-
-    // Make another syscall
-    let message2 = b"This is a system call from Ring 3!\n";
-    unsafe {
-        core::arch::asm!(
-            "mov rax, 1",
-            "mov rdi, 1",
+            "mov rdi, {fd}",
             "mov rsi, {buf}",
-            "mov rdx, {len}",
+            "mov rdx, {count}",
             "syscall",
-            buf = in(reg) message2.as_ptr(),
-            len = in(reg) message2.len(),
-            lateout("rax") _,
+            fd = in(reg) fd,
+            buf = in(reg) buf,
+            count = in(reg) count,
+            lateout("rax") result,
             lateout("rcx") _,
             lateout("r11") _,
         );
     }
+    result
+}
 
-    // Exit syscall (60 = sys_exit)
+/// Syscall helper: getpid
+#[inline(always)]
+fn syscall_getpid() -> isize {
+    let result: isize;
+    unsafe {
+        core::arch::asm!(
+            "mov rax, 39",             // SYS_GETPID
+            "syscall",
+            lateout("rax") result,
+            lateout("rcx") _,
+            lateout("r11") _,
+        );
+    }
+    result
+}
+
+/// Syscall helper: exit
+#[inline(always)]
+fn syscall_exit(code: usize) -> ! {
     unsafe {
         core::arch::asm!(
             "mov rax, 60",             // SYS_EXIT
-            "mov rdi, 0",              // exit code 0
+            "mov rdi, {code}",
             "syscall",
+            code = in(reg) code,
             options(noreturn)
         );
     }
+}
+
+/// Get size of user_mode_demo function
+/// This is approximate - we use a fixed size for now
+pub fn get_demo_size() -> usize {
+    // The function is small, 4KB should be enough
+    4096
 }
