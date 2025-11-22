@@ -6,6 +6,7 @@ use lazy_static::lazy_static;
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 
 /// Model Specific Register numbers for SYSCALL/SYSRET
+const IA32_EFER: u32 = 0xC000_0080;  // Extended Feature Enable Register
 const IA32_STAR: u32 = 0xC000_0081;
 const IA32_LSTAR: u32 = 0xC000_0082;
 const IA32_FMASK: u32 = 0xC000_0084;
@@ -85,6 +86,11 @@ pub fn init_syscall() {
 
     unsafe {
         use x86_64::registers::model_specific::Msr;
+
+        // Enable SYSCALL/SYSRET by setting SCE bit (bit 0) in IA32_EFER
+        let mut efer = Msr::new(IA32_EFER);
+        let efer_value = efer.read();
+        efer.write(efer_value | 1); // Set SCE bit (bit 0)
 
         // STAR format (64 bits):
         // Bits 63:48 - User CS and SS (User Code = STAR[63:48] + 16, User Data = STAR[63:48] + 8)
