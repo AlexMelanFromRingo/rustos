@@ -24,13 +24,12 @@ echo "   💾 FAT32 диск: disk.img (постоянное хранилище)
 echo "   Для выхода: Ctrl+A, затем X"
 echo ""
 
-# Запуск QEMU с двумя IDE дисками в текстовом режиме:
-# - Primary Master (-hda): rustos.bin - загрузочный диск
-# - Primary Slave (-hdb): disk.img - FAT32 для данных
+# Запуск QEMU с двумя IDE дисками:
+# - Primary Master (index=0): rustos.bin - загрузочный диск
+# - Primary Slave (index=1): disk.img - FAT32 для данных
 # ATA драйвер настроен на чтение Slave (0xB0), не Master (0xA0)
-# -nographic: вывод в терминал (можно копировать текст)
+# Графическое окно для работы с shell
 qemu-system-x86_64 \
     -drive file=rustos.bin,format=raw,if=ide,index=0 \
     -drive file=disk.img,format=raw,if=ide,index=1 \
-    -nographic \
     "$@"

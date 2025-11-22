@@ -126,10 +126,8 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(
 extern "x86-interrupt" fn primary_ata_interrupt_handler(
     _stack_frame: InterruptStackFrame)
 {
-    // ATA interrupt fired - acknowledge it by reading status register
-    // This is handled in the ATA driver itself, so we just acknowledge the IRQ
-    crate::serial_println!("[IRQ] Primary ATA interrupt (IRQ14)");
-
+    // ATA interrupt fired - acknowledge it by sending EOI
+    // The ATA driver handles the actual operation
     unsafe {
         PICS.lock()
             .notify_end_of_interrupt(InterruptIndex::PrimaryATA.as_u8());
@@ -139,9 +137,7 @@ extern "x86-interrupt" fn primary_ata_interrupt_handler(
 extern "x86-interrupt" fn secondary_ata_interrupt_handler(
     _stack_frame: InterruptStackFrame)
 {
-    // Secondary ATA interrupt
-    crate::serial_println!("[IRQ] Secondary ATA interrupt (IRQ15)");
-
+    // Secondary ATA interrupt - acknowledge with EOI
     unsafe {
         PICS.lock()
             .notify_end_of_interrupt(InterruptIndex::SecondaryATA.as_u8());

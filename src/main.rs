@@ -36,22 +36,15 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     use x86_64::VirtAddr;
 
     println!("Hello World from RustOS!");
-    serial_println!("=== SERIAL OUTPUT TEST ===");
-    serial_println!("Hello World from RustOS!");
-
     println!("This is a minimal kernel written in Rust.");
-    serial_println!("This is a minimal kernel written in Rust.");
     println!();
     println!("Based on Phil Opp's excellent tutorials:");
     println!("  https://os.phil-opp.com/");
     println!();
 
-    serial_println!("About to initialize GDT, IDT and PIC...");
     // Initialize GDT, IDT and PIC
     rustos::init();
-    serial_println!("GDT, IDT and PIC initialized!");
 
-    serial_println!("About to initialize memory...");
     // Initialize memory management
     let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
     let mut mapper = unsafe { memory::init(phys_mem_offset) };
@@ -59,19 +52,14 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         memory::BootInfoFrameAllocator::init(&boot_info.memory_map)
     };
 
-    serial_println!("About to initialize heap...");
     // Initialize heap
     rustos::allocator::init_heap(&mut mapper, &mut frame_allocator)
         .expect("heap initialization failed");
-    serial_println!("Heap initialized!");
 
     // Initialize ATA driver AFTER heap is ready
-    serial_println!("About to initialize ATA driver...");
     rustos::drivers::ata::init();
-    serial_println!("ATA driver initialized!");
 
     println!("Kernel initialized successfully!");
-    serial_println!("Kernel initialized successfully!");
     println!("Power management: shutdown and reboot available");
     println!();
 
@@ -155,23 +143,18 @@ async fn keyboard_task() {
 
     // Try to auto-mount FAT32 at startup
     println!("Attempting to mount FAT32 filesystem...");
-    serial_println!("=== ATTEMPTING TO MOUNT FAT32 ===");
-    serial_println!("About to call try_mount_fat32()...");
     match try_mount_fat32() {
         Ok(()) => {
             println!("✓ FAT32 filesystem mounted successfully!");
-            serial_println!("✓ FAT32 filesystem mounted successfully!");
             println!("  Files and command history will persist across reboots.");
         }
         Err(e) => {
             println!("⚠ Could not mount FAT32: {}", e);
-            serial_println!("⚠ Could not mount FAT32: {}", e);
             println!("  Using RAM disk (data will be lost on reboot).");
             println!("  Use 'mount fat32' to mount manually later.");
         }
     }
     println!();
-    serial_println!("FAT32 mount attempt completed");
 
     let mut scancodes = ScancodeStream::new();
     let mut keyboard = Keyboard::new(
