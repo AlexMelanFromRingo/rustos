@@ -20,6 +20,25 @@ static mut SAVED_RSP: u64 = 0;
 /// Flag indicating whether we have a saved context
 static HAS_SAVED_CONTEXT: AtomicBool = AtomicBool::new(false);
 
+/// Debug helper to print context save information
+#[no_mangle]
+extern "C" fn debug_print_exec_entry(entry: u64, stack_bottom: u64, stack_size: u64, saved_rsp: u64) {
+    crate::println!("[DEBUG] exec_with_return_proper:");
+    crate::println!("  entry_point  = {:#x}", entry);
+    crate::println!("  stack_bottom = {:#x}", stack_bottom);
+    crate::println!("  stack_size   = {:#x}", stack_size);
+    crate::println!("  stack_top    = {:#x}", stack_bottom + stack_size);
+    crate::println!("  saved_rsp    = {:#x}", saved_rsp);
+    crate::println!("  selectors: data=0x23, code=0x1b");
+}
+
+/// Debug helper to print context restore information
+#[no_mangle]
+extern "C" fn debug_print_restore(saved_rsp: u64) {
+    crate::println!("[DEBUG] restore_kernel_context_and_return:");
+    crate::println!("  restoring RSP = {:#x}", saved_rsp);
+}
+
 /// Copy code to user space
 ///
 /// Copies kernel code to identity-mapped user space so it can run in Ring 3.
@@ -256,6 +275,10 @@ pub unsafe fn restore_kernel_context_and_return() -> ! {
 
     HAS_SAVED_CONTEXT.store(false, Ordering::SeqCst);
 
+    // DEBUG: Print before restoring
+    let rsp_val = SAVED_RSP;
+    debug_print_restore(rsp_val);
+
     core::arch::asm!(
         // Restore stack pointer
         "lea rax, [rip + {saved_rsp}]",
@@ -303,13 +326,26 @@ pub unsafe extern "C" fn exec_with_return_proper(entry_point: u64, stack_bottom:
         "lea rax, [rip + {has_context}]",
         "mov byte ptr [rax], 1",
 
+        // DEBUG: Print context information
+        "push rdi",              // Save args
+        "push rsi",
+        "push rdx",
+        "mov rcx, [rip + {saved_rsp}]",  // arg4: saved_rsp
+        // rdi, rsi, rdx already have entry, stack_bottom, stack_size
+        "call {debug_print}",
+        "pop rdx",               // Restore args
+        "pop rsi",
+        "pop rdi",
+
         // Calculate stack top: rsi (stack_bottom) + rdx (stack_size)
         "mov rax, rsi",
         "add rax, rdx",           // rax = stack_top
 
-        // Get user segment selectors
-        "mov r8, 0x23",           // User data selector (GDT index 4, RPL=3)
-        "mov r9, 0x2b",           // User code selector (GDT index 5, RPL=3)
+        // Get user segment selectors (match GDT layout)
+        // GDT order: null(0), kernel_code(1), kernel_data(2), user_code(3), user_data(4), TSS(5)
+        // Selectors: index * 8 + RPL(3)
+        "mov r8, 0x23",           // User data selector: index 4, RPL=3 → 4*8+3 = 0x23
+        "mov r9, 0x1b",           // User code selector: index 3, RPL=3 → 3*8+3 = 0x1b (NOT 0x2b!)
 
         // Set user data segments
         "mov ds, r8w",
@@ -329,5 +365,6 @@ pub unsafe extern "C" fn exec_with_return_proper(entry_point: u64, stack_bottom:
 
         saved_rsp = sym SAVED_RSP,
         has_context = sym HAS_SAVED_CONTEXT,
+        debug_print = sym debug_print_exec_entry,
     );
 }
