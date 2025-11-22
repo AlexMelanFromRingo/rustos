@@ -277,33 +277,57 @@ pub unsafe fn restore_kernel_context_and_return() -> ! {
 
 /// Execute user code with proper context saving
 ///
-/// Uses push/pop mechanism for reliable context switching.
-/// All callee-saved registers are pushed onto stack, then RSP is saved.
-/// On return from user mode, RSP is restored and registers are popped.
-#[inline(never)]
-pub unsafe fn exec_with_return_proper(entry_point: u64, stack_bottom: u64, stack_size: u64) {
-    // Save all callee-saved registers by pushing them onto the stack
-    // This is the standard context switching mechanism
-    core::arch::asm!(
-        // Push all callee-saved registers onto stack
+/// Naked function to completely control stack layout.
+/// Saves all callee-saved registers, then jumps to user mode via IRETQ.
+///
+/// Arguments (System V ABI):
+/// - rdi: entry_point
+/// - rsi: stack_bottom
+/// - rdx: stack_size
+#[unsafe(naked)]
+pub unsafe extern "C" fn exec_with_return_proper(entry_point: u64, stack_bottom: u64, stack_size: u64) -> ! {
+    core::arch::naked_asm!(
+        // Save all callee-saved registers (System V ABI)
         "push rbp",
         "push rbx",
         "push r12",
         "push r13",
         "push r14",
         "push r15",
+
         // Save current stack pointer
         "lea rax, [rip + {saved_rsp}]",
         "mov [rax], rsp",
+
+        // Set context available flag
+        "lea rax, [rip + {has_context}]",
+        "mov byte ptr [rax], 1",
+
+        // Calculate stack top: rsi (stack_bottom) + rdx (stack_size)
+        "mov rax, rsi",
+        "add rax, rdx",           // rax = stack_top
+
+        // Get user segment selectors
+        "mov r8, 0x23",           // User data selector (GDT index 4, RPL=3)
+        "mov r9, 0x2b",           // User code selector (GDT index 5, RPL=3)
+
+        // Set user data segments
+        "mov ds, r8w",
+        "mov es, r8w",
+        "mov fs, r8w",
+        "mov gs, r8w",
+
+        // Build IRETQ frame on stack
+        "push r8",                // SS (user data)
+        "push rax",               // RSP (stack_top)
+        "push 0x202",             // RFLAGS (IF=1, reserved=1)
+        "push r9",                // CS (user code)
+        "push rdi",               // RIP (entry_point)
+
+        // Jump to user mode
+        "iretq",
+
         saved_rsp = sym SAVED_RSP,
-        out("rax") _,
+        has_context = sym HAS_SAVED_CONTEXT,
     );
-
-    HAS_SAVED_CONTEXT.store(true, Ordering::SeqCst);
-
-    // Jump to user mode - if process calls exit, restore_kernel_context_and_return()
-    // will restore RSP, pop all registers, and return
-    jump_to_ring3(entry_point, stack_bottom, stack_size);
-
-    // We never reach here - jump_to_ring3 is noreturn
 }

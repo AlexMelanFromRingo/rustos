@@ -252,10 +252,11 @@ pub fn sys_fork() -> isize {
 }
 
 /// sys_execve - execute program
-pub fn sys_execve(filename: usize, _argv: usize, _envp: usize) -> isize {
+pub fn sys_execve(filename: usize, _argv: usize, _envp: usize) -> ! {
     // Get filename string
     if filename == 0 {
-        return SyscallError::InvalidArgument.as_isize();
+        crate::println!("execve: invalid filename pointer");
+        sys_exit(SyscallError::InvalidArgument.as_isize() as usize);
     }
 
     // Read filename (max 256 bytes)
@@ -278,18 +279,10 @@ pub fn sys_execve(filename: usize, _argv: usize, _envp: usize) -> isize {
 
     println!("execve: {}", path);
 
-    // Load ELF file
-    let result = crate::elf::load_and_exec(path);
-
-    match result {
-        Ok(_) => {
-            // Should never return - process replaced
-            0
-        }
-        Err(e) => {
-            println!("execve failed: {:?}", e);
-            SyscallError::FileNotFound.as_isize()
-        }
+    // Load and execute ELF file
+    // This never returns - either jumps to user mode or halts on error
+    unsafe {
+        crate::elf::load_and_exec(path);
     }
 }
 

@@ -2005,14 +2005,13 @@ impl Shell {
         println!("Loading ELF binary: {}", filename);
 
         // Load and execute ELF
-        match crate::elf::load_and_exec(filename) {
-            Ok(_) => {
-                // Should never reach here - program should exit via sys_exit
-                println!("ERROR: Returned from user program unexpectedly!");
-            }
-            Err(e) => {
-                println!("Failed to load ELF: {:?}", e);
-            }
+        // This call never returns in traditional sense - execution magically
+        // continues here after user program calls exit() and context is restored
+        unsafe {
+            crate::elf::load_and_exec(filename);
         }
+
+        // We return here after user program exits!
+        println!("\nProgram exited, returned to shell.");
     }
 }

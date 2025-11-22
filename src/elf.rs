@@ -276,7 +276,7 @@ impl<'a> ElfLoader<'a> {
 }
 
 /// Load and execute an ELF file from VFS
-pub fn load_and_exec(path: &str) -> Result<(), ElfError> {
+pub fn load_and_exec(path: &str) -> ! {
     use crate::fs::ramdisk::RAMDISK;
     use crate::fs::fat32::FAT32;
     use crate::fs::vfs::FileSystem;
@@ -289,32 +289,59 @@ pub fn load_and_exec(path: &str) -> Result<(), ElfError> {
                 data
             } else {
                 // Fallback to RAMDISK
-                RAMDISK.lock().read(path)
-                    .map_err(|_| ElfError::TooSmall)?
+                match RAMDISK.lock().read(path) {
+                    Ok(data) => data,
+                    Err(e) => {
+                        crate::println!("Failed to read ELF from filesystem: {:?}", e);
+                        crate::hlt_loop();
+                    }
+                }
             }
         } else {
             // Only RAMDISK available
-            RAMDISK.lock().read(path)
-                .map_err(|_| ElfError::TooSmall)?
+            match RAMDISK.lock().read(path) {
+                Ok(data) => data,
+                Err(e) => {
+                    crate::println!("Failed to read ELF from RAMDISK: {:?}", e);
+                    crate::hlt_loop();
+                }
+            }
         }
     };
 
     // Parse ELF
-    let loader = ElfLoader::new(&elf_data)?;
+    let loader = match ElfLoader::new(&elf_data) {
+        Ok(l) => l,
+        Err(e) => {
+            crate::println!("Failed to parse ELF: {:?}", e);
+            crate::hlt_loop();
+        }
+    };
 
     // Load into memory
-    let (entry_point, _low, _high) = loader.load()?;
+    let (entry_point, _low, _high) = match loader.load() {
+        Ok(result) => result,
+        Err(e) => {
+            crate::println!("Failed to load ELF: {:?}", e);
+            crate::hlt_loop();
+        }
+    };
 
     // Allocate user stack
-    let (stack_bottom, stack_size) = user_allocator::allocate_user_stack()
-        .ok_or(ElfError::AllocationFailed)?;
+    let (stack_bottom, stack_size) = match user_allocator::allocate_user_stack() {
+        Some(stack) => stack,
+        None => {
+            crate::println!("Failed to allocate user stack");
+            crate::hlt_loop();
+        }
+    };
 
     // Execute in user mode with proper context saving
-    // This will return when process calls exit()
+    // When process calls exit(), restore_kernel_context_and_return() will
+    // magically return execution to here by restoring saved registers.
+    // From compiler's perspective, exec_with_return_proper never returns (-> !),
+    // but in reality execution continues here after sys_exit restores context.
     unsafe {
         crate::userspace::exec_with_return_proper(entry_point.as_u64(), stack_bottom.as_u64(), stack_size);
     }
-
-    // Process exited cleanly, return Ok
-    Ok(())
 }
