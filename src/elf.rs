@@ -209,8 +209,20 @@ impl<'a> ElfLoader<'a> {
 
         // Allocate memory for entire ELF (code + data + bss)
         let total_size = (highest_addr - lowest_addr) as usize;
-        let base_addr = user_allocator::allocate_user_code(total_size)
-            .ok_or(ElfError::AllocationFailed)?;
+
+        // For ET_EXEC, we must load at the exact address specified in ELF
+        // Check if lowest_addr matches our user space start
+        let base_addr = if lowest_addr == super::memory::userspace::USER_CODE_START {
+            // Direct mapping - ELF expects to be at 0x400000
+            VirtAddr::new(lowest_addr)
+        } else {
+            // Relocatable - allocate anywhere
+            user_allocator::allocate_user_code(total_size)
+                .ok_or(ElfError::AllocationFailed)?
+        };
+
+        crate::println!("ELF: lowest_addr=0x{:X}, highest_addr=0x{:X}, base_addr=0x{:X}",
+                        lowest_addr, highest_addr, base_addr.as_u64());
 
         // Second pass: load segments
         for phdr in phdrs {
