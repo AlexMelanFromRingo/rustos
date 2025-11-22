@@ -5,7 +5,7 @@ use spin::Mutex;
 use crate::fs::vfs::{FileSystem, FileInfo, VfsError, VfsResult};
 
 const MAX_FILES: usize = 64;
-const MAX_FILE_SIZE: usize = 4096; // 4KB per file
+const MAX_FILE_SIZE: usize = 131072; // 128KB per file (for ELF binaries)
 const MAX_FILENAME_LEN: usize = 32;
 
 #[derive(Clone)]
