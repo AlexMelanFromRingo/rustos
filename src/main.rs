@@ -93,6 +93,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     test_main();
 
     println!("Starting RustOS Shell...");
+    println!("Active filesystem: {}", rustos::fs::vfs::VfsContext::filesystem_name());
     println!("Type 'help' for available commands");
     println!();
 

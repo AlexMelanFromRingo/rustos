@@ -40,26 +40,12 @@ impl Shell {
 
     /// Load command history from persistent storage (FAT32 if mounted, else RAM disk)
     fn load_history(&mut self) {
-        use crate::fs::fat32::FAT32;
-        use crate::fs::ramdisk::RAMDISK;
-        use crate::fs::vfs::FileSystem;
+        use crate::fs::vfs::VfsContext;
 
-        // Try loading from FAT32 first (persistent storage)
-        let fat32 = FAT32.lock();
-        let data = if let Some(ref fs) = *fat32 {
-            fs.read(".history").ok()
-        } else {
-            None
-        };
-        drop(fat32);
+        const HISTORY_FILE: &str = "HISTORY.TXT";
 
-        // Fallback to RAM disk if FAT32 not mounted or file not found
-        let data = data.or_else(|| {
-            let ramdisk = RAMDISK.lock();
-            ramdisk.read(".history").ok()
-        });
-
-        if let Some(data) = data {
+        // Try loading history file using unified VFS
+        if let Ok(data) = VfsContext::read(HISTORY_FILE) {
             // Parse history file (one command per line)
             let history_text = core::str::from_utf8(&data).unwrap_or("");
 
@@ -74,9 +60,9 @@ impl Shell {
 
     /// Save command history to persistent storage (FAT32 if mounted, else RAM disk)
     fn save_history(&self) {
-        use crate::fs::fat32::FAT32;
-        use crate::fs::ramdisk::RAMDISK;
-        use crate::fs::vfs::FileSystem;
+        use crate::fs::vfs::VfsContext;
+
+        const HISTORY_FILE: &str = "HISTORY.TXT";
 
         // Create history file content (one command per line)
         let mut content = String::new();
@@ -87,18 +73,8 @@ impl Shell {
 
         let data = content.as_bytes().to_vec();
 
-        // Try saving to FAT32 first (persistent storage)
-        let mut fat32 = FAT32.lock();
-        let _saved = if let Some(ref mut fs) = *fat32 {
-            fs.write(".history", data.clone()).is_ok()
-        } else {
-            false
-        };
-        drop(fat32);
-
-        // Always save to RAM disk as backup
-        let mut ramdisk = RAMDISK.lock();
-        let _ = ramdisk.write(".history", data);
+        // Save using unified VFS (FAT32 if mounted, else RAMDISK)
+        let _ = VfsContext::write(HISTORY_FILE, data);
     }
 
     pub fn print_prompt(&self) {
@@ -295,16 +271,13 @@ impl Shell {
 
     /// Autocomplete filename arguments
     fn autocomplete_filename(&mut self, parts: Vec<String>) -> Option<String> {
-        use crate::fs::ramdisk::RAMDISK;
-        use crate::fs::vfs::FileSystem;
+        use crate::fs::vfs::VfsContext;
 
         // Get the partial filename (last part)
         let partial_filename = parts.last().map(|s| s.as_str()).unwrap_or("");
 
-        // Get list of files
-        let ramdisk = RAMDISK.lock();
-        let files = ramdisk.list();
-        drop(ramdisk);
+        // Get list of files from active filesystem
+        let files = VfsContext::list();
 
         // Find matching filenames
         let matches: Vec<String> = files
