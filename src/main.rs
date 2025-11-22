@@ -35,10 +35,8 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     use rustos::memory;
     use x86_64::VirtAddr;
 
-    println!("Hello World from RustOS!");
-    println!("This is a minimal kernel written in Rust.");
-    println!();
-    println!("Based on Phil Opp's excellent tutorials:");
+    println!("RustOS - A minimal operating system written in Rust");
+    println!("Based on Phil Opp's excellent tutorials");
     println!("  https://os.phil-opp.com/");
     println!();
 
@@ -60,40 +58,12 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     rustos::drivers::ata::init();
 
     println!("Kernel initialized successfully!");
-    println!("Power management: shutdown and reboot available");
-    println!();
-
-    // Demonstrate heap allocation
-    println!("Heap allocation tests:");
-
-    // Test Box
-    use alloc::boxed::Box;
-    let heap_value = Box::new(41);
-    println!("  Box test: heap value at {:p} = {}", heap_value, *heap_value);
-
-    // Test Vec
-    use alloc::vec::Vec;
-    let mut vec = Vec::new();
-    for i in 0..10 {
-        vec.push(i);
-    }
-    println!("  Vec test: created vector with {} elements", vec.len());
-
-    // Test String
-    use alloc::string::String;
-    let mut string = String::from("Hello from the heap!");
-    string.push_str(" Heap allocation works!");
-    println!("  String test: {}", string);
-
-    println!();
-    println!("All heap allocations successful!");
     println!();
 
     #[cfg(test)]
     test_main();
 
     println!("Starting RustOS Shell...");
-    println!("Active filesystem: {}", rustos::fs::vfs::VfsContext::filesystem_name());
     println!("Type 'help' for available commands");
     println!();
 
@@ -143,18 +113,18 @@ async fn keyboard_task() {
     use x86_64::instructions::interrupts;
 
     // Try to auto-mount FAT32 at startup
-    println!("Attempting to mount FAT32 filesystem...");
     match try_mount_fat32() {
         Ok(()) => {
-            println!("✓ FAT32 filesystem mounted successfully!");
-            println!("  Files and command history will persist across reboots.");
+            println!("FAT32 filesystem mounted successfully!");
+            println!("Files and command history will persist across reboots.");
         }
         Err(e) => {
-            println!("⚠ Could not mount FAT32: {}", e);
-            println!("  Using RAM disk (data will be lost on reboot).");
-            println!("  Use 'mount fat32' to mount manually later.");
+            println!("Could not mount FAT32: {}", e);
+            println!("Using RAM disk (data will be lost on reboot).");
         }
     }
+    println!();
+    println!("Active filesystem: {}", rustos::fs::vfs::VfsContext::filesystem_name());
     println!();
 
     let mut scancodes = ScancodeStream::new();
