@@ -216,8 +216,8 @@ impl<'a> ElfLoader<'a> {
         let total_size = (highest_addr - lowest_addr) as usize;
 
         // For ET_EXEC, we must load at the exact address specified in ELF
-        // Check if lowest_addr matches our user space start
-        let base_addr = if lowest_addr == super::memory::userspace::USER_CODE_START {
+        // Check if lowest_addr is at user space start (0x400000)
+        let base_addr = if lowest_addr == super::memory::userspace::USER_SPACE_START {
             // Direct mapping - ELF expects to be at 0x400000
             VirtAddr::new(lowest_addr)
         } else {
