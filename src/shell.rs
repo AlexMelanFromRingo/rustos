@@ -426,6 +426,7 @@ impl Shell {
             "mkdir" => self.cmd_mkdir(args),
             "rmdir" => self.cmd_rmdir(args),
             "usermode" => self.cmd_usermode(),
+            "exec" => self.cmd_exec(args),
             _ => {
                 // Check if it's an alias
                 if let Some(expanded) = self.expand_alias(cmd) {
@@ -474,6 +475,7 @@ impl Shell {
         println!("  reboot    - Reboot the system");
         println!("  sleep     - Sleep for N seconds (usage: sleep <seconds>)");
         println!("  usermode  - Test user mode (Ring 3) and system calls");
+        println!("  exec      - Execute ELF binary (usage: exec <filename>)");
         println!();
         println!("Process management:");
         println!("  ps        - List all processes");
@@ -1980,5 +1982,28 @@ impl Shell {
 
         // Should never reach here - user_mode_demo calls sys_exit
         println!("ERROR: Returned from user mode unexpectedly!");
+    }
+
+    /// Execute ELF binary in user mode
+    fn cmd_exec(&mut self, args: &[&str]) {
+        if args.is_empty() {
+            println!("Usage: exec <filename>");
+            println!("Execute an ELF binary in user mode (Ring 3)");
+            return;
+        }
+
+        let filename = args[0];
+        println!("Loading ELF binary: {}", filename);
+
+        // Load and execute ELF
+        match crate::elf::load_and_exec(filename) {
+            Ok(_) => {
+                // Should never reach here - program should exit via sys_exit
+                println!("ERROR: Returned from user program unexpectedly!");
+            }
+            Err(e) => {
+                println!("Failed to load ELF: {:?}", e);
+            }
+        }
     }
 }

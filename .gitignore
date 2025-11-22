@@ -4,3 +4,4 @@ Cargo.lock
 !rustos.bin
 *.iso
 disk.img
+userspace/target/

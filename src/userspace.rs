@@ -175,3 +175,56 @@ pub fn get_demo_size() -> usize {
     // The function is small, 4KB should be enough
     4096
 }
+
+/// Jump to Ring 3 with arbitrary entry point and stack
+///
+/// This is a more generic version of jump_to_usermode that doesn't
+/// copy code - it assumes the code is already in user space.
+///
+/// # Arguments
+/// * `entry_point` - Virtual address of code to execute (must be in user space)
+/// * `stack_addr` - Virtual address of stack bottom (must be in user space)
+/// * `stack_size` - Size of stack in bytes
+///
+/// # Safety
+/// - entry_point must point to valid user space code
+/// - stack_addr must point to valid user space stack
+/// - Both addresses must be in identity-mapped region
+pub unsafe fn jump_to_ring3(entry_point: u64, stack_addr: u64, stack_size: u64) -> ! {
+    let stack_top = stack_addr + stack_size;
+
+    // Get user segment selectors
+    let user_cs = gdt::user_code_selector().0 as u64;
+    let user_ds = gdt::user_data_selector().0 as u64;
+
+    // Set user data segments
+    core::arch::asm!(
+        "mov ds, {0:x}",
+        "mov es, {0:x}",
+        "mov fs, {0:x}",
+        "mov gs, {0:x}",
+        in(reg) user_ds,
+    );
+
+    // IRETQ stack frame
+    let rflags: u64 = 0x202; // IF=1, Reserved bit=1
+
+    core::arch::asm!(
+        // Push IRETQ frame
+        "push {ss}",           // SS
+        "push {rsp}",          // RSP
+        "push {rflags}",       // RFLAGS
+        "push {cs}",           // CS
+        "push {rip}",          // RIP
+
+        // Execute IRETQ to jump to user mode
+        "iretq",
+
+        ss = in(reg) user_ds,
+        rsp = in(reg) stack_top,
+        rflags = in(reg) rflags,
+        cs = in(reg) user_cs,
+        rip = in(reg) entry_point,
+        options(noreturn)
+    );
+}
