@@ -192,11 +192,14 @@ extern "C" fn syscall_handler() {
 
         // DEBUG: Print SYSRET info (stack: [user_rip, user_rflags, user_rsp])
         "push rax",              // Save result
-        "mov rdi, [rsp + 8]",    // arg1: user_rip
+        "push rbp",              // Save rbp (will be arg5)
+        "mov rdi, [rsp + 16]",   // arg1: user_rip (skip rax, rbp)
         "mov rsi, rax",          // arg2: result
-        "mov rdx, [rsp + 24]",   // arg3: user_rsp (skip rax, rip, rflags)
-        "mov rcx, [rsp + 16]",   // arg4: user_rflags (skip rax, rip)
+        "mov rdx, [rsp + 32]",   // arg3: user_rsp (skip rax, rbp, rip, rflags)
+        "mov rcx, [rsp + 24]",   // arg4: user_rflags (skip rax, rbp, rip)
+        "mov r8, rbp",           // arg5: user_rbp (from register)
         "call {debug_sysret}",
+        "pop rbp",               // Restore rbp
         "pop rax",               // Restore result
 
         // Restore for SYSRET
@@ -219,9 +222,10 @@ static mut KERNEL_STACK_PTR: u64 = 0;
 
 /// Debug: Print SYSRET info with full state
 #[no_mangle]
-extern "C" fn debug_print_sysret(user_rip: u64, result: isize, user_rsp: u64, user_rflags: u64) {
-    crate::println!("[SYSRET] RIP={:#x}, RSP={:#x}, RFLAGS={:#x}, result={}",
-                    user_rip, user_rsp, user_rflags, result);
+extern "C" fn debug_print_sysret(user_rip: u64, result: isize, user_rsp: u64, user_rflags: u64, user_rbp: u64) {
+    crate::println!("[SYSRET] RIP={:#x}, RSP={:#x}, RBP={:#x}, RFLAGS={:#x}, res={}",
+                    user_rip, user_rsp, user_rbp, user_rflags, result);
+    crate::println!("         Next instr will write to [RBP-8] = {:#x}", user_rbp.wrapping_sub(8));
 }
 
 /// Initialize kernel stack pointer for syscalls
