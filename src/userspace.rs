@@ -8,6 +8,13 @@
 use crate::gdt;
 use crate::memory::user_allocator;
 use x86_64::VirtAddr;
+use core::sync::atomic::{AtomicU64, AtomicBool, Ordering};
+
+/// Saved kernel stack pointer for returning from user mode
+static KERNEL_RSP: AtomicU64 = AtomicU64::new(0);
+
+/// Flag indicating whether to return to kernel after process exit
+static SHOULD_RETURN_TO_KERNEL: AtomicBool = AtomicBool::new(false);
 
 /// Copy code to user space
 ///
@@ -227,4 +234,65 @@ pub unsafe fn jump_to_ring3(entry_point: u64, stack_addr: u64, stack_size: u64) 
         rip = in(reg) entry_point,
         options(noreturn)
     );
+}
+/// Execute user code with ability to return to kernel
+///
+/// This wrapper saves kernel context before jumping to ring 3,
+/// allowing sys_exit to return control back to the kernel.
+pub unsafe fn exec_with_return(entry_point: u64, stack_bottom: u64, stack_size: u64) {
+    // Save kernel context (RSP) before jumping to user mode
+    save_kernel_context();
+
+    // Jump to user mode - when process calls exit, return_to_kernel()
+    // will restore our stack and return here
+    jump_to_ring3(entry_point, stack_bottom, stack_size);
+}
+
+
+/// Return from user mode back to kernel
+///
+/// This function is called by sys_exit to return control to the kernel
+/// after a user process has finished executing.
+///
+/// # Safety
+/// This function manipulates the stack pointer and must only be called
+/// from sys_exit when a process has cleanly exited.
+pub unsafe fn return_to_kernel() -> ! {
+    // Check if we should return to kernel
+    if !SHOULD_RETURN_TO_KERNEL.load(Ordering::SeqCst) {
+        // No saved context, just halt
+        crate::hlt_loop();
+    }
+
+    // Clear the flag
+    SHOULD_RETURN_TO_KERNEL.store(false, Ordering::SeqCst);
+
+    // Restore kernel stack pointer
+    let saved_rsp = KERNEL_RSP.load(Ordering::SeqCst);
+
+    // Jump back to saved kernel context
+    // The saved RSP points to the return address pushed by the call instruction
+    core::arch::asm!(
+        "mov rsp, {0}",  // Restore kernel stack
+        "ret",           // Return to caller (load_and_exec)
+        in(reg) saved_rsp,
+        options(noreturn)
+    );
+}
+
+/// Save kernel context before jumping to user mode
+///
+/// This function saves the current kernel stack pointer so we can
+/// return to it when the user process exits.
+unsafe fn save_kernel_context() {
+    // Get current RSP
+    let rsp: u64;
+    core::arch::asm!(
+        "mov {}, rsp",
+        out(reg) rsp,
+    );
+
+    // Save it for later restoration
+    KERNEL_RSP.store(rsp, Ordering::SeqCst);
+    SHOULD_RETURN_TO_KERNEL.store(true, Ordering::SeqCst);
 }
