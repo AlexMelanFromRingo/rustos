@@ -214,14 +214,18 @@ pub fn sys_exit(exit_code: usize) -> isize {
     let mut pm = PROCESS_MANAGER.lock();
     if let Some(pid) = pm.current_pid {
         pm.exit(pid, exit_code as i32);
+        pm.current_pid = None;  // Clear current process
     }
     drop(pm);
 
-    // Yield to scheduler
+    // Yield to scheduler - this should switch to another process
     crate::process::scheduler::schedule();
 
-    // Should not reach here
-    0
+    // If we reach here, there are no other processes to run
+    // Loop forever (process is dead and should never execute again)
+    loop {
+        x86_64::instructions::hlt();
+    }
 }
 
 /// sys_fork - create child process (copy of current)
