@@ -30,7 +30,9 @@ pub fn init() {
     interrupts::init_idt();
     interrupts::init_pics();
     x86_64::instructions::interrupts::enable();
-    drivers::ata::init();
+    // NOTE: ATA driver initialization moved to after heap init
+    // because it requires memory allocations and may cause issues
+    // if called too early in boot process
 }
 
 pub fn hlt_loop() -> ! {

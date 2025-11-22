@@ -65,6 +65,11 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         .expect("heap initialization failed");
     serial_println!("Heap initialized!");
 
+    // Initialize ATA driver AFTER heap is ready
+    serial_println!("About to initialize ATA driver...");
+    rustos::drivers::ata::init();
+    serial_println!("ATA driver initialized!");
+
     println!("Kernel initialized successfully!");
     serial_println!("Kernel initialized successfully!");
     println!("Power management: shutdown and reboot available");
