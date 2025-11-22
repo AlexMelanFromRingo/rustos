@@ -210,10 +210,10 @@ pub fn sys_close(fd: usize) -> isize {
 pub fn sys_exit(exit_code: usize) -> isize {
     println!("\nProcess exited with code: {}", exit_code);
 
-    // Terminate current process
+    // Exit current process (becomes zombie for parent to reap)
     let mut pm = PROCESS_MANAGER.lock();
     if let Some(pid) = pm.current_pid {
-        pm.terminate(pid);
+        pm.exit(pid, exit_code as i32);
     }
     drop(pm);
 
@@ -222,6 +222,112 @@ pub fn sys_exit(exit_code: usize) -> isize {
 
     // Should not reach here
     0
+}
+
+/// sys_fork - create child process (copy of current)
+pub fn sys_fork() -> isize {
+    let mut pm = PROCESS_MANAGER.lock();
+
+    // Get current process ID
+    let parent_pid = match pm.current_pid {
+        Some(pid) => pid,
+        None => return SyscallError::InvalidArgument.as_isize(),
+    };
+
+    // Fork the process
+    match pm.fork(parent_pid) {
+        Ok(child_pid) => {
+            println!("fork: parent={} -> child={}", parent_pid, child_pid);
+            child_pid as isize
+        }
+        Err(e) => {
+            println!("fork failed: {}", e);
+            SyscallError::OutOfMemory.as_isize()
+        }
+    }
+}
+
+/// sys_execve - execute program
+pub fn sys_execve(filename: usize, _argv: usize, _envp: usize) -> isize {
+    // Get filename string
+    if filename == 0 {
+        return SyscallError::InvalidArgument.as_isize();
+    }
+
+    // Read filename (max 256 bytes)
+    let mut path_buf = [0u8; 256];
+    let mut len = 0;
+    unsafe {
+        let ptr = filename as *const u8;
+        for i in 0..256 {
+            let c = ptr.add(i).read();
+            if c == 0 {
+                break;
+            }
+            path_buf[i] = c;
+            len = i + 1;
+        }
+    }
+
+    let path = core::str::from_utf8(&path_buf[..len])
+        .unwrap_or("");
+
+    println!("execve: {}", path);
+
+    // Load ELF file
+    let result = crate::elf::load_and_exec(path);
+
+    match result {
+        Ok(_) => {
+            // Should never return - process replaced
+            0
+        }
+        Err(e) => {
+            println!("execve failed: {:?}", e);
+            SyscallError::FileNotFound.as_isize()
+        }
+    }
+}
+
+/// sys_wait4 - wait for child process to exit
+pub fn sys_wait4(pid: usize, wstatus: usize, _options: usize) -> isize {
+    let mut pm = PROCESS_MANAGER.lock();
+
+    // Get current process ID
+    let parent_pid = match pm.current_pid {
+        Some(pid) => pid,
+        None => return SyscallError::InvalidArgument.as_isize(),
+    };
+
+    // Wait for any child if pid == -1
+    let result = if pid == (-1isize) as usize {
+        pm.wait(parent_pid)
+    } else {
+        // Wait for specific child
+        pm.wait(parent_pid).filter(|(child_pid, _)| *child_pid == pid)
+    };
+
+    match result {
+        Some((child_pid, exit_code)) => {
+            println!("wait4: child {} exited with code {}", child_pid, exit_code);
+
+            // Write exit status if pointer provided
+            if wstatus != 0 {
+                unsafe {
+                    let status_ptr = wstatus as *mut i32;
+                    *status_ptr = exit_code << 8;  // Linux wait status format
+                }
+            }
+
+            child_pid as isize
+        }
+        None => {
+            // No zombie children yet
+            // In a real OS, we would block the process here
+            // For now, just return 0 (would wait)
+            0
+        }
+    }
 }
 
 /// sys_getpid - get process ID

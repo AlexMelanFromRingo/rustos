@@ -1030,9 +1030,11 @@ impl Shell {
 
         for process in processes {
             let state_str = match process.state {
-                crate::process::ProcessState::Ready => "Ready    ",
-                crate::process::ProcessState::Running => "Running  ",
-                crate::process::ProcessState::Blocked => "Blocked  ",
+                crate::process::ProcessState::Ready => "Ready     ",
+                crate::process::ProcessState::Running => "Running   ",
+                crate::process::ProcessState::Blocked => "Blocked   ",
+                crate::process::ProcessState::Waiting => "Waiting   ",
+                crate::process::ProcessState::Zombie => "Zombie    ",
                 crate::process::ProcessState::Terminated => "Terminated",
             };
 
