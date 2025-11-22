@@ -439,9 +439,6 @@ pub static ATA_DRIVE: Mutex<AtaDrive> = Mutex::new(AtaDrive::new());
 pub fn init() {
     let mut drive = ATA_DRIVE.lock();
 
-    if drive.exists() {
-        crate::println!("[ATA] Primary slave drive detected (FAT32 disk)");
-    } else {
-        crate::println!("[ATA] No primary slave drive found");
-    }
+    // Silent initialization - errors will be reported by FAT32 mount attempt
+    let _ = drive.exists();
 }
