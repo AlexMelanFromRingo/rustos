@@ -2005,11 +2005,9 @@ impl Shell {
         println!("Loading ELF binary: {}", filename);
 
         // Load and execute ELF
-        // This call never returns in traditional sense - execution magically
-        // continues here after user program calls exit() and context is restored
-        unsafe {
-            crate::elf::load_and_exec(filename);
-        }
+        // Execution magically continues here after user program calls exit()
+        // and restore_kernel_context_and_return() restores our stack
+        crate::elf::load_and_exec(filename);
 
         // We return here after user program exits!
         println!("\nProgram exited, returned to shell.");

@@ -276,7 +276,11 @@ impl<'a> ElfLoader<'a> {
 }
 
 /// Load and execute an ELF file from VFS
-pub fn load_and_exec(path: &str) -> ! {
+///
+/// This function DOES return after user program exits, despite calling
+/// exec_with_return_proper which is marked -> !. The magic happens via
+/// restore_kernel_context_and_return() which manually returns here.
+pub fn load_and_exec(path: &str) {
     use crate::fs::ramdisk::RAMDISK;
     use crate::fs::fat32::FAT32;
     use crate::fs::vfs::FileSystem;
@@ -293,7 +297,7 @@ pub fn load_and_exec(path: &str) -> ! {
                     Ok(data) => data,
                     Err(e) => {
                         crate::println!("Failed to read ELF from filesystem: {:?}", e);
-                        crate::hlt_loop();
+                        return;
                     }
                 }
             }
@@ -303,7 +307,7 @@ pub fn load_and_exec(path: &str) -> ! {
                 Ok(data) => data,
                 Err(e) => {
                     crate::println!("Failed to read ELF from RAMDISK: {:?}", e);
-                    crate::hlt_loop();
+                    return;
                 }
             }
         }
@@ -314,7 +318,7 @@ pub fn load_and_exec(path: &str) -> ! {
         Ok(l) => l,
         Err(e) => {
             crate::println!("Failed to parse ELF: {:?}", e);
-            crate::hlt_loop();
+            return;
         }
     };
 
@@ -323,7 +327,7 @@ pub fn load_and_exec(path: &str) -> ! {
         Ok(result) => result,
         Err(e) => {
             crate::println!("Failed to load ELF: {:?}", e);
-            crate::hlt_loop();
+            return;
         }
     };
 
@@ -332,7 +336,7 @@ pub fn load_and_exec(path: &str) -> ! {
         Some(stack) => stack,
         None => {
             crate::println!("Failed to allocate user stack");
-            crate::hlt_loop();
+            return;
         }
     };
 
