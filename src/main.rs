@@ -54,6 +54,13 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     rustos::allocator::init_heap(&mut mapper, &mut frame_allocator)
         .expect("heap initialization failed");
 
+    // Initialize user space identity mapping
+    memory::userspace::init_user_space_mapping(&mut mapper, &mut frame_allocator)
+        .expect("user space mapping failed");
+    println!("User space memory mapped ({}MB at 0x{:08X})",
+        memory::userspace::USER_SPACE_SIZE / (1024 * 1024),
+        memory::userspace::USER_SPACE_START);
+
     // Initialize ATA driver AFTER heap is ready
     rustos::drivers::ata::init();
 

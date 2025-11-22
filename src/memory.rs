@@ -5,6 +5,8 @@ use x86_64::{
 };
 use bootloader::bootinfo::{MemoryMap, MemoryRegionType};
 
+pub mod userspace;
+
 /// Returns a mutable reference to the active level 4 table.
 ///
 /// This function is unsafe because the caller must guarantee that the
