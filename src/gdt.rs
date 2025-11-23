@@ -14,11 +14,25 @@ const IA32_FMASK: u32 = 0xC000_0084;
 lazy_static! {
     static ref TSS: TaskStateSegment = {
         let mut tss = TaskStateSegment::new();
+
+        // CRITICAL: Set up privilege_stack_table[0] (RSP0)
+        // This is used when CPU switches from Ring 3 to Ring 0 for interrupts!
+        // Without this, ANY interrupt in user mode causes DOUBLE FAULT!
+        tss.privilege_stack_table[0] = {
+            const STACK_SIZE: usize = 4096 * 5;
+            static mut PRIVILEGE_STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
+
+            let stack_start = VirtAddr::from_ptr(&raw const PRIVILEGE_STACK);
+            let stack_end = stack_start + STACK_SIZE;
+            stack_end
+        };
+
+        // Set up IST for double fault handler
         tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = {
             const STACK_SIZE: usize = 4096 * 5;
-            static mut STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
+            static mut IST_STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
 
-            let stack_start = VirtAddr::from_ptr(&raw const STACK);
+            let stack_start = VirtAddr::from_ptr(&raw const IST_STACK);
             let stack_end = stack_start + STACK_SIZE;
             stack_end
         };
