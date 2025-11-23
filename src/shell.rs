@@ -798,11 +798,43 @@ impl Shell {
         use crate::fs::vfs::{VfsContext, VfsError};
 
         if args.is_empty() {
-            println!("Usage: rm <filename>");
+            println!("Usage: rm [-rf] <filename>");
             return;
         }
 
-        let filename = args[0];
+        // Parse flags and filename
+        let mut filename = None;
+        let mut _recursive = false;
+        let mut _force = false;
+
+        for arg in args {
+            if arg.starts_with('-') {
+                // Parse flags
+                for c in arg.chars().skip(1) {
+                    match c {
+                        'r' => _recursive = true,
+                        'f' => _force = true,
+                        _ => {
+                            println!("rm: invalid option -- '{}'", c);
+                            return;
+                        }
+                    }
+                }
+            } else {
+                // First non-flag argument is the filename
+                if filename.is_none() {
+                    filename = Some(*arg);
+                }
+            }
+        }
+
+        let filename = match filename {
+            Some(f) => f,
+            None => {
+                println!("Usage: rm [-rf] <filename>");
+                return;
+            }
+        };
 
         match VfsContext::delete(filename) {
             Ok(_) => println!("File '{}' deleted [{}]", filename, VfsContext::filesystem_name()),
