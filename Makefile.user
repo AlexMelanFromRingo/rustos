@@ -7,7 +7,9 @@
 
 # Compiler flags
 CC = gcc
-CFLAGS = -nostdlib -static -fno-stack-protector -fno-pie -no-pie
+# CRITICAL: -mno-red-zone prevents compiler from using 128-byte red zone below RSP
+# Syscalls don't preserve red zone, causing stack corruption!
+CFLAGS = -nostdlib -static -fno-stack-protector -fno-pie -no-pie -mno-red-zone
 LDFLAGS = -T user.ld
 
 # Default target
