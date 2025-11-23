@@ -145,16 +145,16 @@ fn get_kernel_stack_ptr() -> u64 {
 #[unsafe(naked)]
 extern "C" fn syscall_handler() {
     core::arch::naked_asm!(
-        // Save user RSP
-        "mov qword ptr [rip + {USER_RSP}], rsp",
+        // CRITICAL FIX: Save user RSP BEFORE switching stacks!
+        // According to https://cyp.sh/blog/syscallsysret and https://wiki.osdev.org/SWAPGS
+        // SYSCALL does NOT save RSP - we must do it manually!
+        "mov qword ptr [rip + {USER_RSP}], rsp",    // 1. Save user RSP
+        "mov rsp, qword ptr [rip + {KERNEL_STACK_PTR}]",  // 2. Switch to kernel stack
 
-        // Switch to kernel stack
-        "mov rsp, qword ptr [rip + {KERNEL_STACK_PTR}]",
-
-        // Save context for SYSRET
-        "push qword ptr [rip + {USER_RSP}]",  // User RSP
-        "push r11",                            // User RFLAGS
-        "push rcx",                            // User RIP
+        // Save context for SYSRET (now on kernel stack)
+        "push qword ptr [rip + {USER_RSP}]",  // User RSP (saved above)
+        "push r11",                            // User RFLAGS (CPU saved in R11)
+        "push rcx",                            // User RIP (CPU saved in RCX)
 
         // Save callee-saved registers
         "push rbx",
