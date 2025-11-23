@@ -149,23 +149,24 @@ extern "C" fn syscall_handler() {
         // According to https://cyp.sh/blog/syscallsysret and https://wiki.osdev.org/SWAPGS
         // SYSCALL does NOT save RSP - we must do it manually!
         "mov qword ptr [rip + {USER_RSP}], rsp",    // 1. Save user RSP
-
-        // DEBUG: Log the RSP save operation
-        "push rdi",
-        "push rsi",
-        "mov rdi, rsp",                              // arg1: user RSP (still in RSP)
-        "add rdi, 16",                                // Adjust for pushes
-        "mov rsi, qword ptr [rip + {KERNEL_STACK_PTR}]",  // arg2: kernel RSP
-        "call {debug_syscall_entry}",
-        "pop rsi",
-        "pop rdi",
-
         "mov rsp, qword ptr [rip + {KERNEL_STACK_PTR}]",  // 2. Switch to kernel stack
 
-        // Save context for SYSRET (now on kernel stack)
+        // Save context for SYSRET (now on kernel stack, safe to push)
         "push qword ptr [rip + {USER_RSP}]",  // User RSP (saved above)
         "push r11",                            // User RFLAGS (CPU saved in R11)
         "push rcx",                            // User RIP (CPU saved in RCX)
+
+        // DEBUG: Log syscall entry (on kernel stack now, won't corrupt user space!)
+        "push rax",
+        "push rdi",
+        "push rsi",
+        "mov rdi, qword ptr [rip + {USER_RSP}]",  // arg1: saved user RSP
+        "mov rsi, rsp",                            // arg2: current kernel RSP
+        "add rsi, 24",                             // Adjust for 3 pushes
+        "call {debug_syscall_entry}",
+        "pop rsi",
+        "pop rdi",
+        "pop rax",
 
         // Save callee-saved registers
         "push rbx",
