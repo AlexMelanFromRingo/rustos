@@ -87,10 +87,29 @@ extern "x86-interrupt" fn page_fault_handler(
 {
     use x86_64::registers::control::Cr2;
 
-    println!("EXCEPTION: PAGE FAULT");
-    println!("Accessed Address: {:?}", Cr2::read());
-    println!("Error Code: {:?}", error_code);
-    println!("{:#?}", stack_frame);
+    crate::println!("\n╔══════════════════════════════════════════╗");
+    crate::println!("║       EXCEPTION: PAGE FAULT             ║");
+    crate::println!("╚══════════════════════════════════════════╝");
+
+    let fault_addr = Cr2::read();
+    crate::println!("Accessed Address: {:?}", fault_addr);
+    crate::println!("Error Code: {:?}", error_code);
+    crate::println!("  - Present: {}", error_code.contains(x86_64::structures::idt::PageFaultErrorCode::PROTECTION_VIOLATION));
+    crate::println!("  - Write: {}", error_code.contains(x86_64::structures::idt::PageFaultErrorCode::CAUSED_BY_WRITE));
+    crate::println!("  - User: {}", error_code.contains(x86_64::structures::idt::PageFaultErrorCode::USER_MODE));
+    crate::println!("  - Reserved Write: {}", error_code.contains(x86_64::structures::idt::PageFaultErrorCode::MALFORMED_TABLE));
+    crate::println!("  - Instruction Fetch: {}", error_code.contains(x86_64::structures::idt::PageFaultErrorCode::INSTRUCTION_FETCH));
+    crate::println!("{:#?}", stack_frame);
+
+    // Check if address is in user space range
+    let addr_u64 = fault_addr.as_u64();
+    if addr_u64 >= crate::memory::userspace::USER_SPACE_START &&
+       addr_u64 < crate::memory::userspace::USER_SPACE_END {
+        crate::println!("⚠️  Fault in USER SPACE range (0x{:X} - 0x{:X})",
+            crate::memory::userspace::USER_SPACE_START,
+            crate::memory::userspace::USER_SPACE_END);
+    }
+
     panic!("Page fault");
 }
 

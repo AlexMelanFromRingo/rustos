@@ -149,6 +149,17 @@ extern "C" fn syscall_handler() {
         // According to https://cyp.sh/blog/syscallsysret and https://wiki.osdev.org/SWAPGS
         // SYSCALL does NOT save RSP - we must do it manually!
         "mov qword ptr [rip + {USER_RSP}], rsp",    // 1. Save user RSP
+
+        // DEBUG: Log the RSP save operation
+        "push rdi",
+        "push rsi",
+        "mov rdi, rsp",                              // arg1: user RSP (still in RSP)
+        "add rdi, 16",                                // Adjust for pushes
+        "mov rsi, qword ptr [rip + {KERNEL_STACK_PTR}]",  // arg2: kernel RSP
+        "call {debug_syscall_entry}",
+        "pop rsi",
+        "pop rdi",
+
         "mov rsp, qword ptr [rip + {KERNEL_STACK_PTR}]",  // 2. Switch to kernel stack
 
         // Save context for SYSRET (now on kernel stack)
@@ -212,6 +223,7 @@ extern "C" fn syscall_handler() {
 
         syscall_dispatcher = sym crate::syscall::syscall_dispatcher,
         debug_sysret = sym debug_print_sysret,
+        debug_syscall_entry = sym debug_syscall_entry,
         USER_RSP = sym USER_RSP,
         KERNEL_STACK_PTR = sym KERNEL_STACK_PTR,
     )
@@ -219,6 +231,13 @@ extern "C" fn syscall_handler() {
 
 /// Kernel stack pointer (initialized at boot)
 static mut KERNEL_STACK_PTR: u64 = 0;
+
+/// Debug: Log SYSCALL entry with RSP values
+#[no_mangle]
+extern "C" fn debug_syscall_entry(user_rsp: u64, kernel_rsp: u64) {
+    crate::println!("[SYSCALL ENTRY] user_RSP={:#x}, kernel_RSP={:#x}",
+                    user_rsp, kernel_rsp);
+}
 
 /// Debug: Print SYSRET info with full state
 #[no_mangle]
