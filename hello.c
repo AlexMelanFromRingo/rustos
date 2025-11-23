@@ -70,7 +70,11 @@ static long getpid(void) {
 
 static void exit(int status) {
     syscall1(SYS_EXIT, status);
-    __builtin_unreachable();
+    // Если exit вернулся (через restore_kernel_context_and_return),
+    // просто останавливаемся
+    while(1) {
+        asm volatile("hlt");
+    }
 }
 
 // String length helper
