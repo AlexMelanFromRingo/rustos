@@ -157,13 +157,22 @@ extern "C" fn syscall_handler() {
         "push rcx",                            // User RIP (CPU saved in RCX)
 
         // DEBUG: Log syscall entry (on kernel stack now, won't corrupt user space!)
-        "push rax",
-        "push rdi",
-        "push rsi",
+        // Save ALL syscall argument registers because println! will clobber them!
+        "push rax",   // syscall number
+        "push rdi",   // arg1
+        "push rsi",   // arg2
+        "push rdx",   // arg3 - CRITICAL! println! clobbers this
+        "push r10",   // arg4
+        "push r8",    // arg5
+        "push r9",    // arg6
         "mov rdi, qword ptr [rip + {USER_RSP}]",  // arg1: saved user RSP
         "mov rsi, rsp",                            // arg2: current kernel RSP
-        "add rsi, 24",                             // Adjust for 3 pushes
+        "add rsi, 56",                             // Adjust for 7 pushes (7*8=56)
         "call {debug_syscall_entry}",
+        "pop r9",
+        "pop r8",
+        "pop r10",
+        "pop rdx",    // RESTORE arg3!
         "pop rsi",
         "pop rdi",
         "pop rax",
