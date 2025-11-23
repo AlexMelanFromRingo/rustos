@@ -97,25 +97,8 @@ pub fn syscall_dispatcher(
 ) -> isize {
     let syscall = match SyscallNumber::from_usize(syscall_num) {
         Some(sc) => sc,
-        None => {
-            crate::println!("[SYSCALL] Unknown syscall #{}", syscall_num);
-            return SyscallError::NotImplemented.as_isize();
-        }
+        None => return SyscallError::NotImplemented.as_isize(),
     };
-
-    // DEBUG: Print all syscalls except frequent ones
-    match syscall {
-        SyscallNumber::Write => {
-            // Only print first few chars for write
-            crate::print!("[SYSCALL] write(fd={}, buf={:#x}, count={}) ", arg1, arg2, arg3);
-        }
-        SyscallNumber::Exit => {
-            crate::println!("[SYSCALL] exit({})", arg1);
-        }
-        _ => {
-            crate::println!("[SYSCALL] {:?}({:#x}, {:#x}, {:#x})", syscall, arg1, arg2, arg3);
-        }
-    }
 
     let result = match syscall {
         SyscallNumber::Read => handler::sys_read(arg1, arg2, arg3),
@@ -130,11 +113,6 @@ pub fn syscall_dispatcher(
         SyscallNumber::GetCwd => handler::sys_getcwd(arg1, arg2),
         SyscallNumber::Chdir => handler::sys_chdir(arg1),
     };
-
-    // Print result for write
-    if matches!(syscall, SyscallNumber::Write) {
-        crate::println!("→ {}", result);
-    }
 
     result
 }

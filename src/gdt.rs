@@ -165,31 +165,10 @@ extern "C" fn syscall_handler() {
         "mov qword ptr [rip + {USER_RSP}], rsp",    // 1. Save user RSP
         "mov rsp, qword ptr [rip + {KERNEL_STACK_PTR}]",  // 2. Switch to kernel stack
 
-        // Save context for SYSRET (now on kernel stack, safe to push)
+        // Save context for SYSRET (now on kernel stack)
         "push qword ptr [rip + {USER_RSP}]",  // User RSP (saved above)
         "push r11",                            // User RFLAGS (CPU saved in R11)
         "push rcx",                            // User RIP (CPU saved in RCX)
-
-        // DEBUG: Log syscall entry (on kernel stack now, won't corrupt user space!)
-        // Save ALL syscall argument registers because println! will clobber them!
-        "push rax",   // syscall number
-        "push rdi",   // arg1
-        "push rsi",   // arg2
-        "push rdx",   // arg3 - CRITICAL! println! clobbers this
-        "push r10",   // arg4
-        "push r8",    // arg5
-        "push r9",    // arg6
-        "mov rdi, qword ptr [rip + {USER_RSP}]",  // arg1: saved user RSP
-        "mov rsi, rsp",                            // arg2: current kernel RSP
-        "add rsi, 56",                             // Adjust for 7 pushes (7*8=56)
-        "call {debug_syscall_entry}",
-        "pop r9",
-        "pop r8",
-        "pop r10",
-        "pop rdx",    // RESTORE arg3!
-        "pop rsi",
-        "pop rdi",
-        "pop rax",
 
         // Save callee-saved registers
         "push rbx",
@@ -225,18 +204,6 @@ extern "C" fn syscall_handler() {
         "pop rbp",
         "pop rbx",
 
-        // DEBUG: Print SYSRET info (stack: [user_rip, user_rflags, user_rsp])
-        "push rax",              // Save result
-        "push rbp",              // Save rbp (will be arg5)
-        "mov rdi, [rsp + 16]",   // arg1: user_rip (skip rax, rbp)
-        "mov rsi, rax",          // arg2: result
-        "mov rdx, [rsp + 32]",   // arg3: user_rsp (skip rax, rbp, rip, rflags)
-        "mov rcx, [rsp + 24]",   // arg4: user_rflags (skip rax, rbp, rip)
-        "mov r8, rbp",           // arg5: user_rbp (from register)
-        "call {debug_sysret}",
-        "pop rbp",               // Restore rbp
-        "pop rax",               // Restore result
-
         // Restore for SYSRET
         "pop rcx",       // User RIP
         "pop r11",       // User RFLAGS
@@ -246,8 +213,6 @@ extern "C" fn syscall_handler() {
         "sysretq",
 
         syscall_dispatcher = sym crate::syscall::syscall_dispatcher,
-        debug_sysret = sym debug_print_sysret,
-        debug_syscall_entry = sym debug_syscall_entry,
         USER_RSP = sym USER_RSP,
         KERNEL_STACK_PTR = sym KERNEL_STACK_PTR,
     )
@@ -255,21 +220,6 @@ extern "C" fn syscall_handler() {
 
 /// Kernel stack pointer (initialized at boot)
 static mut KERNEL_STACK_PTR: u64 = 0;
-
-/// Debug: Log SYSCALL entry with RSP values
-#[no_mangle]
-extern "C" fn debug_syscall_entry(user_rsp: u64, kernel_rsp: u64) {
-    crate::println!("[SYSCALL ENTRY] user_RSP={:#x}, kernel_RSP={:#x}",
-                    user_rsp, kernel_rsp);
-}
-
-/// Debug: Print SYSRET info with full state
-#[no_mangle]
-extern "C" fn debug_print_sysret(user_rip: u64, result: isize, user_rsp: u64, user_rflags: u64, user_rbp: u64) {
-    crate::println!("[SYSRET] RIP={:#x}, RSP={:#x}, RBP={:#x}, RFLAGS={:#x}, res={}",
-                    user_rip, user_rsp, user_rbp, user_rflags, result);
-    crate::println!("         Next instr will write to [RBP-8] = {:#x}", user_rbp.wrapping_sub(8));
-}
 
 /// Initialize kernel stack pointer for syscalls
 fn init_kernel_stack() {
