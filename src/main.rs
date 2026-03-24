@@ -47,8 +47,12 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
     let mut mapper = unsafe { memory::init(phys_mem_offset) };
     let mut frame_allocator = unsafe {
-        memory::BootInfoFrameAllocator::init(&boot_info.memory_map)
+        memory::BitmapFrameAllocator::init(&boot_info.memory_map)
     };
+
+    // Report physical memory
+    let total_mb = memory::total_usable_memory() / (1024 * 1024);
+    println!("Physical memory: {} MiB usable", total_mb);
 
     // Initialize heap
     rustos::allocator::init_heap(&mut mapper, &mut frame_allocator)

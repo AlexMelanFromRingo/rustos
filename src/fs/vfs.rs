@@ -8,16 +8,21 @@ use alloc::string::String;
 use crate::fs::fat32::FAT32;
 use crate::fs::ramdisk::RAMDISK;
 
-/// Information about a file in the filesystem
+/// Information about a file or directory in the filesystem
 #[derive(Debug, Clone)]
 pub struct FileInfo {
     pub name: String,
     pub size: usize,
+    pub is_directory: bool,
 }
 
 impl FileInfo {
     pub fn new(name: String, size: usize) -> Self {
-        FileInfo { name, size }
+        FileInfo { name, size, is_directory: false }
+    }
+
+    pub fn directory(name: String) -> Self {
+        FileInfo { name, size: 0, is_directory: true }
     }
 }
 
@@ -38,6 +43,12 @@ pub enum VfsError {
     TooManyFiles,
     /// Permission denied
     PermissionDenied,
+    /// Path is not a directory
+    NotADirectory,
+    /// Path is a directory (operation requires a file)
+    IsADirectory,
+    /// Directory is not empty
+    DirectoryNotEmpty,
     /// Generic I/O error
     IoError,
 }
@@ -66,6 +77,18 @@ pub trait FileSystem {
 
     /// Get total available space (in bytes)
     fn total_space(&self) -> usize;
+
+    /// Create a directory
+    fn mkdir(&mut self, path: &str) -> VfsResult<()>;
+
+    /// Remove an empty directory
+    fn rmdir(&mut self, path: &str) -> VfsResult<()>;
+
+    /// List files/directories in a specific directory path
+    fn list_dir(&self, path: &str) -> VfsResult<Vec<FileInfo>>;
+
+    /// Check if path is a directory
+    fn is_directory(&self, path: &str) -> bool;
 
     /// Get free space (in bytes)
     fn free_space(&self) -> usize {
@@ -185,6 +208,54 @@ impl VfsContext {
         drop(fat32);
 
         RAMDISK.lock().total_space()
+    }
+
+    /// Create a directory
+    pub fn mkdir(path: &str) -> VfsResult<()> {
+        let mut fat32 = FAT32.lock();
+        if let Some(ref mut fs) = *fat32 {
+            return fs.mkdir(path);
+        }
+        drop(fat32);
+
+        RAMDISK.lock().mkdir(path)
+    }
+
+    /// Remove an empty directory
+    pub fn rmdir(path: &str) -> VfsResult<()> {
+        let mut fat32 = FAT32.lock();
+        if let Some(ref mut fs) = *fat32 {
+            return fs.rmdir(path);
+        }
+        drop(fat32);
+
+        RAMDISK.lock().rmdir(path)
+    }
+
+    /// List files/directories in a specific directory
+    pub fn list_dir(path: &str) -> VfsResult<Vec<FileInfo>> {
+        let fat32 = FAT32.lock();
+        if let Some(ref fs) = *fat32 {
+            let result = fs.list_dir(path);
+            drop(fat32);
+            return result;
+        }
+        drop(fat32);
+
+        RAMDISK.lock().list_dir(path)
+    }
+
+    /// Check if path is a directory
+    pub fn is_directory(path: &str) -> bool {
+        let fat32 = FAT32.lock();
+        if let Some(ref fs) = *fat32 {
+            let result = fs.is_directory(path);
+            drop(fat32);
+            return result;
+        }
+        drop(fat32);
+
+        RAMDISK.lock().is_directory(path)
     }
 
     /// Check if FAT32 is currently mounted

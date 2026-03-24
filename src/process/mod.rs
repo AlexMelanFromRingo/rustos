@@ -20,6 +20,20 @@ pub enum ProcessState {
     Terminated,
 }
 
+impl ProcessState {
+    /// Get human-readable state string
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ProcessState::Ready => "READY",
+            ProcessState::Running => "RUNNING",
+            ProcessState::Blocked => "BLOCKED",
+            ProcessState::Waiting => "WAITING",
+            ProcessState::Zombie => "ZOMBIE",
+            ProcessState::Terminated => "DEAD",
+        }
+    }
+}
+
 /// Process Control Block - contains all information about a process
 #[derive(Debug)]
 pub struct Process {
@@ -141,6 +155,11 @@ impl ProcessManager {
             process.state = ProcessState::Running;
             self.current_pid = Some(pid);
         }
+    }
+
+    /// Get all processes (for ps command)
+    pub fn processes(&self) -> &[Process] {
+        &self.processes
     }
 
     /// Get list of ready processes

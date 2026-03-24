@@ -182,18 +182,10 @@ pub fn sys_open(path_ptr: usize, flags: usize) -> isize {
         return SyscallError::InvalidArgument.as_isize();
     }
 
-    // Read path string from user space
-    let path = unsafe {
-        let mut len = 0;
-        let ptr = path_ptr as *const u8;
-        while len < 256 && *ptr.add(len) != 0 {
-            len += 1;
-        }
-        let slice = core::slice::from_raw_parts(ptr, len);
-        match core::str::from_utf8(slice) {
-            Ok(s) => String::from(s),
-            Err(_) => return SyscallError::InvalidArgument.as_isize(),
-        }
+    let path = unsafe { read_user_string(path_ptr) };
+    let path = match path {
+        Some(p) => p,
+        None => return SyscallError::InvalidArgument.as_isize(),
     };
 
     // Check if file exists (if not O_CREAT, fail)
@@ -384,42 +376,182 @@ pub fn sys_getcwd(buf: usize, size: usize) -> isize {
     to_copy as isize
 }
 
+/// sys_lseek - reposition file offset
+pub fn sys_lseek(fd: usize, offset: isize, whence: usize) -> isize {
+    if fd < 3 {
+        // Can't seek on stdin/stdout/stderr
+        return SyscallError::InvalidArgument.as_isize();
+    }
+
+    let mut fd_table = filedesc::get_fd_table();
+
+    if !fd_table.is_valid(fd) {
+        return SyscallError::BadFileDescriptor.as_isize();
+    }
+
+    // Get file size for SEEK_END
+    let file_size = {
+        let file = match fd_table.get(fd) {
+            Some(f) => f,
+            None => return SyscallError::BadFileDescriptor.as_isize(),
+        };
+        let path = file.path.clone();
+        drop(fd_table);
+
+        let data = {
+            if let Some(ref fs) = *FAT32.lock() {
+                fs.read(&path).ok()
+            } else {
+                RAMDISK.lock().read(&path).ok()
+            }
+        };
+
+        let size = data.map(|d| d.len()).unwrap_or(0);
+        fd_table = filedesc::get_fd_table();
+        size
+    };
+
+    match fd_table.lseek(fd, offset, whence, file_size) {
+        Some(new_offset) => new_offset as isize,
+        None => SyscallError::InvalidArgument.as_isize(),
+    }
+}
+
+/// sys_dup - duplicate file descriptor
+pub fn sys_dup(old_fd: usize) -> isize {
+    let mut fd_table = filedesc::get_fd_table();
+
+    match fd_table.dup(old_fd) {
+        Some(new_fd) => new_fd as isize,
+        None => SyscallError::BadFileDescriptor.as_isize(),
+    }
+}
+
+/// sys_dup2 - duplicate file descriptor to specific target
+pub fn sys_dup2(old_fd: usize, new_fd: usize) -> isize {
+    let mut fd_table = filedesc::get_fd_table();
+
+    match fd_table.dup2(old_fd, new_fd) {
+        Some(fd) => fd as isize,
+        None => SyscallError::BadFileDescriptor.as_isize(),
+    }
+}
+
+/// sys_mkdir - create a directory
+pub fn sys_mkdir(path_ptr: usize, _mode: usize) -> isize {
+    if path_ptr == 0 {
+        return SyscallError::InvalidArgument.as_isize();
+    }
+
+    let path = unsafe { read_user_string(path_ptr) };
+    let path = match path {
+        Some(p) => p,
+        None => return SyscallError::InvalidArgument.as_isize(),
+    };
+
+    use crate::fs::vfs::{VfsContext, VfsError};
+    match VfsContext::mkdir(&path) {
+        Ok(_) => 0,
+        Err(VfsError::FileExists) => SyscallError::InvalidArgument.as_isize(), // EEXIST
+        Err(VfsError::FileNotFound) => SyscallError::FileNotFound.as_isize(), // ENOENT (parent)
+        Err(_) => SyscallError::PermissionDenied.as_isize(),
+    }
+}
+
+/// sys_rmdir - remove a directory
+pub fn sys_rmdir(path_ptr: usize) -> isize {
+    if path_ptr == 0 {
+        return SyscallError::InvalidArgument.as_isize();
+    }
+
+    let path = unsafe { read_user_string(path_ptr) };
+    let path = match path {
+        Some(p) => p,
+        None => return SyscallError::InvalidArgument.as_isize(),
+    };
+
+    use crate::fs::vfs::{VfsContext, VfsError};
+    match VfsContext::rmdir(&path) {
+        Ok(_) => 0,
+        Err(VfsError::FileNotFound) => SyscallError::FileNotFound.as_isize(),
+        Err(VfsError::DirectoryNotEmpty) => SyscallError::InvalidArgument.as_isize(),
+        Err(_) => SyscallError::PermissionDenied.as_isize(),
+    }
+}
+
+/// Helper: read a null-terminated string from user space (max 256 bytes)
+unsafe fn read_user_string(ptr: usize) -> Option<String> {
+    let mut len = 0;
+    let raw = ptr as *const u8;
+    while len < 256 {
+        if unsafe { *raw.add(len) } == 0 {
+            break;
+        }
+        len += 1;
+    }
+    let slice = unsafe { core::slice::from_raw_parts(raw, len) };
+    core::str::from_utf8(slice).ok().map(String::from)
+}
+
+/// sys_clock_gettime - get time from a specified clock
+///
+/// clock_id: 0=CLOCK_REALTIME, 1=CLOCK_MONOTONIC
+/// timespec_ptr: pointer to struct { tv_sec: i64, tv_nsec: i64 }
+pub fn sys_clock_gettime(clock_id: usize, timespec_ptr: usize) -> isize {
+    if timespec_ptr == 0 {
+        return SyscallError::InvalidArgument.as_isize();
+    }
+
+    match clock_id {
+        0 => {
+            // CLOCK_REALTIME - wall clock from RTC
+            let dt = crate::drivers::rtc::read_datetime();
+            let unix_secs = dt.to_unix_timestamp();
+
+            unsafe {
+                let ts = timespec_ptr as *mut [i64; 2];
+                (*ts)[0] = unix_secs as i64;  // tv_sec
+                (*ts)[1] = 0;                  // tv_nsec (RTC only has second precision)
+            }
+            0
+        }
+        1 => {
+            // CLOCK_MONOTONIC - uptime in ticks converted to seconds
+            let ticks = crate::task::timer::current_ticks();
+            let seconds = ticks / 18; // ~18.2 Hz PIT
+            let remainder_ticks = ticks % 18;
+            let nsec = (remainder_ticks * 1_000_000_000) / 18;
+
+            unsafe {
+                let ts = timespec_ptr as *mut [i64; 2];
+                (*ts)[0] = seconds as i64;
+                (*ts)[1] = nsec as i64;
+            }
+            0
+        }
+        _ => SyscallError::InvalidArgument.as_isize(),
+    }
+}
+
 /// sys_chdir - change current working directory
 pub fn sys_chdir(path_ptr: usize) -> isize {
     if path_ptr == 0 {
         return SyscallError::InvalidArgument.as_isize();
     }
 
-    // Read path string from user space
-    let path = unsafe {
-        let mut len = 0;
-        let ptr = path_ptr as *const u8;
-        while len < 256 && *ptr.add(len) != 0 {
-            len += 1;
-        }
-        let slice = core::slice::from_raw_parts(ptr, len);
-        match core::str::from_utf8(slice) {
-            Ok(s) => String::from(s),
-            Err(_) => return SyscallError::InvalidArgument.as_isize(),
-        }
+    let path = unsafe { read_user_string(path_ptr) };
+    let path = match path {
+        Some(p) => p,
+        None => return SyscallError::InvalidArgument.as_isize(),
     };
 
-    // Verify the directory exists (check if it's a valid path)
-    let exists = {
-        if let Some(ref fs) = *FAT32.lock() {
-            fs.exists(&path)
-        } else {
-            // For RAMDISK, only root "/" is a valid directory
-            path == "/"
-        }
-    };
+    use crate::fs::vfs::VfsContext;
 
-    if !exists && path != "/" {
+    // Verify the directory exists
+    if path != "/" && !VfsContext::is_directory(&path) {
         return SyscallError::FileNotFound.as_isize();
     }
 
-    // Store the new cwd (per-process cwd stored in process manager)
-    // For now, we accept the syscall but the actual cwd tracking
-    // is handled by the shell's current_dir field
+    // Accept the syscall (per-process cwd tracking is handled by shell's current_dir)
     0
 }

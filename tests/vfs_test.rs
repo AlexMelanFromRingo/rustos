@@ -16,13 +16,13 @@ entry_point!(main);
 
 fn main(boot_info: &'static BootInfo) -> ! {
     use rustos::allocator;
-    use rustos::memory::{self, BootInfoFrameAllocator};
+    use rustos::memory::{self, BitmapFrameAllocator};
     use x86_64::VirtAddr;
 
     rustos::init();
     let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
     let mut mapper = unsafe { memory::init(phys_mem_offset) };
-    let mut frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_map) };
+    let mut frame_allocator = unsafe { BitmapFrameAllocator::init(&boot_info.memory_map) };
     allocator::init_heap(&mut mapper, &mut frame_allocator).expect("heap initialization failed");
 
     test_main();
@@ -124,8 +124,8 @@ fn test_ramdisk_space_tracking() {
 fn test_ramdisk_filename_too_long() {
     let mut ramdisk = RamDisk::new();
 
-    // Create a filename longer than 32 characters
-    let long_name = "a".repeat(33);
+    // Create a filename longer than 255 characters
+    let long_name = "a".repeat(256);
 
     match ramdisk.write(&long_name, b"data".to_vec()) {
         Err(VfsError::InvalidName) => {},
@@ -137,8 +137,8 @@ fn test_ramdisk_filename_too_long() {
 fn test_ramdisk_file_too_large() {
     let mut ramdisk = RamDisk::new();
 
-    // Create data larger than 4KB
-    let large_data = vec![0u8; 4097];
+    // Create data larger than 1 MiB
+    let large_data = vec![0u8; 1024 * 1024 + 1];
 
     match ramdisk.write("large.bin", large_data) {
         Err(VfsError::FileTooLarge) => {},
@@ -150,14 +150,14 @@ fn test_ramdisk_file_too_large() {
 fn test_ramdisk_too_many_files() {
     let mut ramdisk = RamDisk::new();
 
-    // Try to create 65 files (max is 64)
-    for i in 0..64 {
+    // Try to create 257 files (max is 256)
+    for i in 0..256 {
         let filename = alloc::format!("file{}.txt", i);
         ramdisk.write(&filename, b"data".to_vec()).expect("Failed to write");
     }
 
-    // 65th file should fail
-    match ramdisk.write("file64.txt", b"data".to_vec()) {
+    // 257th file should fail
+    match ramdisk.write("file256.txt", b"data".to_vec()) {
         Err(VfsError::TooManyFiles) => {},
         _ => panic!("Expected TooManyFiles error"),
     }

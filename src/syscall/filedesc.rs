@@ -121,6 +121,88 @@ impl FileDescriptorTable {
         }
         self.files[fd].as_ref().map_or(false, |f| f.is_open)
     }
+
+    /// Duplicate a file descriptor (dup). Returns new fd pointing to same file.
+    pub fn dup(&mut self, old_fd: Fd) -> Option<Fd> {
+        if !self.is_valid(old_fd) {
+            return None;
+        }
+
+        // Find the lowest available fd >= 3
+        for new_fd in 3..MAX_OPEN_FILES {
+            if self.files[new_fd].is_none() {
+                let old_file = self.files[old_fd].as_ref().unwrap();
+                self.files[new_fd] = Some(OpenFile {
+                    path: old_file.path.clone(),
+                    flags: old_file.flags,
+                    offset: old_file.offset,
+                    is_open: true,
+                });
+                return Some(new_fd);
+            }
+        }
+        None
+    }
+
+    /// Duplicate fd to a specific target fd (dup2).
+    /// If new_fd is already open, it is closed first.
+    pub fn dup2(&mut self, old_fd: Fd, new_fd: Fd) -> Option<Fd> {
+        if !self.is_valid(old_fd) || new_fd >= MAX_OPEN_FILES {
+            return None;
+        }
+
+        // If old_fd == new_fd, just return (POSIX behavior)
+        if old_fd == new_fd {
+            return Some(new_fd);
+        }
+
+        // Close new_fd if it's open (silently, as per POSIX)
+        self.files[new_fd] = None;
+
+        let old_file = self.files[old_fd].as_ref().unwrap();
+        self.files[new_fd] = Some(OpenFile {
+            path: old_file.path.clone(),
+            flags: old_file.flags,
+            offset: old_file.offset,
+            is_open: true,
+        });
+        Some(new_fd)
+    }
+
+    /// Seek in a file. Returns new offset or error.
+    ///
+    /// whence: 0=SEEK_SET, 1=SEEK_CUR, 2=SEEK_END
+    pub fn lseek(&mut self, fd: Fd, offset: isize, whence: usize, file_size: usize) -> Option<usize> {
+        let file = self.files[fd].as_mut()?;
+
+        let new_offset = match whence {
+            0 => {
+                // SEEK_SET
+                if offset < 0 { return None; }
+                offset as usize
+            }
+            1 => {
+                // SEEK_CUR
+                if offset < 0 {
+                    file.offset.checked_sub((-offset) as usize)?
+                } else {
+                    file.offset + offset as usize
+                }
+            }
+            2 => {
+                // SEEK_END
+                if offset < 0 {
+                    file_size.checked_sub((-offset) as usize)?
+                } else {
+                    file_size + offset as usize
+                }
+            }
+            _ => return None,
+        };
+
+        file.offset = new_offset;
+        Some(new_offset)
+    }
 }
 
 /// Global file descriptor table (per-process in the future)

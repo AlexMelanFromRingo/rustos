@@ -656,6 +656,28 @@ impl Fat32 {
         self.write_directory_entry_to_root(&entry)
     }
 
+    /// Create a directory entry in root directory
+    fn create_dir_entry(&mut self, dirname: &str, first_cluster: u32) -> Result<(), &'static str> {
+        let short_name = self.to_short_name(dirname)?;
+
+        let entry = DirectoryEntry {
+            name: short_name,
+            attributes: ATTR_DIRECTORY,
+            nt_reserved: 0,
+            creation_time_tenths: 0,
+            creation_time: 0,
+            creation_date: 0,
+            last_access_date: 0,
+            first_cluster_high: ((first_cluster >> 16) & 0xFFFF) as u16,
+            write_time: 0,
+            write_date: 0,
+            first_cluster_low: (first_cluster & 0xFFFF) as u16,
+            file_size: 0,
+        };
+
+        self.write_directory_entry_to_root(&entry)
+    }
+
     /// Update an existing directory entry
     fn update_directory_entry(&mut self, filename: &str, entry: &DirectoryEntry) -> Result<(), &'static str> {
         let short_name = self.to_short_name(filename)?;
@@ -1192,6 +1214,155 @@ impl FileSystem for Fat32 {
     fn total_space(&self) -> usize {
         // Total space is total_sectors × bytes_per_sector
         (self.total_sectors as usize) * (self.bytes_per_sector as usize)
+    }
+
+    fn mkdir(&mut self, path: &str) -> VfsResult<()> {
+        let path = path.trim_start_matches('/');
+        if path.is_empty() {
+            return Err(VfsError::FileExists); // Root always exists
+        }
+
+        // Check if already exists
+        if self.find_file(path).ok().flatten().is_some() {
+            return Err(VfsError::FileExists);
+        }
+
+        // Allocate one cluster for the directory
+        let cluster = self.allocate_clusters(1)
+            .map_err(|_| VfsError::NoSpace)?;
+
+        // Initialize directory cluster with . and .. entries
+        let cluster_size = (self.sectors_per_cluster as usize) * (self.bytes_per_sector as usize);
+        let mut dir_data = alloc::vec![0u8; cluster_size];
+
+        // Create "." entry
+        let dot_entry = DirectoryEntry {
+            name: *b".          ",
+            attributes: ATTR_DIRECTORY,
+            nt_reserved: 0,
+            creation_time_tenths: 0,
+            creation_time: 0,
+            creation_date: 0,
+            last_access_date: 0,
+            first_cluster_high: ((cluster >> 16) & 0xFFFF) as u16,
+            write_time: 0,
+            write_date: 0,
+            first_cluster_low: (cluster & 0xFFFF) as u16,
+            file_size: 0,
+        };
+
+        // Create ".." entry (points to parent — root for now)
+        let dotdot_entry = DirectoryEntry {
+            name: *b"..         ",
+            attributes: ATTR_DIRECTORY,
+            nt_reserved: 0,
+            creation_time_tenths: 0,
+            creation_time: 0,
+            creation_date: 0,
+            last_access_date: 0,
+            first_cluster_high: 0,
+            write_time: 0,
+            write_date: 0,
+            first_cluster_low: 0,
+            file_size: 0,
+        };
+
+        // Write . and .. entries
+        let entry_size = core::mem::size_of::<DirectoryEntry>();
+        let dot_bytes = unsafe {
+            core::slice::from_raw_parts(&dot_entry as *const DirectoryEntry as *const u8, entry_size)
+        };
+        let dotdot_bytes = unsafe {
+            core::slice::from_raw_parts(&dotdot_entry as *const DirectoryEntry as *const u8, entry_size)
+        };
+        dir_data[..entry_size].copy_from_slice(dot_bytes);
+        dir_data[entry_size..entry_size * 2].copy_from_slice(dotdot_bytes);
+
+        self.write_cluster_chain(cluster, &dir_data)
+            .map_err(|_| VfsError::IoError)?;
+
+        // Create directory entry in parent
+        self.create_dir_entry(path, cluster)
+            .map_err(|_| VfsError::IoError)?;
+
+        Ok(())
+    }
+
+    fn rmdir(&mut self, path: &str) -> VfsResult<()> {
+        let path = path.trim_start_matches('/');
+        if path.is_empty() {
+            return Err(VfsError::PermissionDenied);
+        }
+
+        match self.find_file(path).map_err(|_| VfsError::IoError)? {
+            Some(entry) => {
+                if !entry.is_directory() {
+                    return Err(VfsError::NotADirectory);
+                }
+
+                // Check if directory is empty (only . and .. entries)
+                let entries = self.read_directory(entry.first_cluster())
+                    .map_err(|_| VfsError::IoError)?;
+                let non_meta_entries = entries.iter().filter(|e| {
+                    let name = e.get_name();
+                    name != "." && name != ".."
+                }).count();
+                if non_meta_entries > 0 {
+                    return Err(VfsError::DirectoryNotEmpty);
+                }
+
+                // Free cluster chain
+                self.free_cluster_chain(entry.first_cluster())
+                    .map_err(|_| VfsError::IoError)?;
+
+                // Remove directory entry
+                self.delete_directory_entry(path)
+                    .map_err(|_| VfsError::IoError)?;
+
+                Ok(())
+            }
+            None => Err(VfsError::FileNotFound),
+        }
+    }
+
+    fn list_dir(&self, path: &str) -> VfsResult<Vec<FileInfo>> {
+        let cluster = if path == "/" || path.is_empty() {
+            self.root_cluster
+        } else {
+            let path = path.trim_start_matches('/');
+            match self.find_file(path).map_err(|_| VfsError::IoError)? {
+                Some(entry) if entry.is_directory() => entry.first_cluster(),
+                Some(_) => return Err(VfsError::NotADirectory),
+                None => return Err(VfsError::FileNotFound),
+            }
+        };
+
+        let entries = self.read_directory(cluster)
+            .map_err(|_| VfsError::IoError)?;
+
+        let mut files = Vec::new();
+        for entry in entries {
+            let name = entry.get_name();
+            if name == "." || name == ".." {
+                continue;
+            }
+            let mut info = FileInfo::new(name, entry.file_size as usize);
+            info.is_directory = entry.is_directory();
+            files.push(info);
+        }
+
+        Ok(files)
+    }
+
+    fn is_directory(&self, path: &str) -> bool {
+        if path == "/" || path.is_empty() {
+            return true;
+        }
+        let path = path.trim_start_matches('/');
+        match self.find_file(path) {
+            Ok(Some(entry)) => entry.is_directory(),
+            _ => false,
+        }
     }
 }
 

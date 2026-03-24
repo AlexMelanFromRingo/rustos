@@ -581,23 +581,38 @@ impl Shell {
         let minutes = seconds / 60;
         let hours = minutes / 60;
 
+        let dt = crate::drivers::rtc::read_datetime();
         println!(
-            "Uptime: {}h {}m {}s ({} ticks)",
+            " {:02}:{:02}:{:02} up {}h {}m {}s",
+            dt.hour, dt.minute, dt.second,
             hours,
             minutes % 60,
             seconds % 60,
-            ticks
         );
     }
 
     fn cmd_meminfo(&self) {
         use crate::allocator::{HEAP_START, HEAP_SIZE};
+        use crate::memory;
+
+        let (total_frames, allocated_frames, free_frames) = memory::memory_stats();
+        let total_phys = total_frames as u64 * 4096;
+        let allocated_phys = allocated_frames as u64 * 4096;
+        let free_phys = free_frames as u64 * 4096;
 
         println!("Memory Information:");
-        println!("  Heap start: 0x{:x}", HEAP_START);
-        println!("  Heap size:  {} KB ({} bytes)", HEAP_SIZE / 1024, HEAP_SIZE);
-        println!("  Allocator:  Fixed-size block allocator");
-        println!("  Block sizes: 8, 16, 32, 64, 128, 256, 512, 1024, 2048 bytes");
+        println!();
+        println!("  Physical Memory:");
+        println!("    Total:     {} MiB ({} frames)", total_phys / (1024 * 1024), total_frames);
+        println!("    Used:      {} MiB ({} frames)", allocated_phys / (1024 * 1024), allocated_frames);
+        println!("    Free:      {} MiB ({} frames)", free_phys / (1024 * 1024), free_frames);
+        println!("    Allocator: Bitmap frame allocator (O(1) alloc/dealloc)");
+        println!();
+        println!("  Kernel Heap:");
+        println!("    Start:     0x{:x}", HEAP_START);
+        println!("    Size:      {} MiB ({} bytes)", HEAP_SIZE / (1024 * 1024), HEAP_SIZE);
+        println!("    Allocator: Fixed-size block allocator");
+        println!("    Blocks:    8, 16, 32, 64, 128, 256, 512, 1024, 2048 bytes");
     }
 
     fn cmd_version(&self) {
@@ -633,105 +648,46 @@ impl Shell {
     }
 
     fn cmd_ls(&self) {
-        use crate::fs::fat32::FAT32;
-        use crate::fs::ramdisk::RAMDISK;
-        use crate::fs::vfs::FileSystem;
+        use crate::fs::vfs::VfsContext;
         use crate::vga_buffer::{WRITER, Color};
         use x86_64::instructions::interrupts;
 
-        // Try FAT32 first if mounted
-        let fat32 = FAT32.lock();
-        if let Some(ref fs) = *fat32 {
-            // List current directory on FAT32
-            match fs.list_directory(&self.current_dir) {
-                Ok(files) => {
-                    drop(fat32);
+        match VfsContext::list_dir(&self.current_dir) {
+            Ok(files) => {
+                if files.is_empty() {
+                    println!("Empty directory");
+                    return;
+                }
 
-                    if files.is_empty() {
-                        println!("Empty directory");
-                        return;
-                    }
-
-                    println!("{} ({} items):", self.current_dir, files.len());
-                    for file in files {
-                        // Print filename in cyan
+                for file in &files {
+                    if file.is_directory {
+                        // Directories in blue
+                        interrupts::without_interrupts(|| {
+                            WRITER.lock().set_color(Color::LightBlue, Color::Black);
+                        });
+                        print!("  {}/", file.name);
+                    } else {
+                        // Files in cyan
                         interrupts::without_interrupts(|| {
                             WRITER.lock().set_color(Color::LightCyan, Color::Black);
                         });
                         print!("  {}", file.name);
-
-                        // Print " - " in default color
-                        interrupts::without_interrupts(|| {
-                            WRITER.lock().reset_color();
-                        });
-                        print!(" - ");
-
-                        if file.size == 0 && !file.name.contains('.') {
-                            // Likely a directory
-                            interrupts::without_interrupts(|| {
-                                WRITER.lock().set_color(Color::Blue, Color::Black);
-                            });
-                            print!("<DIR>");
-                        } else {
-                            // Print size in light green
-                            interrupts::without_interrupts(|| {
-                                WRITER.lock().set_color(Color::LightGreen, Color::Black);
-                            });
-                            print!("{} bytes", file.size);
-                        }
-
-                        // Reset color
-                        interrupts::without_interrupts(|| {
-                            WRITER.lock().reset_color();
-                        });
-                        println!();
                     }
-                    return;
-                }
-                Err(e) => {
-                    drop(fat32);
-                    println!("ls: {}: {}", self.current_dir, e);
-                    println!("Falling back to RAM disk...");
+
+                    // Reset color and show size
+                    interrupts::without_interrupts(|| {
+                        WRITER.lock().reset_color();
+                    });
+
+                    if !file.is_directory {
+                        print!("  {} bytes", file.size);
+                    }
+                    println!();
                 }
             }
-        } else {
-            drop(fat32);
-        }
-
-        // Fallback to RAM disk
-        let ramdisk = RAMDISK.lock();
-        let files = ramdisk.list();
-
-        if files.is_empty() {
-            println!("No files");
-            return;
-        }
-
-        println!("RAM disk ({} files, {} bytes used):", files.len(), ramdisk.used_space());
-        for file in files {
-            // Print filename in cyan
-            interrupts::without_interrupts(|| {
-                WRITER.lock().set_color(Color::LightCyan, Color::Black);
-            });
-            print!("  {}", file.name);
-
-            // Print " - " in default color
-            interrupts::without_interrupts(|| {
-                WRITER.lock().reset_color();
-            });
-            print!(" - ");
-
-            // Print size in light green
-            interrupts::without_interrupts(|| {
-                WRITER.lock().set_color(Color::LightGreen, Color::Black);
-            });
-            print!("{}", file.size);
-
-            // Reset color and print " bytes"
-            interrupts::without_interrupts(|| {
-                WRITER.lock().reset_color();
-            });
-            println!(" bytes");
+            Err(_) => {
+                println!("ls: cannot list '{}'", self.current_dir);
+            }
         }
     }
 
@@ -1064,22 +1020,13 @@ impl Shell {
         let pm = PROCESS_MANAGER.lock();
         let processes = pm.all_processes();
 
-        println!("PID    STATE       STACK_SIZE");
-        println!("---    -----       ----------");
+        println!("  PID  STATE       STACK");
+        println!("  ---  -----       -----");
 
         for process in processes {
-            let state_str = match process.state {
-                crate::process::ProcessState::Ready => "Ready     ",
-                crate::process::ProcessState::Running => "Running   ",
-                crate::process::ProcessState::Blocked => "Blocked   ",
-                crate::process::ProcessState::Waiting => "Waiting   ",
-                crate::process::ProcessState::Zombie => "Zombie    ",
-                crate::process::ProcessState::Terminated => "Terminated",
-            };
-
-            println!("{:<6} {:<11} {} bytes",
+            println!("{:5}  {:<11} {} bytes",
                 process.pid,
-                state_str,
+                process.state.as_str(),
                 process.stack.len()
             );
         }
@@ -1339,8 +1286,13 @@ impl Shell {
         }
     }
 
-    /// Execute a pipeline of commands (simplified pipe implementation)
+    /// Execute a pipeline of commands
+    ///
+    /// Captures the text output of the first command as a string,
+    /// then pipes it as input to the second command (grep, wc, head, tail).
     fn execute_pipeline(&self, command_line: &str) {
+        use crate::fs::vfs::VfsContext;
+
         let commands: Vec<&str> = command_line.split('|').map(|s| s.trim()).collect();
 
         if commands.len() < 2 {
@@ -1348,129 +1300,139 @@ impl Shell {
             return;
         }
 
-        // For now, support specific pipe combinations
-        // cat file | grep pattern
-        // cat file | wc
-        let first_cmd = commands[0].split_whitespace().collect::<Vec<&str>>();
-        let second_cmd = commands[1].split_whitespace().collect::<Vec<&str>>();
+        let first_cmd: Vec<&str> = commands[0].split_whitespace().collect();
+        let second_cmd: Vec<&str> = commands[1].split_whitespace().collect();
 
         if first_cmd.is_empty() || second_cmd.is_empty() {
             println!("Error: Invalid pipe syntax");
             return;
         }
 
-        // Handle: cat file | grep pattern
-        if first_cmd[0] == "cat" && second_cmd[0] == "grep" {
-            if first_cmd.len() < 2 {
-                println!("Usage: cat filename | grep pattern");
+        // Step 1: Capture output from first command
+        let output = match first_cmd[0] {
+            "cat" => {
+                if first_cmd.len() < 2 {
+                    println!("cat: missing filename");
+                    return;
+                }
+                match VfsContext::read(first_cmd[1]) {
+                    Ok(data) => match core::str::from_utf8(&data) {
+                        Ok(s) => String::from(s),
+                        Err(_) => { println!("Error: binary file"); return; }
+                    },
+                    Err(_) => { println!("cat: {}: not found", first_cmd[1]); return; }
+                }
+            }
+            "ls" => {
+                match VfsContext::list_dir(&self.current_dir) {
+                    Ok(files) => {
+                        let mut out = String::new();
+                        for f in &files {
+                            if f.is_directory {
+                                out.push_str(&f.name);
+                                out.push('/');
+                            } else {
+                                out.push_str(&f.name);
+                            }
+                            out.push('\n');
+                        }
+                        out
+                    }
+                    Err(_) => { println!("ls: error"); return; }
+                }
+            }
+            "echo" => {
+                let mut out = first_cmd[1..].join(" ");
+                out.push('\n');
+                out
+            }
+            "ps" => {
+                use crate::process::PROCESS_MANAGER;
+                use core::fmt::Write;
+                let pm = PROCESS_MANAGER.lock();
+                let mut out = String::from("  PID STATE\n");
+                for proc in pm.processes() {
+                    let _ = writeln!(out, "{:5} {}", proc.pid, proc.state.as_str());
+                }
+                out
+            }
+            _ => {
+                println!("Pipe: '{}' cannot produce output", first_cmd[0]);
                 return;
             }
+        };
 
-            let filename = first_cmd[1];
+        // Step 2: Feed output through second command
+        match second_cmd[0] {
+            "grep" => {
+                if second_cmd.len() < 2 {
+                    println!("grep: missing pattern");
+                    return;
+                }
+                let pattern = second_cmd[1];
+                let case_insensitive = second_cmd.contains(&"-i");
 
-            // Get file content
-            use crate::fs::ramdisk::RAMDISK;
-            use crate::fs::vfs::FileSystem;
-
-            let ramdisk = RAMDISK.lock();
-            match ramdisk.read(filename) {
-                Ok(content) => {
-                    drop(ramdisk);
-                    match core::str::from_utf8(&content) {
-                        Ok(text) => {
-                            // Now grep through the text
-                            if second_cmd.len() < 2 {
-                                println!("Usage: cat filename | grep pattern");
-                                return;
-                            }
-
-                            let pattern = second_cmd[1];
-                            let mut match_count = 0;
-
-                            for line in text.lines() {
-                                if line.contains(pattern) {
-                                    match_count += 1;
-                                    println!("{}", line);
-                                }
-                            }
-
-                            if match_count == 0 {
-                                println!("No matches found");
-                            }
-                        }
-                        Err(_) => println!("Error: File '{}' is binary", filename),
+                for line in output.lines() {
+                    let matches = if case_insensitive {
+                        line.to_ascii_lowercase().contains(&pattern.to_ascii_lowercase())
+                    } else {
+                        line.contains(pattern)
+                    };
+                    if matches {
+                        println!("{}", line);
                     }
                 }
-                Err(_) => println!("Error: File '{}' not found", filename),
             }
-        }
-        // Handle: cat file | wc
-        else if first_cmd[0] == "cat" && second_cmd[0] == "wc" {
-            if first_cmd.len() < 2 {
-                println!("Usage: cat filename | wc");
-                return;
-            }
+            "wc" => {
+                let lines = output.lines().count();
+                let words = output.split_whitespace().count();
+                let bytes = output.len();
 
-            let filename = first_cmd[1];
-
-            use crate::fs::ramdisk::RAMDISK;
-            use crate::fs::vfs::FileSystem;
-
-            let ramdisk = RAMDISK.lock();
-            match ramdisk.read(filename) {
-                Ok(content) => {
-                    drop(ramdisk);
-                    match core::str::from_utf8(&content) {
-                        Ok(text) => {
-                            let lines = text.lines().count();
-                            let words = text.split_whitespace().count();
-                            let bytes = content.len();
-                            println!("{:8} {:8} {:8}", lines, words, bytes);
-                        }
-                        Err(_) => println!("Error: File '{}' is binary", filename),
-                    }
-                }
-                Err(_) => println!("Error: File '{}' not found", filename),
-            }
-        }
-        // Handle: ls | grep pattern
-        else if first_cmd[0] == "ls" && second_cmd[0] == "grep" {
-            if second_cmd.len() < 2 {
-                println!("Usage: ls | grep pattern");
-                return;
-            }
-
-            let pattern = second_cmd[1];
-
-            use crate::fs::ramdisk::RAMDISK;
-            use crate::fs::vfs::FileSystem;
-
-            let ramdisk = RAMDISK.lock();
-            let files = ramdisk.list();
-            drop(ramdisk);
-
-            let mut match_count = 0;
-
-            for file in &files {
-                if file.name.contains(pattern) {
-                    match_count += 1;
-                    println!("{:32} {:8} bytes", file.name, file.size);
+                if second_cmd.contains(&"-l") {
+                    println!("{}", lines);
+                } else if second_cmd.contains(&"-w") {
+                    println!("{}", words);
+                } else if second_cmd.contains(&"-c") {
+                    println!("{}", bytes);
+                } else {
+                    println!("{:8} {:8} {:8}", lines, words, bytes);
                 }
             }
-
-            if match_count == 0 {
-                println!("No matches found");
-            } else {
-                println!();
-                println!("Total: {} match(es)", match_count);
+            "head" => {
+                let n: usize = if second_cmd.len() >= 3 && second_cmd[1] == "-n" {
+                    second_cmd[2].parse().unwrap_or(10)
+                } else {
+                    10
+                };
+                for line in output.lines().take(n) {
+                    println!("{}", line);
+                }
             }
-        }
-        else {
-            println!("Error: Pipe combination '{}' | '{}' not supported", first_cmd[0], second_cmd[0]);
-            println!("Supported pipes:");
-            println!("  cat <file> | grep <pattern>");
-            println!("  cat <file> | wc");
-            println!("  ls | grep <pattern>");
+            "tail" => {
+                let n: usize = if second_cmd.len() >= 3 && second_cmd[1] == "-n" {
+                    second_cmd[2].parse().unwrap_or(10)
+                } else {
+                    10
+                };
+                let lines: Vec<&str> = output.lines().collect();
+                let start = lines.len().saturating_sub(n);
+                for line in &lines[start..] {
+                    println!("{}", line);
+                }
+            }
+            "sort" => {
+                let mut lines: Vec<&str> = output.lines().collect();
+                lines.sort();
+                if second_cmd.contains(&"-r") {
+                    lines.reverse();
+                }
+                for line in lines {
+                    println!("{}", line);
+                }
+            }
+            _ => {
+                println!("Pipe: '{}' cannot receive input", second_cmd[0]);
+            }
         }
     }
 
@@ -1630,22 +1592,16 @@ impl Shell {
     }
 
     fn cmd_date(&self) {
-        use crate::task::timer::current_ticks;
-
-        let ticks = current_ticks();
-        let seconds = ticks / 18;
-        let minutes = seconds / 60;
-        let hours = minutes / 60;
-        let days = hours / 24;
-
-        // Simple uptime-based date (not real date)
-        println!("System uptime: {} days, {}:{:02}:{:02}",
-            days,
-            hours % 24,
-            minutes % 60,
-            seconds % 60
+        let dt = crate::drivers::rtc::read_datetime();
+        println!("{} {} {:2} {:02}:{:02}:{:02} UTC {}",
+            dt.day_name(),
+            dt.month_name(),
+            dt.day,
+            dt.hour,
+            dt.minute,
+            dt.second,
+            dt.year,
         );
-        println!("(Note: RustOS does not have RTC support yet)");
     }
 
     fn cmd_hostname(&mut self, args: &[&str]) {
@@ -1863,7 +1819,7 @@ impl Shell {
     }
 
     fn cmd_cd(&mut self, args: &[&str]) {
-        use crate::fs::fat32::FAT32;
+        use crate::fs::vfs::VfsContext;
 
         if args.is_empty() {
             // cd without arguments goes to root
@@ -1880,18 +1836,13 @@ impl Shell {
         }
 
         if target == "." {
-            // Stay in current directory
             return;
         }
 
         if target == ".." {
-            // Go to parent directory
             if self.current_dir == "/" {
-                // Already at root
                 return;
             }
-
-            // Remove last component from path
             if let Some(pos) = self.current_dir.rfind('/') {
                 if pos == 0 {
                     self.current_dir = String::from("/");
@@ -1904,40 +1855,25 @@ impl Shell {
 
         // Construct new path
         let new_path = if target.starts_with('/') {
-            // Absolute path
             target.to_string()
+        } else if self.current_dir == "/" {
+            format!("/{}", target)
         } else {
-            // Relative path
-            if self.current_dir == "/" {
-                format!("/{}", target)
-            } else {
-                format!("{}/{}", self.current_dir, target)
-            }
+            format!("{}/{}", self.current_dir, target)
         };
 
-        // Check if directory exists on FAT32
-        let fat32 = FAT32.lock();
-        if let Some(ref fs) = *fat32 {
-            // Verify it's a directory
-            match fs.list_directory(&new_path) {
-                Ok(_) => {
-                    drop(fat32);
-                    self.current_dir = new_path;
-                    println!("Changed directory to: {}", self.current_dir);
-                }
-                Err(e) => {
-                    drop(fat32);
-                    println!("cd: {}: {}", target, e);
-                }
-            }
+        // Check if directory exists
+        if VfsContext::is_directory(&new_path) {
+            self.current_dir = new_path;
+        } else if VfsContext::exists(&new_path) {
+            println!("cd: {}: Not a directory", target);
         } else {
-            drop(fat32);
-            println!("cd: FAT32 filesystem not mounted");
+            println!("cd: {}: No such file or directory", target);
         }
     }
 
     fn cmd_mkdir(&mut self, args: &[&str]) {
-        use crate::fs::fat32::FAT32;
+        use crate::fs::vfs::VfsContext;
 
         if args.is_empty() {
             println!("Usage: mkdir <directory>");
@@ -1949,27 +1885,20 @@ impl Shell {
         // Construct full path
         let path = if dirname.starts_with('/') {
             dirname.to_string()
+        } else if self.current_dir == "/" {
+            format!("/{}", dirname)
         } else {
-            if self.current_dir == "/" {
-                format!("/{}", dirname)
-            } else {
-                format!("{}/{}", self.current_dir, dirname)
-            }
+            format!("{}/{}", self.current_dir, dirname)
         };
 
-        let mut fat32 = FAT32.lock();
-        if let Some(ref mut fs) = *fat32 {
-            match fs.create_directory(&path) {
-                Ok(_) => println!("Directory '{}' created", dirname),
-                Err(e) => println!("mkdir: {}: {}", dirname, e),
-            }
-        } else {
-            println!("mkdir: FAT32 filesystem not mounted");
+        match VfsContext::mkdir(&path) {
+            Ok(_) => println!("Directory '{}' created", dirname),
+            Err(e) => println!("mkdir: {}: {:?}", dirname, e),
         }
     }
 
     fn cmd_rmdir(&mut self, args: &[&str]) {
-        use crate::fs::fat32::FAT32;
+        use crate::fs::vfs::VfsContext;
 
         if args.is_empty() {
             println!("Usage: rmdir <directory>");
@@ -1981,22 +1910,15 @@ impl Shell {
         // Construct full path
         let path = if dirname.starts_with('/') {
             dirname.to_string()
+        } else if self.current_dir == "/" {
+            format!("/{}", dirname)
         } else {
-            if self.current_dir == "/" {
-                format!("/{}", dirname)
-            } else {
-                format!("{}/{}", self.current_dir, dirname)
-            }
+            format!("{}/{}", self.current_dir, dirname)
         };
 
-        let mut fat32 = FAT32.lock();
-        if let Some(ref mut fs) = *fat32 {
-            match fs.remove_directory(&path) {
-                Ok(_) => println!("Directory '{}' removed", dirname),
-                Err(e) => println!("rmdir: {}: {}", dirname, e),
-            }
-        } else {
-            println!("rmdir: FAT32 filesystem not mounted");
+        match VfsContext::rmdir(&path) {
+            Ok(_) => println!("Directory '{}' removed", dirname),
+            Err(e) => println!("rmdir: {}: {:?}", dirname, e),
         }
     }
 
