@@ -29,7 +29,7 @@ unsafe fn copy_to_user_space(code_ptr: *const u8, code_size: usize) -> Option<Vi
 
     // Copy code to user space
     let user_ptr = user_addr.as_u64() as *mut u8;
-    core::ptr::copy_nonoverlapping(code_ptr, user_ptr, code_size);
+    unsafe { core::ptr::copy_nonoverlapping(code_ptr, user_ptr, code_size) };
 
     Some(user_addr)
 }
@@ -48,7 +48,7 @@ unsafe fn copy_to_user_space(code_ptr: *const u8, code_size: usize) -> Option<Vi
 /// - The user function must be position-independent
 pub unsafe fn jump_to_usermode(kernel_fn: usize, fn_size: usize) -> ! {
     // Copy function to user space
-    let user_fn_addr = copy_to_user_space(kernel_fn as *const u8, fn_size)
+    let user_fn_addr = unsafe { copy_to_user_space(kernel_fn as *const u8, fn_size) }
         .expect("Failed to allocate user space for code");
 
     // Allocate user stack in identity-mapped region
@@ -62,13 +62,15 @@ pub unsafe fn jump_to_usermode(kernel_fn: usize, fn_size: usize) -> ! {
     let user_ds = gdt::user_data_selector().0 as u64;
 
     // Set user data segments
-    core::arch::asm!(
-        "mov ds, {0:x}",
-        "mov es, {0:x}",
-        "mov fs, {0:x}",
-        "mov gs, {0:x}",
-        in(reg) user_ds,
-    );
+    unsafe {
+        core::arch::asm!(
+            "mov ds, {0:x}",
+            "mov es, {0:x}",
+            "mov fs, {0:x}",
+            "mov gs, {0:x}",
+            in(reg) user_ds,
+        );
+    }
 
     // IRETQ stack frame (from bottom to top):
     // 1. RIP (user function address)
@@ -79,31 +81,33 @@ pub unsafe fn jump_to_usermode(kernel_fn: usize, fn_size: usize) -> ! {
 
     let rflags: u64 = 0x202; // IF=1 (interrupts enabled), Reserved bit=1
 
-    core::arch::asm!(
-        // Push IRETQ frame
-        "push {ss}",           // SS
-        "push {rsp}",          // RSP
-        "push {rflags}",       // RFLAGS
-        "push {cs}",           // CS
-        "push {rip}",          // RIP
+    unsafe {
+        core::arch::asm!(
+            // Push IRETQ frame
+            "push {ss}",           // SS
+            "push {rsp}",          // RSP
+            "push {rflags}",       // RFLAGS
+            "push {cs}",           // CS
+            "push {rip}",          // RIP
 
-        // Execute IRETQ to jump to user mode
-        "iretq",
+            // Execute IRETQ to jump to user mode
+            "iretq",
 
-        ss = in(reg) user_ds,
-        rsp = in(reg) stack_top,
-        rflags = in(reg) rflags,
-        cs = in(reg) user_cs,
-        rip = in(reg) user_fn_addr.as_u64(),
-        options(noreturn)
-    );
+            ss = in(reg) user_ds,
+            rsp = in(reg) stack_top,
+            rflags = in(reg) rflags,
+            cs = in(reg) user_cs,
+            rip = in(reg) user_fn_addr.as_u64(),
+            options(noreturn)
+        );
+    }
 }
 
 /// Example user mode function that makes syscalls
 ///
 /// This runs in Ring 3 and can only access kernel via syscalls.
 /// Must be position-independent (no absolute addresses).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn user_mode_demo() {
     // Static strings are in .rodata, which is in kernel space
     // We need to use stack-allocated arrays instead
@@ -209,35 +213,39 @@ pub unsafe fn jump_to_ring3(entry_point: u64, stack_addr: u64, stack_size: u64) 
     let user_ds = gdt::user_data_selector().0 as u64;
 
     // Set user data segments
-    core::arch::asm!(
-        "mov ds, {0:x}",
-        "mov es, {0:x}",
-        "mov fs, {0:x}",
-        "mov gs, {0:x}",
-        in(reg) user_ds,
-    );
+    unsafe {
+        core::arch::asm!(
+            "mov ds, {0:x}",
+            "mov es, {0:x}",
+            "mov fs, {0:x}",
+            "mov gs, {0:x}",
+            in(reg) user_ds,
+        );
+    }
 
     // IRETQ stack frame
     let rflags: u64 = 0x202; // IF=1, Reserved bit=1
 
-    core::arch::asm!(
-        // Push IRETQ frame
-        "push {ss}",           // SS
-        "push {rsp}",          // RSP
-        "push {rflags}",       // RFLAGS
-        "push {cs}",           // CS
-        "push {rip}",          // RIP
+    unsafe {
+        core::arch::asm!(
+            // Push IRETQ frame
+            "push {ss}",           // SS
+            "push {rsp}",          // RSP
+            "push {rflags}",       // RFLAGS
+            "push {cs}",           // CS
+            "push {rip}",          // RIP
 
-        // Execute IRETQ to jump to user mode
-        "iretq",
+            // Execute IRETQ to jump to user mode
+            "iretq",
 
-        ss = in(reg) user_ds,
-        rsp = in(reg) stack_top,
-        rflags = in(reg) rflags,
-        cs = in(reg) user_cs,
-        rip = in(reg) entry_point,
-        options(noreturn)
-    );
+            ss = in(reg) user_ds,
+            rsp = in(reg) stack_top,
+            rflags = in(reg) rflags,
+            cs = in(reg) user_cs,
+            rip = in(reg) entry_point,
+            options(noreturn)
+        );
+    }
 }
 
 /// Restore kernel context and return from user mode
@@ -256,23 +264,25 @@ pub unsafe fn restore_kernel_context_and_return() -> ! {
 
     HAS_SAVED_CONTEXT.store(false, Ordering::SeqCst);
 
-    core::arch::asm!(
-        // Restore stack pointer
-        "lea rax, [rip + {saved_rsp}]",
-        "mov rsp, [rax]",
-        // Pop all callee-saved registers in reverse order
-        "pop r15",
-        "pop r14",
-        "pop r13",
-        "pop r12",
-        "pop rbx",
-        "pop rbp",
-        // Return to caller of exec_with_return_proper
-        // (return address is now on top of stack)
-        "ret",
-        saved_rsp = sym SAVED_RSP,
-        options(noreturn)
-    );
+    unsafe {
+        core::arch::asm!(
+            // Restore stack pointer
+            "lea rax, [rip + {saved_rsp}]",
+            "mov rsp, [rax]",
+            // Pop all callee-saved registers in reverse order
+            "pop r15",
+            "pop r14",
+            "pop r13",
+            "pop r12",
+            "pop rbx",
+            "pop rbp",
+            // Return to caller of exec_with_return_proper
+            // (return address is now on top of stack)
+            "ret",
+            saved_rsp = sym SAVED_RSP,
+            options(noreturn)
+        );
+    }
 }
 
 /// Execute user code with proper context saving

@@ -43,7 +43,7 @@ impl FixedSizeBlockAllocator {
     /// This function is unsafe because the caller must guarantee that the given
     /// heap bounds are valid and that the heap is unused.
     pub unsafe fn init(&mut self, heap_start: usize, heap_size: usize) {
-        self.fallback_allocator.lock().init(heap_start, heap_size);
+        unsafe { self.fallback_allocator.lock().init(heap_start, heap_size) };
     }
 
     /// Allocates using the fallback allocator.
@@ -97,12 +97,12 @@ unsafe impl GlobalAlloc for Locked<FixedSizeBlockAllocator> {
                 assert!(mem::size_of::<ListNode>() <= BLOCK_SIZES[index]);
                 assert!(mem::align_of::<ListNode>() <= BLOCK_SIZES[index]);
                 let new_node_ptr = ptr as *mut ListNode;
-                new_node_ptr.write(new_node);
-                allocator.list_heads[index] = Some(&mut *new_node_ptr);
+                unsafe { new_node_ptr.write(new_node) };
+                allocator.list_heads[index] = Some(unsafe { &mut *new_node_ptr });
             }
             None => {
                 let ptr = core::ptr::NonNull::new(ptr).unwrap();
-                allocator.fallback_allocator.lock().deallocate(ptr, layout);
+                unsafe { allocator.fallback_allocator.lock().deallocate(ptr, layout) };
             }
         }
     }

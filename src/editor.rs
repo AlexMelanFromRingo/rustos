@@ -2,8 +2,7 @@
 use alloc::vec::Vec;
 use alloc::string::{String, ToString};
 use crate::{print, println};
-use crate::fs::ramdisk::RAMDISK;
-use crate::fs::vfs::{FileSystem, VfsError};
+use crate::fs::vfs::{VfsContext, VfsError};
 use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
 use spin::Mutex;
 
@@ -21,9 +20,8 @@ impl Editor {
     pub fn new(filename: &str) -> Self {
         let mut lines = Vec::new();
 
-        // Try to load existing file
-        let ramdisk = RAMDISK.lock();
-        if let Ok(content) = ramdisk.read(filename) {
+        // Try to load existing file via VFS (FAT32 or RAMDISK)
+        if let Ok(content) = VfsContext::read(filename) {
             if let Ok(text) = core::str::from_utf8(&content) {
                 for line in text.lines() {
                     lines.push(line.to_string());
@@ -39,8 +37,6 @@ impl Editor {
             // New file
             lines.push(String::new());
         }
-
-        drop(ramdisk);
 
         Editor {
             lines,
@@ -264,9 +260,7 @@ impl Editor {
         }
 
         let bytes = content.as_bytes().to_vec();
-        let mut ramdisk = RAMDISK.lock();
-        ramdisk.write(&self.filename, bytes)?;
-        drop(ramdisk);
+        VfsContext::write(&self.filename, bytes)?;
 
         self.modified = false;
         println!("Saved {} lines to '{}'", self.lines.len(), self.filename);

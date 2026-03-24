@@ -1,0 +1,122 @@
+name: Release
+
+on:
+  push:
+    paths:
+      - 'Cargo.toml'
+    branches:
+      - '**'
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version_changed: ${{ steps.version.outputs.changed }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check if version changed in Cargo.toml
+        id: version
+        run: |
+          # Get current version
+          CURRENT_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "Current version: $CURRENT_VERSION"
+          echo "version=$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
+
+          # Get previous version
+          PREV_VERSION=$(git show HEAD~1:Cargo.toml 2>/dev/null | grep '^version' | head -1 | sed 's/.*"\(.*\)".*/\1/' || echo "")
+          echo "Previous version: $PREV_VERSION"
+
+          if [ "$CURRENT_VERSION" != "$PREV_VERSION" ] && [ -n "$PREV_VERSION" ]; then
+            echo "Version changed from $PREV_VERSION to $CURRENT_VERSION"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Version unchanged"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build-and-release:
+    needs: check-version
+    if: needs.check-version.outputs.version_changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src, llvm-tools-preview
+
+      - name: Install bootimage
+        run: cargo install bootimage
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xorriso mtools grub-pc-bin grub-common
+
+      - name: Build kernel binary
+        run: cargo bootimage --release -Zjson-target-spec
+
+      - name: Verify binary exists
+        run: |
+          ls -la target/x86_64-rustos/release/bootimage-rustos.bin
+          echo "Binary size: $(du -h target/x86_64-rustos/release/bootimage-rustos.bin | cut -f1)"
+
+      - name: Create ISO image
+        run: |
+          mkdir -p iso/boot/grub
+          cp target/x86_64-rustos/release/bootimage-rustos.bin iso/boot/rustos.bin
+
+          cat > iso/boot/grub/grub.cfg << 'GRUBEOF'
+          set timeout=3
+          set default=0
+
+          menuentry "RustOS v${{ needs.check-version.outputs.version }}" {
+              multiboot2 /boot/rustos.bin
+              boot
+          }
+          GRUBEOF
+
+          grub-mkrescue -o rustos-${{ needs.check-version.outputs.version }}.iso iso/ 2>/dev/null || echo "ISO creation via GRUB failed, creating raw bootable image instead"
+
+          # Fallback: create a raw bootable disk image if grub-mkrescue fails
+          if [ ! -f "rustos-${{ needs.check-version.outputs.version }}.iso" ]; then
+            cp target/x86_64-rustos/release/bootimage-rustos.bin rustos-${{ needs.check-version.outputs.version }}.img
+          fi
+
+      - name: Create git tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${{ needs.check-version.outputs.version }}" -m "Release v${{ needs.check-version.outputs.version }}"
+          git push origin "v${{ needs.check-version.outputs.version }}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.check-version.outputs.version }}
+          name: RustOS v${{ needs.check-version.outputs.version }}
+          body: |
+            ## RustOS v${{ needs.check-version.outputs.version }}
+
+            ### Downloads
+            - **`.bin`** — Raw bootable disk image (use with QEMU: `qemu-system-x86_64 -drive format=raw,file=rustos.bin`)
+            - **`.iso`** — ISO image (if available, bootable via GRUB)
+
+            ### Run with QEMU
+            ```bash
+            qemu-system-x86_64 -drive format=raw,file=bootimage-rustos.bin -serial stdio
+            ```
+          files: |
+            target/x86_64-rustos/release/bootimage-rustos.bin
+            rustos-${{ needs.check-version.outputs.version }}.iso
+            rustos-${{ needs.check-version.outputs.version }}.img
+          fail_on_unmatched_files: false
+          draft: false
+          prerelease: false

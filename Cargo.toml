@@ -2,7 +2,7 @@
 name = "rustos"
 version = "0.1.0"
 authors = ["RustOS Team"]
-edition = "2021"
+edition = "2024"
 
 [profile.dev]
 panic = "abort"

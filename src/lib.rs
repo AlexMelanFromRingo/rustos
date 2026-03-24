@@ -27,7 +27,6 @@ pub mod drivers;
 pub mod syscall;
 pub mod userspace;
 pub mod elf;
-// pub mod embedded;  // Disabled - ELF files should be loaded from disk, not embedded
 
 pub fn init() {
     gdt::init();

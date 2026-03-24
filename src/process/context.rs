@@ -56,7 +56,17 @@ impl Context {
 
 impl Default for Context {
     fn default() -> Self {
-        Self::default()
+        Context {
+            r15: 0,
+            r14: 0,
+            r13: 0,
+            r12: 0,
+            rbx: 0,
+            rbp: 0,
+            rip: 0,
+            rsp: 0,
+            rflags: 0x200,
+        }
     }
 }
 

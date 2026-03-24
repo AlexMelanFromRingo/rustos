@@ -26,6 +26,31 @@ pub enum Color {
     White = 15,
 }
 
+impl Color {
+    /// Convert a u8 to Color safely, defaulting to White for invalid values
+    fn from_u8(value: u8) -> Self {
+        match value {
+            0 => Color::Black,
+            1 => Color::Blue,
+            2 => Color::Green,
+            3 => Color::Cyan,
+            4 => Color::Red,
+            5 => Color::Magenta,
+            6 => Color::Brown,
+            7 => Color::LightGray,
+            8 => Color::DarkGray,
+            9 => Color::LightBlue,
+            10 => Color::LightGreen,
+            11 => Color::LightCyan,
+            12 => Color::LightRed,
+            13 => Color::Pink,
+            14 => Color::Yellow,
+            15 => Color::White,
+            _ => Color::White,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
 struct ColorCode(u8);
@@ -196,8 +221,8 @@ impl Writer {
         let foreground = code & 0x0F;
         let background = (code >> 4) & 0x0F;
         (
-            unsafe { core::mem::transmute(foreground) },
-            unsafe { core::mem::transmute(background) },
+            Color::from_u8(foreground),
+            Color::from_u8(background),
         )
     }
 

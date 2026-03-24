@@ -195,14 +195,15 @@ impl Shell {
         }
 
         let mut pos = self.cursor_pos;
+        let bytes = self.buffer.as_bytes();
 
-        // Skip trailing whitespace
-        while pos > 0 && self.buffer.chars().nth(pos - 1).map_or(false, |c| c.is_whitespace()) {
+        // Skip trailing whitespace (working on bytes since shell input is ASCII)
+        while pos > 0 && bytes[pos - 1].is_ascii_whitespace() {
             pos -= 1;
         }
 
         // Delete word characters
-        while pos > 0 && self.buffer.chars().nth(pos - 1).map_or(false, |c| !c.is_whitespace()) {
+        while pos > 0 && !bytes[pos - 1].is_ascii_whitespace() {
             pos -= 1;
         }
 
