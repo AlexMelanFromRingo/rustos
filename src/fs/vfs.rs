@@ -108,6 +108,12 @@ pub struct VfsContext;
 impl VfsContext {
     /// Read a file from the active filesystem
     pub fn read(path: &str) -> VfsResult<Vec<u8>> {
+        // Check /proc virtual filesystem first
+        if super::procfs::is_proc_path(path) {
+            return super::procfs::read_proc(path)
+                .ok_or(VfsError::FileNotFound);
+        }
+
         // Try FAT32 first if mounted
         let fat32 = FAT32.lock();
         if let Some(ref fs) = *fat32 {
@@ -174,6 +180,11 @@ impl VfsContext {
 
     /// Check if a file exists in either filesystem
     pub fn exists(path: &str) -> bool {
+        // Check /proc
+        if super::procfs::is_proc_path(path) {
+            return super::procfs::exists(path);
+        }
+
         // Check FAT32 first
         let fat32 = FAT32.lock();
         if let Some(ref fs) = *fat32 {
@@ -250,6 +261,11 @@ impl VfsContext {
 
     /// Check if path is a directory
     pub fn is_directory(path: &str) -> bool {
+        // Check /proc
+        if super::procfs::is_proc_path(path) {
+            return super::procfs::is_directory(path);
+        }
+
         let fat32 = FAT32.lock();
         if let Some(ref fs) = *fat32 {
             let result = fs.is_directory(path);
