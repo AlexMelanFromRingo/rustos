@@ -47,6 +47,8 @@ pub struct Process {
     pub user_stack_size: Option<u64>,    // User space stack size
     pub entry_point: Option<u64>,        // Entry point for exec
     pub nice: i8,                        // Nice value: -20 (highest priority) to 19 (lowest)
+    pub pending_signals: u64,            // Bitmask of pending signals (bit N = signal N)
+    pub signal_blocked: u64,             // Bitmask of blocked signals
 }
 
 impl Process {
@@ -72,6 +74,8 @@ impl Process {
             user_stack_size: None,
             entry_point: Some(entry_point as u64),
             nice: 0,
+            pending_signals: 0,
+            signal_blocked: 0,
         }
     }
 
@@ -89,6 +93,8 @@ impl Process {
             user_stack_size: Some(stack_size),
             entry_point: Some(entry_point),
             nice: 0,
+            pending_signals: 0,
+            signal_blocked: 0,
         }
     }
 
@@ -105,6 +111,80 @@ impl Process {
             user_stack_size: self.user_stack_size,
             entry_point: self.entry_point,
             nice: self.nice,
+            pending_signals: 0,      // Child starts with no pending signals
+            signal_blocked: self.signal_blocked,  // Inherit signal mask
+        }
+    }
+}
+
+/// Standard POSIX signal numbers
+pub mod signal {
+    pub const SIGHUP: u32 = 1;
+    pub const SIGINT: u32 = 2;
+    pub const SIGQUIT: u32 = 3;
+    pub const SIGILL: u32 = 4;
+    pub const SIGTRAP: u32 = 5;
+    pub const SIGABRT: u32 = 6;
+    pub const SIGBUS: u32 = 7;
+    pub const SIGFPE: u32 = 8;
+    pub const SIGKILL: u32 = 9;
+    pub const SIGUSR1: u32 = 10;
+    pub const SIGSEGV: u32 = 11;
+    pub const SIGUSR2: u32 = 12;
+    pub const SIGPIPE: u32 = 13;
+    pub const SIGALRM: u32 = 14;
+    pub const SIGTERM: u32 = 15;
+    pub const SIGCHLD: u32 = 17;
+    pub const SIGCONT: u32 = 18;
+    pub const SIGSTOP: u32 = 19;
+    pub const SIGTSTP: u32 = 20;
+
+    /// Check if a signal number is valid (1-31)
+    pub fn is_valid(sig: u32) -> bool {
+        sig >= 1 && sig <= 31
+    }
+
+    /// Get signal name
+    pub fn name(sig: u32) -> &'static str {
+        match sig {
+            1 => "SIGHUP",
+            2 => "SIGINT",
+            3 => "SIGQUIT",
+            4 => "SIGILL",
+            5 => "SIGTRAP",
+            6 => "SIGABRT",
+            7 => "SIGBUS",
+            8 => "SIGFPE",
+            9 => "SIGKILL",
+            10 => "SIGUSR1",
+            11 => "SIGSEGV",
+            12 => "SIGUSR2",
+            13 => "SIGPIPE",
+            14 => "SIGALRM",
+            15 => "SIGTERM",
+            17 => "SIGCHLD",
+            18 => "SIGCONT",
+            19 => "SIGSTOP",
+            20 => "SIGTSTP",
+            _ => "UNKNOWN",
+        }
+    }
+
+    /// Default action for a signal
+    pub enum DefaultAction {
+        Terminate,
+        Ignore,
+        Stop,
+        Continue,
+    }
+
+    /// Get default action for a signal
+    pub fn default_action(sig: u32) -> DefaultAction {
+        match sig {
+            SIGCHLD => DefaultAction::Ignore,
+            SIGCONT => DefaultAction::Continue,
+            SIGSTOP | SIGTSTP => DefaultAction::Stop,
+            _ => DefaultAction::Terminate,
         }
     }
 }
@@ -193,6 +273,106 @@ impl ProcessManager {
     /// Get a process by PID
     pub fn get_process(&self, pid: Pid) -> Option<&Process> {
         self.processes.iter().find(|p| p.pid == pid)
+    }
+
+    /// Send a signal to a process
+    pub fn send_signal(&mut self, pid: Pid, sig: u32) -> Result<(), &'static str> {
+        if !signal::is_valid(sig) {
+            return Err("invalid signal number");
+        }
+
+        let process = self.get_process_mut(pid)
+            .ok_or("process not found")?;
+
+        // Can't signal terminated/zombie processes (except to check existence with sig 0)
+        if sig == 0 {
+            return Ok(()); // Just checking if process exists
+        }
+
+        if process.state == ProcessState::Terminated {
+            return Err("process already terminated");
+        }
+
+        // SIGKILL and SIGSTOP cannot be blocked
+        if sig == signal::SIGKILL || sig == signal::SIGSTOP {
+            // Deliver immediately
+            match signal::default_action(sig) {
+                signal::DefaultAction::Terminate => {
+                    process.state = ProcessState::Terminated;
+                    process.exit_code = Some(128 + sig as i32);
+                    if self.current_pid == Some(pid) {
+                        self.current_pid = None;
+                    }
+                }
+                signal::DefaultAction::Stop => {
+                    process.state = ProcessState::Blocked;
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
+        // Set pending signal bit
+        process.pending_signals |= 1u64 << sig;
+        Ok(())
+    }
+
+    /// Deliver pending signals for a process. Returns true if process was terminated.
+    pub fn deliver_pending_signals(&mut self, pid: Pid) -> bool {
+        let (pending, blocked) = {
+            let process = match self.get_process(pid) {
+                Some(p) => p,
+                None => return false,
+            };
+            (process.pending_signals, process.signal_blocked)
+        };
+
+        // Find deliverable signals (pending & ~blocked)
+        let deliverable = pending & !blocked;
+        if deliverable == 0 {
+            return false;
+        }
+
+        let mut terminated = false;
+
+        for sig in 1..=31u32 {
+            if deliverable & (1u64 << sig) != 0 {
+                // Clear the pending bit
+                if let Some(process) = self.get_process_mut(pid) {
+                    process.pending_signals &= !(1u64 << sig);
+                }
+
+                // Apply default action
+                match signal::default_action(sig) {
+                    signal::DefaultAction::Terminate => {
+                        if let Some(process) = self.get_process_mut(pid) {
+                            process.state = ProcessState::Terminated;
+                            process.exit_code = Some(128 + sig as i32);
+                        }
+                        if self.current_pid == Some(pid) {
+                            self.current_pid = None;
+                        }
+                        terminated = true;
+                        break; // Process is dead, stop delivering
+                    }
+                    signal::DefaultAction::Stop => {
+                        if let Some(process) = self.get_process_mut(pid) {
+                            process.state = ProcessState::Blocked;
+                        }
+                    }
+                    signal::DefaultAction::Continue => {
+                        if let Some(process) = self.get_process_mut(pid) {
+                            if process.state == ProcessState::Blocked {
+                                process.state = ProcessState::Ready;
+                            }
+                        }
+                    }
+                    signal::DefaultAction::Ignore => {}
+                }
+            }
+        }
+
+        terminated
     }
 
     /// Fork current process - create a copy

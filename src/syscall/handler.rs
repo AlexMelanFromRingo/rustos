@@ -879,3 +879,50 @@ pub fn sys_chdir(path_ptr: usize) -> isize {
     // Accept the syscall (per-process cwd tracking is handled by shell's current_dir)
     0
 }
+
+/// sys_brk - adjust program break (heap end)
+///
+/// In Linux, brk(0) returns the current break. brk(addr) sets the break.
+/// We track a simple per-kernel program break for user programs.
+pub fn sys_brk(addr: usize) -> isize {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    // Simple program break tracking
+    // User programs start at 0x400000, heap starts after program text
+    static PROGRAM_BREAK: AtomicUsize = AtomicUsize::new(0x800000); // Default heap start at 8 MiB
+
+    if addr == 0 {
+        // Return current break
+        return PROGRAM_BREAK.load(Ordering::Relaxed) as isize;
+    }
+
+    // Don't allow break below initial value or above reasonable limit
+    const MIN_BREAK: usize = 0x800000;    // 8 MiB
+    const MAX_BREAK: usize = 0x10000000;  // 256 MiB
+
+    if addr < MIN_BREAK || addr > MAX_BREAK {
+        return SyscallError::OutOfMemory.as_isize();
+    }
+
+    PROGRAM_BREAK.store(addr, Ordering::Relaxed);
+    addr as isize
+}
+
+/// sys_kill - send signal to a process
+pub fn sys_kill(pid: usize, sig: usize) -> isize {
+    let mut pm = PROCESS_MANAGER.lock();
+    match pm.send_signal(pid, sig as u32) {
+        Ok(_) => 0,
+        Err(_) => SyscallError::InvalidArgument.as_isize(),
+    }
+}
+
+/// sys_getuid - get user ID (always 0 = root)
+pub fn sys_getuid() -> isize {
+    0
+}
+
+/// sys_getgid - get group ID (always 0 = root)
+pub fn sys_getgid() -> isize {
+    0
+}

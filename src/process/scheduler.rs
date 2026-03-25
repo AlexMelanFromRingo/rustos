@@ -96,11 +96,25 @@ impl Scheduler {
         // Wake any sleeping processes whose timer has expired
         self.wake_sleepers();
 
+        // Deliver pending signals to current process
+        self.deliver_signals();
+
         self.quantum_counter += 1;
         if self.quantum_counter >= self.quantum {
             self.quantum_counter = 0;
             // Time quantum expired, trigger reschedule
             self.preempt();
+        }
+    }
+
+    /// Deliver pending signals to the current running process
+    fn deliver_signals(&mut self) {
+        let mut pm = PROCESS_MANAGER.lock();
+        if let Some(pid) = pm.current_pid {
+            let terminated = pm.deliver_pending_signals(pid);
+            if terminated {
+                self.dequeue(pid);
+            }
         }
     }
 

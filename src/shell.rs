@@ -248,15 +248,16 @@ impl Shell {
         // Check if we're completing a command or a filename argument
         let parts: Vec<String> = partial.split_whitespace().map(|s| s.to_string()).collect();
 
-        if parts.len() == 1 {
+        if parts.len() == 1 && !partial.contains(' ') {
             // Autocomplete command name
             let commands = [
                 "alias", "cat", "cd", "clear", "cp", "date", "df", "du", "echo",
-                "edit", "find", "grep", "head", "hello", "help", "history",
-                "hostname", "kill", "less", "ls", "meminfo", "mkdir", "more",
-                "mount", "mv", "ps", "pwd", "reboot", "rm", "rmdir", "shutdown",
-                "sleep", "tail", "time", "touch", "tree", "umount", "unalias",
-                "uptime", "version", "wc", "which", "write",
+                "edit", "env", "exec", "export", "find", "grep", "head", "hello",
+                "help", "history", "hostname", "kill", "less", "ls", "meminfo",
+                "mkdir", "more", "mount", "mv", "printenv", "ps", "pwd", "reboot",
+                "renice", "rm", "rmdir", "shutdown", "sleep", "stat", "tail",
+                "time", "touch", "tree", "umount", "unalias", "unset", "uptime",
+                "usermode", "version", "wc", "which", "write",
             ];
 
             let matches: Vec<&str> = commands
@@ -266,12 +267,20 @@ impl Shell {
                 .collect();
 
             match matches.len() {
-                0 => None,
-                1 => Some(matches[0].to_string()),
+                0 => {
+                    // Try filename completion even for first word
+                    self.autocomplete_filename(parts)
+                }
+                1 => Some(format!("{} ", matches[0])), // Add trailing space
                 _ => {
+                    // Find longest common prefix
+                    let prefix = longest_common_prefix(&matches);
+                    if prefix.len() > partial.len() {
+                        return Some(prefix);
+                    }
                     println!();
                     for m in &matches {
-                        print!("{} ", m);
+                        print!("{}  ", m);
                     }
                     println!();
                     self.print_prompt();
@@ -292,29 +301,80 @@ impl Shell {
         // Get the partial filename (last part)
         let partial_filename = parts.last().map(|s| s.as_str()).unwrap_or("");
 
-        // Get list of files from active filesystem
-        let files = VfsContext::list();
+        // Determine the directory to list and the prefix to match
+        let (dir_path, name_prefix) = if partial_filename.contains('/') {
+            let last_slash = partial_filename.rfind('/').unwrap();
+            let dir = if last_slash == 0 { "/" } else { &partial_filename[..last_slash] };
+            (dir.to_string(), &partial_filename[last_slash + 1..])
+        } else {
+            (self.current_dir.clone(), partial_filename)
+        };
+
+        // Get directory listing
+        let entries = match VfsContext::list_dir(&dir_path) {
+            Ok(e) => e,
+            Err(_) => return None,
+        };
 
         // Find matching filenames
-        let matches: Vec<String> = files
+        let matches: Vec<String> = entries
             .iter()
-            .filter(|f| f.name.starts_with(partial_filename))
-            .map(|f| f.name.clone())
+            .filter(|f| {
+                let basename = f.name.rsplit('/').next().unwrap_or(&f.name);
+                basename.starts_with(name_prefix)
+            })
+            .map(|f| {
+                let basename = f.name.rsplit('/').next().unwrap_or(&f.name);
+                if f.is_directory {
+                    format!("{}/", basename)
+                } else {
+                    basename.to_string()
+                }
+            })
             .collect();
 
         match matches.len() {
             0 => None,
             1 => {
                 // Single match - rebuild command with completed filename
+                let completed = if partial_filename.contains('/') {
+                    let last_slash = partial_filename.rfind('/').unwrap();
+                    format!("{}/{}", &partial_filename[..last_slash], matches[0])
+                } else {
+                    matches[0].clone()
+                };
                 let mut new_parts = parts[..parts.len()-1].to_vec();
-                new_parts.push(matches[0].clone());
-                Some(new_parts.join(" "))
+                new_parts.push(completed);
+                let result = new_parts.join(" ");
+                // Add trailing space if not a directory (directory gets /)
+                if !matches[0].ends_with('/') {
+                    Some(format!("{} ", result))
+                } else {
+                    Some(result)
+                }
             }
             _ => {
-                // Multiple matches - show all options
+                // Find longest common prefix among matches
+                let match_refs: Vec<&str> = matches.iter().map(|s| s.as_str()).collect();
+                let prefix = longest_common_prefix(&match_refs);
+
+                if prefix.len() > name_prefix.len() {
+                    // Complete to common prefix
+                    let completed = if partial_filename.contains('/') {
+                        let last_slash = partial_filename.rfind('/').unwrap();
+                        format!("{}/{}", &partial_filename[..last_slash], prefix)
+                    } else {
+                        prefix
+                    };
+                    let mut new_parts = parts[..parts.len()-1].to_vec();
+                    new_parts.push(completed);
+                    return Some(new_parts.join(" "));
+                }
+
+                // Show all options
                 println!();
                 for m in &matches {
-                    print!("{} ", m);
+                    print!("{}  ", m);
                 }
                 println!();
                 self.print_prompt();
@@ -1100,18 +1160,65 @@ impl Shell {
     }
 
     fn cmd_kill(&self, args: &[&str]) {
-        use crate::process::scheduler;
+        use crate::process::{PROCESS_MANAGER, signal};
 
         if args.is_empty() {
-            println!("Usage: kill <pid>");
+            println!("Usage: kill [-signal] <pid>");
+            println!("  -l          List signal names");
+            println!("  -9 <pid>    Send SIGKILL");
+            println!("  -15 <pid>   Send SIGTERM (default)");
             return;
         }
 
-        let pid_str = args[0];
+        // Handle -l flag
+        if args[0] == "-l" {
+            for sig in 1..=20u32 {
+                let name = signal::name(sig);
+                if name != "UNKNOWN" {
+                    println!("{:2}) {}", sig, name);
+                }
+            }
+            return;
+        }
+
+        let (sig, pid_str) = if args[0].starts_with('-') {
+            // Parse signal number from -N
+            let sig_str = &args[0][1..];
+            let sig = match sig_str.parse::<u32>() {
+                Ok(s) => s,
+                Err(_) => {
+                    // Try signal name (e.g., -TERM, -KILL)
+                    match sig_str.to_uppercase().as_str() {
+                        "HUP" => signal::SIGHUP,
+                        "INT" => signal::SIGINT,
+                        "QUIT" => signal::SIGQUIT,
+                        "KILL" => signal::SIGKILL,
+                        "TERM" => signal::SIGTERM,
+                        "STOP" => signal::SIGSTOP,
+                        "CONT" => signal::SIGCONT,
+                        _ => {
+                            println!("Error: Unknown signal '{}'", sig_str);
+                            return;
+                        }
+                    }
+                }
+            };
+            if args.len() < 2 {
+                println!("Usage: kill [-signal] <pid>");
+                return;
+            }
+            (sig, args[1])
+        } else {
+            (signal::SIGTERM, args[0])
+        };
+
         match pid_str.parse::<usize>() {
             Ok(pid) => {
-                scheduler::terminate(pid);
-                println!("Process {} terminated", pid);
+                let mut pm = PROCESS_MANAGER.lock();
+                match pm.send_signal(pid, sig) {
+                    Ok(_) => println!("Sent {} to process {}", signal::name(sig), pid),
+                    Err(e) => println!("Error: {}", e),
+                }
             }
             Err(_) => {
                 println!("Error: Invalid PID '{}'", pid_str);
@@ -2177,4 +2284,30 @@ impl Shell {
         // We return here after user program exits!
         println!("\nProgram exited, returned to shell.");
     }
+}
+
+/// Find the longest common prefix among a list of strings
+fn longest_common_prefix(strings: &[&str]) -> String {
+    if strings.is_empty() {
+        return String::new();
+    }
+    if strings.len() == 1 {
+        return strings[0].to_string();
+    }
+
+    let first = strings[0].as_bytes();
+    let mut prefix_len = first.len();
+
+    for s in &strings[1..] {
+        let bytes = s.as_bytes();
+        prefix_len = prefix_len.min(bytes.len());
+        for i in 0..prefix_len {
+            if first[i] != bytes[i] {
+                prefix_len = i;
+                break;
+            }
+        }
+    }
+
+    strings[0][..prefix_len].to_string()
 }
