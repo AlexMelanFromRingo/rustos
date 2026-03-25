@@ -252,7 +252,7 @@ impl Shell {
             // Autocomplete command name
             let commands = [
                 "alias", "cat", "cd", "clear", "cp", "date", "df", "du", "echo",
-                "edit", "env", "exec", "export", "find", "grep", "head", "hello",
+                "dmesg", "edit", "env", "exec", "export", "find", "grep", "head", "hello",
                 "help", "history", "hostname", "kill", "less", "ls", "meminfo",
                 "mkdir", "more", "mount", "mv", "printenv", "ps", "pwd", "reboot",
                 "renice", "rm", "rmdir", "shutdown", "sleep", "stat", "tail",
@@ -491,6 +491,7 @@ impl Shell {
             "df" => self.cmd_df(),
             "pwd" => self.cmd_pwd(),
             "date" => self.cmd_date(),
+            "dmesg" => self.cmd_dmesg(args),
             "hostname" => self.cmd_hostname(args),
             "du" => self.cmd_du(args),
             "find" => self.cmd_find(args),
@@ -551,6 +552,7 @@ impl Shell {
         println!("  hello     - Print a greeting");
         println!("  uptime    - Show system uptime");
         println!("  date      - Show current date and time (from RTC)");
+        println!("  dmesg     - Display kernel log messages (usage: dmesg [-n N])");
         println!("  time      - Show current timer ticks");
         println!("  meminfo   - Display memory information");
         println!("  version   - Show RustOS version");
@@ -1797,6 +1799,27 @@ impl Shell {
             dt.second,
             dt.year,
         );
+    }
+
+    fn cmd_dmesg(&self, args: &[&str]) {
+        let entries = crate::klog::read_all();
+
+        if entries.is_empty() {
+            println!("(no kernel messages)");
+            return;
+        }
+
+        // Support -n N to show last N entries
+        let show_count = if args.len() >= 2 && args[0] == "-n" {
+            args[1].parse::<usize>().unwrap_or(entries.len())
+        } else {
+            entries.len()
+        };
+
+        let start = entries.len().saturating_sub(show_count);
+        for entry in &entries[start..] {
+            println!("{}", entry);
+        }
     }
 
     fn cmd_hostname(&mut self, args: &[&str]) {

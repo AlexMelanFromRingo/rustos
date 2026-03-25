@@ -27,6 +27,7 @@ pub mod drivers;
 pub mod syscall;
 pub mod userspace;
 pub mod elf;
+pub mod klog;
 
 pub fn init() {
     gdt::init();

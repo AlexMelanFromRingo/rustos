@@ -58,20 +58,33 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     rustos::allocator::init_heap(&mut mapper, &mut frame_allocator)
         .expect("heap initialization failed");
 
+    // Now that heap is available, start kernel logging
+    klog_info!("RustOS kernel starting");
+    klog_info!("Physical memory: {} MiB usable", total_mb);
+    klog_info!("GDT, IDT, PIC initialized");
+    klog_info!("Heap allocator initialized (16 MiB)");
+    klog_info!("Bitmap frame allocator active");
+
     // Initialize user space identity mapping
     memory::userspace::init_user_space_mapping(&mut mapper, &mut frame_allocator)
         .expect("user space mapping failed");
     println!("User space memory mapped ({}MB at 0x{:08X})",
         memory::userspace::USER_SPACE_SIZE / (1024 * 1024),
         memory::userspace::USER_SPACE_START);
+    klog_info!("User space mapped: {}MB at 0x{:08X}",
+        memory::userspace::USER_SPACE_SIZE / (1024 * 1024),
+        memory::userspace::USER_SPACE_START);
 
     // Initialize ATA driver AFTER heap is ready
     rustos::drivers::ata::init();
+    klog_info!("ATA driver initialized");
 
     // Initialize syscall support (after heap and GDT)
     rustos::init_syscall();
+    klog_info!("SYSCALL/SYSRET support initialized");
 
     println!("Kernel initialized successfully!");
+    klog_info!("Kernel initialization complete");
     println!();
 
     #[cfg(test)]
@@ -131,10 +144,12 @@ async fn keyboard_task() {
         Ok(()) => {
             println!("FAT32 filesystem mounted successfully!");
             println!("Files and command history will persist across reboots.");
+            klog_info!("FAT32 filesystem mounted");
         }
         Err(e) => {
             println!("Could not mount FAT32: {}", e);
             println!("Using RAM disk (data will be lost on reboot).");
+            klog_warn!("FAT32 mount failed: {}, using RAMDISK", e);
         }
     }
     println!();
