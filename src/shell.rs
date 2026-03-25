@@ -252,12 +252,13 @@ impl Shell {
             // Autocomplete command name
             let commands = [
                 "alias", "cat", "cd", "clear", "cp", "date", "df", "du", "echo",
-                "dmesg", "edit", "env", "exec", "export", "find", "grep", "head", "hello",
-                "help", "history", "hostname", "kill", "less", "ls", "meminfo",
-                "mkdir", "more", "mount", "mv", "printenv", "ps", "pwd", "reboot",
-                "renice", "rm", "rmdir", "shutdown", "sleep", "stat", "tail",
-                "time", "touch", "tree", "umount", "unalias", "unset", "uptime",
-                "usermode", "version", "wc", "which", "write",
+                "dmesg", "edit", "env", "exec", "export", "find", "free",
+                "grep", "head", "hello", "help", "history", "hostname", "id",
+                "kill", "less", "ls", "meminfo", "mkdir", "more", "mount", "mv",
+                "printenv", "ps", "pwd", "reboot", "renice", "rm", "rmdir",
+                "shutdown", "sleep", "stat", "tail", "time", "top", "touch",
+                "tree", "umount", "uname", "unalias", "unset", "uptime",
+                "usermode", "version", "wc", "which", "whoami", "write",
             ];
 
             let matches: Vec<&str> = commands
@@ -493,6 +494,11 @@ impl Shell {
             "date" => self.cmd_date(),
             "dmesg" => self.cmd_dmesg(args),
             "hostname" => self.cmd_hostname(args),
+            "whoami" => println!("root"),
+            "id" => println!("uid=0(root) gid=0(root) groups=0(root)"),
+            "uname" => self.cmd_uname(args),
+            "free" => self.cmd_free(args),
+            "top" => self.cmd_top(),
             "du" => self.cmd_du(args),
             "find" => self.cmd_find(args),
             "tree" => self.cmd_tree(),
@@ -561,6 +567,11 @@ impl Shell {
         println!("  shutdown  - Shutdown the system");
         println!("  reboot    - Reboot the system");
         println!("  sleep     - Sleep for N seconds (usage: sleep <seconds>)");
+        println!("  whoami    - Print current user name");
+        println!("  id        - Print user and group IDs");
+        println!("  uname     - Print system information (usage: uname [-a])");
+        println!("  free      - Display memory usage (usage: free [-h])");
+        println!("  top       - Show process status summary");
         println!("  usermode  - Test user mode (Ring 3) and system calls");
         println!("  exec      - Execute ELF binary (usage: exec <filename>)");
         println!();
@@ -1799,6 +1810,115 @@ impl Shell {
             dt.second,
             dt.year,
         );
+    }
+
+    fn cmd_uname(&self, args: &[&str]) {
+        if args.is_empty() {
+            println!("RustOS");
+            return;
+        }
+
+        let show_all = args.contains(&"-a");
+        let mut parts = Vec::new();
+
+        if show_all || args.contains(&"-s") { parts.push("RustOS"); }
+        if show_all || args.contains(&"-n") { parts.push(&self.hostname); }
+        if show_all || args.contains(&"-r") { parts.push(env!("CARGO_PKG_VERSION")); }
+        if show_all || args.contains(&"-v") { parts.push("#1 SMP PREEMPT"); }
+        if show_all || args.contains(&"-m") { parts.push("x86_64"); }
+        if show_all || args.contains(&"-p") { parts.push("x86_64"); }
+        if show_all || args.contains(&"-o") { parts.push("RustOS/Rust"); }
+
+        if parts.is_empty() {
+            println!("RustOS");
+        } else {
+            println!("{}", parts.join(" "));
+        }
+    }
+
+    fn cmd_free(&self, args: &[&str]) {
+        let stats = crate::memory::memory_stats();
+        let total_kb = stats.0 as u64 * 4;  // frames * 4KiB
+        let used_kb = stats.1 as u64 * 4;
+        let free_kb = total_kb - used_kb;
+
+        let human = args.contains(&"-h");
+
+        if human {
+            let format_size = |kb: u64| -> String {
+                if kb >= 1024 * 1024 {
+                    format!("{:.1}Gi", kb as f64 / (1024.0 * 1024.0))
+                } else if kb >= 1024 {
+                    format!("{:.1}Mi", kb as f64 / 1024.0)
+                } else {
+                    format!("{}Ki", kb)
+                }
+            };
+            println!("{:>14}{:>12}{:>12}{:>12}{:>12}{:>12}",
+                "total", "used", "free", "shared", "buff/cache", "available");
+            println!("Mem: {:>10}{:>12}{:>12}{:>12}{:>12}{:>12}",
+                format_size(total_kb), format_size(used_kb), format_size(free_kb),
+                "0B", "0B", format_size(free_kb));
+            println!("Swap:{:>10}{:>12}{:>12}",
+                "0B", "0B", "0B");
+        } else {
+            println!("{:>14}{:>12}{:>12}{:>12}{:>12}{:>12}",
+                "total", "used", "free", "shared", "buff/cache", "available");
+            println!("Mem: {:>10}{:>12}{:>12}{:>12}{:>12}{:>12}",
+                total_kb, used_kb, free_kb, 0, 0, free_kb);
+            println!("Swap:{:>10}{:>12}{:>12}",
+                0, 0, 0);
+        }
+    }
+
+    fn cmd_top(&self) {
+        use crate::process::PROCESS_MANAGER;
+
+        let pm = PROCESS_MANAGER.lock();
+        let processes = pm.all_processes();
+        let ticks = crate::task::timer::current_ticks();
+        let uptime_secs = ticks / 18;
+
+        // Header
+        let dt = crate::drivers::rtc::read_datetime();
+        let mut buf = [0u8; 32];
+        let len = dt.format(&mut buf);
+        let time_str = core::str::from_utf8(&buf[..len]).unwrap_or("??:??:??");
+        println!("top - {} up {}:{:02}:{:02}, {} tasks",
+            time_str,
+            uptime_secs / 3600,
+            (uptime_secs % 3600) / 60,
+            uptime_secs % 60,
+            processes.len(),
+        );
+
+        // Memory
+        let stats = crate::memory::memory_stats();
+        let total_kb = stats.0 * 4;
+        let used_kb = stats.1 * 4;
+        println!("MiB Mem:  {:6} total, {:6} free, {:6} used",
+            total_kb / 1024, (total_kb - used_kb) / 1024, used_kb / 1024);
+        println!();
+
+        // Process table
+        println!("{:>5} {:>3} {:>8} {:>8} {:<11} {}",
+            "PID", "NI", "VIRT", "RES", "STATE", "COMMAND");
+
+        for process in processes {
+            if process.state == crate::process::ProcessState::Terminated {
+                continue;
+            }
+            let res_kb = process.stack.len() / 1024;
+            let virt_kb = process.user_stack_size.unwrap_or(0) / 1024;
+            println!("{:>5} {:>3} {:>7}K {:>7}K {:<11} process_{}",
+                process.pid,
+                process.nice,
+                virt_kb,
+                res_kb,
+                process.state.as_str(),
+                process.pid,
+            );
+        }
     }
 
     fn cmd_dmesg(&self, args: &[&str]) {
