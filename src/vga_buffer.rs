@@ -269,6 +269,8 @@ pub fn _print(args: fmt::Arguments) {
 
     interrupts::without_interrupts(|| {
         WRITER.lock().write_fmt(args).unwrap();
+        // Mirror output to serial port for testing/debugging
+        crate::serial::_print(args);
     });
 }
 

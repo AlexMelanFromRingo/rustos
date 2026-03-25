@@ -8,9 +8,9 @@ Reference architecture: Linux/Unix-like.
 ## Phase 1: Kernel Hardening (Current → Stable Foundation)
 
 ### 1.1 Memory Management Improvements
-- [ ] Increase heap from 100 KiB to 16+ MiB (dynamically based on available RAM)
-- [ ] Implement proper `FrameAllocator` with bitmap instead of bump allocator (current O(n²) per allocation)
-- [ ] Add frame deallocation support (current allocator never frees frames)
+- [x] Increase heap from 100 KiB to 16 MiB ✅
+- [x] Implement proper `FrameAllocator` with bitmap (O(1) alloc/dealloc) ✅
+- [x] Add frame deallocation support ✅
 - [ ] Implement slab allocator for kernel objects (replace fixed-size block allocator)
 - [ ] Add kernel virtual memory allocator (vmalloc equivalent)
 - [ ] Guard pages for stack overflow detection
@@ -22,15 +22,15 @@ Reference architecture: Linux/Unix-like.
 - [ ] Per-process working directory (current: shell-level only)
 - [ ] Proper `fork()` with COW (Copy-On-Write) pages
 - [ ] `waitpid()` with blocking (current: non-blocking poll)
-- [ ] Signal delivery (SIGTERM, SIGKILL, SIGINT, SIGCHLD, etc.)
+- [x] Signal delivery (SIGTERM, SIGKILL, SIGINT, SIGCHLD, etc.) ✅
 - [ ] Process groups and sessions
-- [ ] Environment variables per process
+- [x] Environment variables (shell-level: export/unset/$VAR expansion) ✅
 - [ ] Resource limits (rlimits)
 
 ### 1.3 Scheduler Improvements
-- [ ] Priority-based scheduling (nice values)
+- [x] Priority-based scheduling (nice values -20..19, dynamic quantum) ✅
 - [ ] CFS (Completely Fair Scheduler) inspired design
-- [ ] Proper process blocking on I/O (sleep queues)
+- [x] Proper process blocking on I/O (sleep queues) ✅
 - [ ] Multi-core support (per-CPU run queues, SMP init)
 
 ### 1.4 Interrupt & Exception Handling
@@ -46,24 +46,25 @@ Reference architecture: Linux/Unix-like.
 
 ### 2.1 Core Syscalls
 - [ ] `mmap` / `munmap` — memory-mapped files and anonymous mappings
-- [ ] `brk` / `sbrk` — heap management for user programs
-- [ ] `lseek` — file seek
-- [ ] `stat` / `fstat` / `lstat` — file metadata
+- [x] `brk` — heap management for user programs ✅
+- [x] `lseek` — file seek ✅
+- [x] `stat` / `fstat` — file metadata (Linux-compatible 144-byte struct) ✅
 - [ ] `ioctl` — device control
-- [ ] `dup` / `dup2` — file descriptor duplication
-- [ ] `pipe` — inter-process communication
+- [x] `dup` / `dup2` — file descriptor duplication ✅
+- [x] `pipe` — inter-process communication (4 KiB kernel buffer) ✅
 - [ ] `select` / `poll` / `epoll` — I/O multiplexing
 - [ ] `socket` / `bind` / `listen` / `accept` / `connect` — networking
 - [ ] `sendto` / `recvfrom` — network I/O
-- [ ] `clock_gettime` / `gettimeofday` — time
-- [ ] `getuid` / `getgid` / `setuid` / `setgid` — user management
-- [ ] `mkdir` / `rmdir` / `unlink` / `rename` / `link` / `symlink`
+- [x] `clock_gettime` — time (REALTIME from RTC, MONOTONIC from PIT) ✅
+- [x] `getuid` / `getgid` / `geteuid` / `getegid` — user management ✅
+- [x] `mkdir` / `rmdir` / `unlink` / `rename` ✅
+- [ ] `link` / `symlink`
 
 ### 2.2 Signal System
-- [ ] `kill` — send signal
-- [ ] `signal` / `sigaction` — signal handlers
-- [ ] `sigprocmask` — signal blocking
-- [ ] Signal delivery during syscall return
+- [x] `kill` — send signal (syscall #62) ✅
+- [ ] `signal` / `sigaction` — custom signal handlers
+- [x] `sigprocmask` — signal blocking (per-process blocked mask) ✅
+- [x] Signal delivery during scheduler tick ✅
 
 ### 2.3 Thread Support
 - [ ] `clone` syscall with CLONE_THREAD
@@ -98,7 +99,7 @@ Reference architecture: Linux/Unix-like.
 - [ ] Journal support for crash recovery
 
 ### 3.4 Special Filesystems
-- [ ] `/proc` — process information filesystem
+- [x] `/proc` — process information filesystem (uptime, meminfo, version, cpuinfo, kmsg, loadavg, stat, per-pid) ✅
 - [ ] `/sys` — sysfs for device information
 - [ ] `/dev` — device nodes (character and block devices)
 - [ ] `/tmp` — tmpfs (RAM-backed filesystem)
@@ -138,8 +139,8 @@ Reference architecture: Linux/Unix-like.
 ### 4.4 Timer & Clock
 - [ ] HPET (High Precision Event Timer)
 - [ ] TSC (Time Stamp Counter) calibration
-- [ ] RTC (Real-Time Clock) — read actual date/time
-- [ ] `clock_gettime` with nanosecond precision
+- [x] RTC (Real-Time Clock) — CMOS MC146818, BCD/binary auto-detect ✅
+- [ ] `clock_gettime` with nanosecond precision (currently second-level from RTC)
 
 ---
 
@@ -154,7 +155,7 @@ Reference architecture: Linux/Unix-like.
 ### 5.2 Shell Improvements
 - [ ] Job control (background processes with &, fg, bg)
 - [ ] Shell scripting (if/then/else, for, while loops)
-- [ ] Environment variable expansion ($VAR)
+- [x] Environment variable expansion ($VAR) ✅
 - [ ] Command substitution ($(cmd))
 - [ ] Here documents (<<EOF)
 - [ ] Glob expansion (*.txt)
@@ -165,9 +166,9 @@ Reference architecture: Linux/Unix-like.
 - [ ] `login` / `getty` — user authentication
 - [ ] `/etc/passwd`, `/etc/shadow` — user database
 - [ ] `su` / `sudo` — privilege escalation
-- [ ] `top` / `htop` — process monitor
-- [ ] `mount` / `umount` — filesystem mounting
-- [ ] `dmesg` — kernel log
+- [x] `top` — process monitor (one-shot) ✅
+- [x] `mount` / `umount` — filesystem mounting (FAT32) ✅
+- [x] `dmesg` — kernel log (ring buffer, 512 entries, log levels) ✅
 
 ### 5.4 Package Manager
 - [ ] Simple package format (.tar.gz with manifest)
