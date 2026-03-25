@@ -1,4 +1,5 @@
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
+use x86_64::VirtAddr;
 use lazy_static::lazy_static;
 use crate::println;
 use pic8259::ChainedPics;
@@ -15,9 +16,8 @@ pub static PICS: spin::Mutex<ChainedPics> =
 pub enum InterruptIndex {
     Timer = PIC_1_OFFSET,
     Keyboard,
-    // Add more IRQs as needed
-    PrimaryATA = PIC_2_OFFSET + 6,   // IRQ14 (0x2E = 46)
-    SecondaryATA = PIC_2_OFFSET + 7, // IRQ15 (0x2F = 47)
+    PrimaryATA = PIC_2_OFFSET + 6,
+    SecondaryATA = PIC_2_OFFSET + 7,
 }
 
 impl InterruptIndex {
@@ -40,8 +40,13 @@ lazy_static! {
         }
         idt.general_protection_fault.set_handler_fn(general_protection_fault_handler);
         idt.page_fault.set_handler_fn(page_fault_handler);
-        idt[InterruptIndex::Timer.as_usize()]
-            .set_handler_fn(timer_interrupt_handler);
+
+        // Timer: use naked handler for preemptive context switching
+        unsafe {
+            idt[InterruptIndex::Timer.as_usize()]
+                .set_handler_addr(VirtAddr::new(timer_isr_naked as *const () as u64));
+        }
+
         idt[InterruptIndex::Keyboard.as_usize()]
             .set_handler_fn(keyboard_interrupt_handler);
         idt[InterruptIndex::PrimaryATA.as_usize()]
@@ -59,10 +64,163 @@ pub fn init_idt() {
 pub fn init_pics() {
     unsafe {
         PICS.lock().initialize();
-        // Unmask all interrupts (set mask to 0)
         PICS.lock().write_masks(0, 0);
     }
 }
+
+// =============================================================================
+// Naked timer ISR — saves full TrapFrame for preemptive multitasking
+// =============================================================================
+//
+// When the CPU takes interrupt 32 (timer), it pushes:
+//   SS, RSP, RFLAGS, CS, RIP  (the "interrupt frame")
+//
+// Our naked handler then pushes all 15 GPRs to form a complete TrapFrame.
+// We pass RSP (pointing to the TrapFrame on the kernel stack) to the Rust
+// handler, which decides whether to context switch.
+
+#[unsafe(naked)]
+extern "C" fn timer_isr_naked() {
+    core::arch::naked_asm!(
+        // CPU has already pushed: SS, RSP, RFLAGS, CS, RIP
+        // Now push all GPRs to complete the TrapFrame (order must match TrapFrame struct)
+        "push rax",
+        "push rbx",
+        "push rcx",
+        "push rdx",
+        "push rsi",
+        "push rdi",
+        "push rbp",
+        "push r8",
+        "push r9",
+        "push r10",
+        "push r11",
+        "push r12",
+        "push r13",
+        "push r14",
+        "push r15",
+
+        // Pass pointer to TrapFrame (RSP) as first argument (RDI)
+        "mov rdi, rsp",
+
+        // Call Rust handler — may modify RDI to point to a DIFFERENT TrapFrame
+        // (if context switch happened)
+        "call {timer_handler}",
+
+        // RAX now contains pointer to TrapFrame to restore (returned by handler)
+        // Set RSP to point to that TrapFrame
+        "mov rsp, rax",
+
+        // Pop all GPRs from the (possibly different) TrapFrame
+        "pop r15",
+        "pop r14",
+        "pop r13",
+        "pop r12",
+        "pop r11",
+        "pop r10",
+        "pop r9",
+        "pop r8",
+        "pop rbp",
+        "pop rdi",
+        "pop rsi",
+        "pop rdx",
+        "pop rcx",
+        "pop rbx",
+        "pop rax",
+
+        // IRETQ pops: RIP, CS, RFLAGS, RSP, SS
+        "iretq",
+
+        timer_handler = sym timer_preempt_handler,
+    )
+}
+
+/// Rust-level timer handler called from naked ISR.
+///
+/// `frame` points to the TrapFrame on the current kernel stack.
+/// Returns a pointer to the TrapFrame to restore (may be same or different process).
+#[unsafe(no_mangle)]
+extern "C" fn timer_preempt_handler(frame: *mut crate::process::context::TrapFrame) -> *mut crate::process::context::TrapFrame {
+    use crate::process::PROCESS_MANAGER;
+    use crate::process::scheduler::SCHEDULER;
+
+    // Always tick the system timer
+    crate::task::timer::tick();
+
+    // Send EOI early so we don't miss the next timer tick
+    unsafe {
+        PICS.lock()
+            .notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
+    }
+
+    // Check if we interrupted a user-mode process (CS RPL=3)
+    let trap = unsafe { &*frame };
+    let from_user = trap.cs & 3 == 3;
+
+    if !from_user {
+        // Kernel mode — just run scheduler tick (for sleep wakeups, signal delivery)
+        // No context switch in kernel mode (the shell's async loop handles its own scheduling)
+        let mut sched = SCHEDULER.lock();
+        sched.tick_kernel_only();
+        drop(sched);
+        return frame; // Return same frame — no switch
+    }
+
+    // === User mode preemption ===
+
+    // Save the current TrapFrame into the current process
+    let mut pm = PROCESS_MANAGER.lock();
+    let current_pid = pm.current_pid;
+
+    if let Some(pid) = current_pid {
+        if let Some(proc) = pm.get_process_mut(pid) {
+            // Copy TrapFrame from stack into process struct
+            proc.trap_frame = unsafe { *frame };
+            proc.has_trap_frame = true;
+        }
+    }
+    drop(pm);
+
+    // Run scheduler tick (quantum counting, preemption decision)
+    let mut sched = SCHEDULER.lock();
+    sched.tick();
+    drop(sched);
+
+    // Check if scheduler changed the current process
+    let mut pm = PROCESS_MANAGER.lock();
+    let new_pid = pm.current_pid;
+
+    if let Some(pid) = new_pid {
+        if let Some(proc) = pm.get_process_mut(pid) {
+            if proc.is_user && proc.has_trap_frame {
+                // Switch TSS.RSP0 to the new process's kernel stack
+                if proc.kernel_stack_top != 0 {
+                    unsafe { crate::gdt::set_tss_rsp0(proc.kernel_stack_top); }
+                }
+                // Return pointer to the new process's TrapFrame
+                let tf_ptr = &mut proc.trap_frame as *mut crate::process::context::TrapFrame;
+                drop(pm);
+                return tf_ptr;
+            }
+        }
+    }
+
+    // No switch or not a user process — restore original frame
+    // Make sure TSS.RSP0 is correct for current process
+    if let Some(pid) = current_pid {
+        if let Some(proc) = pm.get_process(pid) {
+            if proc.kernel_stack_top != 0 {
+                unsafe { crate::gdt::set_tss_rsp0(proc.kernel_stack_top); }
+            }
+        }
+    }
+    drop(pm);
+    frame
+}
+
+// =============================================================================
+// Standard interrupt handlers (unchanged)
+// =============================================================================
 
 extern "x86-interrupt" fn breakpoint_handler(
     stack_frame: InterruptStackFrame)
@@ -101,30 +259,15 @@ extern "x86-interrupt" fn page_fault_handler(
     crate::println!("  - Instruction Fetch: {}", error_code.contains(x86_64::structures::idt::PageFaultErrorCode::INSTRUCTION_FETCH));
     crate::println!("{:#?}", stack_frame);
 
-    // Check if address is in user space range
     let addr_u64 = fault_addr.as_u64();
     if addr_u64 >= crate::memory::userspace::USER_SPACE_START &&
        addr_u64 < crate::memory::userspace::USER_SPACE_END {
-        crate::println!("⚠️  Fault in USER SPACE range (0x{:X} - 0x{:X})",
+        crate::println!("Fault in USER SPACE range (0x{:X} - 0x{:X})",
             crate::memory::userspace::USER_SPACE_START,
             crate::memory::userspace::USER_SPACE_END);
     }
 
     panic!("Page fault");
-}
-
-extern "x86-interrupt" fn timer_interrupt_handler(
-    _stack_frame: InterruptStackFrame)
-{
-    crate::task::timer::tick();
-
-    // Call scheduler tick for preemptive multitasking
-    crate::process::scheduler::tick();
-
-    unsafe {
-        PICS.lock()
-            .notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
-    }
 }
 
 extern "x86-interrupt" fn keyboard_interrupt_handler(
@@ -145,8 +288,6 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(
 extern "x86-interrupt" fn primary_ata_interrupt_handler(
     _stack_frame: InterruptStackFrame)
 {
-    // ATA interrupt fired - acknowledge it by sending EOI
-    // The ATA driver handles the actual operation
     unsafe {
         PICS.lock()
             .notify_end_of_interrupt(InterruptIndex::PrimaryATA.as_u8());
@@ -156,7 +297,6 @@ extern "x86-interrupt" fn primary_ata_interrupt_handler(
 extern "x86-interrupt" fn secondary_ata_interrupt_handler(
     _stack_frame: InterruptStackFrame)
 {
-    // Secondary ATA interrupt - acknowledge with EOI
     unsafe {
         PICS.lock()
             .notify_end_of_interrupt(InterruptIndex::SecondaryATA.as_u8());
@@ -167,7 +307,6 @@ extern "x86-interrupt" fn secondary_ata_interrupt_handler(
 mod tests {
     #[test_case]
     fn test_breakpoint_exception() {
-        // invoke a breakpoint exception
         x86_64::instructions::interrupts::int3();
     }
 }

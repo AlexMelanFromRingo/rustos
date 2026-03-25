@@ -2,43 +2,133 @@ use x86_64::structures::gdt::{GlobalDescriptorTable, Descriptor, SegmentSelector
 use x86_64::structures::tss::TaskStateSegment;
 use x86_64::VirtAddr;
 use lazy_static::lazy_static;
+use spin::Mutex;
 
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 
 /// Model Specific Register numbers for SYSCALL/SYSRET
-const IA32_EFER: u32 = 0xC000_0080;  // Extended Feature Enable Register
+const IA32_EFER: u32 = 0xC000_0080;
 const IA32_STAR: u32 = 0xC000_0081;
 const IA32_LSTAR: u32 = 0xC000_0082;
 const IA32_FMASK: u32 = 0xC000_0084;
 
-lazy_static! {
-    static ref TSS: TaskStateSegment = {
-        let mut tss = TaskStateSegment::new();
+/// Per-process kernel stack size (16 KiB)
+pub const KERNEL_STACK_SIZE: usize = 4096 * 4;
 
-        // CRITICAL: Set up privilege_stack_table[0] (RSP0)
-        // This is used when CPU switches from Ring 3 to Ring 0 for interrupts!
-        // Without this, ANY interrupt in user mode causes DOUBLE FAULT!
-        tss.privilege_stack_table[0] = {
-            const STACK_SIZE: usize = 4096 * 5;
-            static mut PRIVILEGE_STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
+/// Maximum concurrent processes with kernel stacks
+pub const MAX_PROCESSES: usize = 64;
 
-            let stack_start = VirtAddr::from_ptr(&raw const PRIVILEGE_STACK);
-            let stack_end = stack_start + STACK_SIZE;
-            stack_end
-        };
-
-        // Set up IST for double fault handler
-        tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = {
-            const STACK_SIZE: usize = 4096 * 5;
-            static mut IST_STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
-
-            let stack_start = VirtAddr::from_ptr(&raw const IST_STACK);
-            let stack_end = stack_start + STACK_SIZE;
-            stack_end
-        };
-        tss
-    };
+/// Kernel stack pool — heap-allocated to avoid BSS bloat that overlaps user space.
+struct KernelStackPool {
+    /// Each slot: Option<Vec<u8>> holding the stack memory
+    stacks: [Option<alloc::vec::Vec<u8>>; MAX_PROCESSES],
+    /// Cached stack top addresses
+    tops: [u64; MAX_PROCESSES],
 }
+
+impl KernelStackPool {
+    fn new() -> Self {
+        KernelStackPool {
+            stacks: core::array::from_fn(|_| None),
+            tops: [0u64; MAX_PROCESSES],
+        }
+    }
+
+    fn allocate(&mut self) -> Option<(u64, u64, usize)> {
+        for i in 0..MAX_PROCESSES {
+            if self.stacks[i].is_none() {
+                let stack = alloc::vec![0u8; KERNEL_STACK_SIZE];
+                let bottom = stack.as_ptr() as u64;
+                let top = bottom + KERNEL_STACK_SIZE as u64;
+                self.tops[i] = top;
+                self.stacks[i] = Some(stack);
+                return Some((bottom, top, i));
+            }
+        }
+        None
+    }
+
+    fn free(&mut self, slot: usize) {
+        if slot < MAX_PROCESSES {
+            self.stacks[slot] = None;
+            self.tops[slot] = 0;
+        }
+    }
+
+    fn stack_top(&self, slot: usize) -> u64 {
+        self.tops[slot]
+    }
+}
+
+/// Global kernel stack pool — initialized lazily on first use
+static KERNEL_STACK_POOL: Mutex<Option<KernelStackPool>> = Mutex::new(None);
+
+fn with_pool<F, R>(f: F) -> R
+where F: FnOnce(&mut KernelStackPool) -> R {
+    let mut guard = KERNEL_STACK_POOL.lock();
+    if guard.is_none() {
+        *guard = Some(KernelStackPool::new());
+    }
+    f(guard.as_mut().unwrap())
+}
+
+/// Allocate a per-process kernel stack. Returns (stack_top, slot_index).
+pub fn allocate_kernel_stack() -> Option<(u64, usize)> {
+    with_pool(|pool| pool.allocate().map(|(_, top, slot)| (top, slot)))
+}
+
+/// Free a per-process kernel stack.
+pub fn free_kernel_stack(slot: usize) {
+    with_pool(|pool| pool.free(slot));
+}
+
+/// Get the stack top for a kernel stack slot.
+pub fn kernel_stack_top(slot: usize) -> u64 {
+    with_pool(|pool| pool.stack_top(slot))
+}
+
+// =============================================================================
+// TSS — mutable via UnsafeCell so we can update RSP0 on context switch
+// =============================================================================
+
+struct TssStorage(core::cell::UnsafeCell<TaskStateSegment>);
+unsafe impl Sync for TssStorage {}
+
+static TSS_STORAGE: TssStorage = TssStorage(core::cell::UnsafeCell::new(TaskStateSegment::new()));
+
+/// Boot-time IST stack for double faults (never changes)
+static mut IST_STACK: [u8; 4096 * 5] = [0; 4096 * 5];
+
+/// Boot-time privilege stack (used as initial RSP0 before any process runs)
+static mut BOOT_PRIVILEGE_STACK: [u8; 4096 * 5] = [0; 4096 * 5];
+
+/// Initialize TSS fields. Called once at boot before GDT.load().
+fn init_tss() {
+    let tss = unsafe { &mut *TSS_STORAGE.0.get() };
+
+    // RSP0: kernel stack for Ring 3 → Ring 0 transitions
+    let priv_stack_start = core::ptr::addr_of!(BOOT_PRIVILEGE_STACK) as u64;
+    tss.privilege_stack_table[0] = VirtAddr::new(priv_stack_start + 4096 * 5);
+
+    // IST[0]: double fault handler stack
+    let ist_stack_start = core::ptr::addr_of!(IST_STACK) as u64;
+    tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] =
+        VirtAddr::new(ist_stack_start + 4096 * 5);
+}
+
+/// Update TSS.RSP0 to point to a new kernel stack top.
+/// Called on every context switch to a user process.
+///
+/// # Safety
+/// Must be called with interrupts disabled.
+pub unsafe fn set_tss_rsp0(stack_top: u64) {
+    let tss = unsafe { &mut *TSS_STORAGE.0.get() };
+    tss.privilege_stack_table[0] = VirtAddr::new(stack_top);
+}
+
+// =============================================================================
+// GDT
+// =============================================================================
 
 lazy_static! {
     static ref GDT: (GlobalDescriptorTable, Selectors) = {
@@ -46,20 +136,19 @@ lazy_static! {
 
         // Segment order is CRITICAL for SYSCALL/SYSRET:
         // 1. Null descriptor (index 0)
-        // 2. Kernel code (index 1) - used by SYSCALL
+        // 2. Kernel code (index 1)
         // 3. Kernel data (index 2)
-        // 4. User data (index 3) - MUST be before user code for SYSRET!
-        // 5. User code (index 4) - used by SYSRET
+        // 4. User data (index 3) — MUST be before user code for SYSRET
+        // 5. User code (index 4)
         // 6. TSS
-        //
-        // SYSRET sets: CS = STAR[63:48] + 16, SS = STAR[63:48] + 8
-        // So user_data must be 8 bytes before user_code in GDT
 
         let kernel_code_selector = gdt.add_entry(Descriptor::kernel_code_segment());
         let kernel_data_selector = gdt.add_entry(Descriptor::kernel_data_segment());
         let user_data_selector = gdt.add_entry(Descriptor::user_data_segment());
         let user_code_selector = gdt.add_entry(Descriptor::user_code_segment());
-        let tss_selector = gdt.add_entry(Descriptor::tss_segment(&TSS));
+        // TSS descriptor points to our mutable TSS storage
+        let tss_ref = unsafe { &*TSS_STORAGE.0.get() };
+        let tss_selector = gdt.add_entry(Descriptor::tss_segment(tss_ref));
 
         (gdt, Selectors {
             kernel_code_selector,
@@ -84,6 +173,9 @@ pub fn init() {
     use x86_64::instructions::tables::load_tss;
     use x86_64::instructions::segmentation::{CS, Segment};
 
+    // Initialize TSS fields before loading GDT
+    init_tss();
+
     GDT.0.load();
     unsafe {
         CS::set_reg(GDT.1.kernel_code_selector);
@@ -92,53 +184,49 @@ pub fn init() {
 }
 
 /// Initialize SYSCALL/SYSRET support
-///
-/// This configures the MSRs needed for fast system calls:
-/// - IA32_STAR: Segment selectors for kernel and user mode
-/// - IA32_LSTAR: Address of syscall handler entry point
-/// - IA32_FMASK: RFLAGS mask (clears interrupt flag during syscall)
 pub fn init_syscall() {
-    // Initialize kernel stack
     init_kernel_stack();
 
     unsafe {
         use x86_64::registers::model_specific::Msr;
 
-        // Enable SYSCALL/SYSRET by setting SCE bit (bit 0) in IA32_EFER
         let mut efer = Msr::new(IA32_EFER);
         let efer_value = efer.read();
-        efer.write(efer_value | 1); // Set SCE bit (bit 0)
+        efer.write(efer_value | 1);
 
-        // STAR format (64 bits):
-        // Bits 63:48 - User CS and SS (User Code = STAR[63:48] + 16, User Data = STAR[63:48] + 8)
-        // Bits 47:32 - Kernel CS and SS (Kernel Code = STAR[47:32], Kernel Data = STAR[47:32] + 8)
-        // Bits 31:0  - Reserved
-
-        // Get raw selector values (must be shifted appropriately)
         let kernel_cs = GDT.1.kernel_code_selector.0 as u64;
-        let user_cs = (GDT.1.user_code_selector.0 as u64).wrapping_sub(16); // SYSRET adds 16
-
+        let user_cs = (GDT.1.user_code_selector.0 as u64).wrapping_sub(16);
         let star_value = (user_cs << 48) | (kernel_cs << 32);
 
         Msr::new(IA32_STAR).write(star_value);
-
-        // LSTAR - syscall handler entry point
         Msr::new(IA32_LSTAR).write(syscall_handler as *const () as u64);
-
-        // FMASK - mask RFLAGS.IF (bit 9) during syscall to disable interrupts
-        Msr::new(IA32_FMASK).write(0x200); // IF flag
+        Msr::new(IA32_FMASK).write(0x200);
     }
 }
 
-/// Get user code selector (for transitioning to ring 3)
+/// Get user code selector
 pub fn user_code_selector() -> SegmentSelector {
     GDT.1.user_code_selector
 }
 
-/// Get user data selector (for transitioning to ring 3)
+/// Get user data selector
 pub fn user_data_selector() -> SegmentSelector {
     GDT.1.user_data_selector
 }
+
+/// Get user code selector raw value (for TrapFrame)
+pub fn user_cs_value() -> u64 {
+    GDT.1.user_code_selector.0 as u64
+}
+
+/// Get user data selector raw value (for TrapFrame SS)
+pub fn user_ss_value() -> u64 {
+    GDT.1.user_data_selector.0 as u64
+}
+
+// =============================================================================
+// SYSCALL handler
+// =============================================================================
 
 /// Temporary storage for user RSP during syscall
 static mut USER_RSP: u64 = 0;
@@ -146,7 +234,6 @@ static mut USER_RSP: u64 = 0;
 /// Kernel stack for syscall handling
 static mut SYSCALL_STACK: [u8; 4096 * 4] = [0; 4096 * 4];
 
-/// Get kernel stack pointer for syscalls
 fn get_kernel_stack_ptr() -> u64 {
     let stack_start = core::ptr::addr_of!(SYSCALL_STACK) as u64;
     stack_start + (4096 * 4)
@@ -154,23 +241,18 @@ fn get_kernel_stack_ptr() -> u64 {
 
 /// Syscall handler entry point
 ///
-/// This is invoked when userspace executes SYSCALL instruction.
-/// SYSCALL has already saved RIP->RCX and RFLAGS->R11.
+/// Invoked when userspace executes SYSCALL instruction.
+/// CPU saves RIP→RCX, RFLAGS→R11. RSP is NOT saved by CPU.
 #[unsafe(naked)]
 extern "C" fn syscall_handler() {
     core::arch::naked_asm!(
-        // CRITICAL FIX: Save user RSP BEFORE switching stacks!
-        // According to https://cyp.sh/blog/syscallsysret and https://wiki.osdev.org/SWAPGS
-        // SYSCALL does NOT save RSP - we must do it manually!
-        "mov qword ptr [rip + {USER_RSP}], rsp",    // 1. Save user RSP
-        "mov rsp, qword ptr [rip + {KERNEL_STACK_PTR}]",  // 2. Switch to kernel stack
+        "mov qword ptr [rip + {USER_RSP}], rsp",
+        "mov rsp, qword ptr [rip + {KERNEL_STACK_PTR}]",
 
-        // Save context for SYSRET (now on kernel stack)
-        "push qword ptr [rip + {USER_RSP}]",  // User RSP (saved above)
-        "push r11",                            // User RFLAGS (CPU saved in R11)
-        "push rcx",                            // User RIP (CPU saved in RCX)
+        "push qword ptr [rip + {USER_RSP}]",
+        "push r11",
+        "push rcx",
 
-        // Save callee-saved registers
         "push rbx",
         "push rbp",
         "push r12",
@@ -178,25 +260,19 @@ extern "C" fn syscall_handler() {
         "push r14",
         "push r15",
 
-        // Syscall ABI -> System V ABI conversion
-        // IN:  rax=num, rdi=arg1, rsi=arg2, rdx=arg3, r10=arg4, r8=arg5, r9=arg6
-        // OUT: rdi=num, rsi=arg1, rdx=arg2, rcx=arg3, r8=arg4, r9=arg5, stack=arg6
+        // Syscall ABI → System V ABI
+        "push r9",
+        "mov r9, r8",
+        "mov r8, r10",
+        "mov rcx, rdx",
+        "mov rdx, rsi",
+        "mov rsi, rdi",
+        "mov rdi, rax",
 
-        "push r9",       // arg6 (will be on stack)
-        "mov r9, r8",    // arg5: r8 -> r9
-        "mov r8, r10",   // arg4: r10 -> r8
-        "mov rcx, rdx",  // arg3: rdx -> rcx
-        "mov rdx, rsi",  // arg2: rsi -> rdx
-        "mov rsi, rdi",  // arg1: rdi -> rsi
-        "mov rdi, rax",  // num: rax -> rdi
-
-        // Call dispatcher (result in RAX)
         "call {syscall_dispatcher}",
 
-        // Clean up arg6 from stack
         "add rsp, 8",
 
-        // Restore callee-saved registers
         "pop r15",
         "pop r14",
         "pop r13",
@@ -204,12 +280,10 @@ extern "C" fn syscall_handler() {
         "pop rbp",
         "pop rbx",
 
-        // Restore for SYSRET
-        "pop rcx",       // User RIP
-        "pop r11",       // User RFLAGS
-        "pop rsp",       // User RSP
+        "pop rcx",
+        "pop r11",
+        "pop rsp",
 
-        // Return to user mode
         "sysretq",
 
         syscall_dispatcher = sym crate::syscall::syscall_dispatcher,
@@ -221,7 +295,6 @@ extern "C" fn syscall_handler() {
 /// Kernel stack pointer (initialized at boot)
 static mut KERNEL_STACK_PTR: u64 = 0;
 
-/// Initialize kernel stack pointer for syscalls
 fn init_kernel_stack() {
     unsafe {
         KERNEL_STACK_PTR = get_kernel_stack_ptr();
