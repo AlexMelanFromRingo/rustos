@@ -1364,6 +1364,12 @@ impl FileSystem for Fat32 {
             _ => false,
         }
     }
+
+    fn rename(&mut self, _old_path: &str, _new_path: &str) -> VfsResult<()> {
+        // FAT32 rename requires updating directory entries in-place
+        // Not yet supported on FAT32
+        Err(VfsError::PermissionDenied)
+    }
 }
 
 /// Global FAT32 filesystem instance

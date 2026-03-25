@@ -27,12 +27,24 @@ pub mod flags {
     pub const O_APPEND: usize = 0x0400;
 }
 
+/// What kind of underlying object a file descriptor refers to
+#[derive(Clone, Debug)]
+pub enum FileKind {
+    /// Regular file on the filesystem
+    Regular,
+    /// Read end of a pipe
+    PipeRead(usize),  // pipe_id
+    /// Write end of a pipe
+    PipeWrite(usize), // pipe_id
+}
+
 /// Opened file information
 pub struct OpenFile {
     pub path: String,
     pub flags: usize,
     pub offset: usize,
     pub is_open: bool,
+    pub kind: FileKind,
 }
 
 impl OpenFile {
@@ -42,6 +54,27 @@ impl OpenFile {
             flags,
             offset: 0,
             is_open: true,
+            kind: FileKind::Regular,
+        }
+    }
+
+    fn new_pipe_read(pipe_id: usize) -> Self {
+        OpenFile {
+            path: String::from("[pipe]"),
+            flags: flags::O_RDONLY,
+            offset: 0,
+            is_open: true,
+            kind: FileKind::PipeRead(pipe_id),
+        }
+    }
+
+    fn new_pipe_write(pipe_id: usize) -> Self {
+        OpenFile {
+            path: String::from("[pipe]"),
+            flags: flags::O_WRONLY,
+            offset: 0,
+            is_open: true,
+            kind: FileKind::PipeWrite(pipe_id),
         }
     }
 }
@@ -89,7 +122,7 @@ impl FileDescriptorTable {
         }
 
         if self.files[fd].is_some() {
-            self.files[fd] = None;
+            self.close_with_pipe_cleanup(fd);
             true
         } else {
             false
@@ -137,6 +170,7 @@ impl FileDescriptorTable {
                     flags: old_file.flags,
                     offset: old_file.offset,
                     is_open: true,
+                    kind: old_file.kind.clone(),
                 });
                 return Some(new_fd);
             }
@@ -157,7 +191,7 @@ impl FileDescriptorTable {
         }
 
         // Close new_fd if it's open (silently, as per POSIX)
-        self.files[new_fd] = None;
+        self.close_with_pipe_cleanup(new_fd);
 
         let old_file = self.files[old_fd].as_ref().unwrap();
         self.files[new_fd] = Some(OpenFile {
@@ -165,8 +199,49 @@ impl FileDescriptorTable {
             flags: old_file.flags,
             offset: old_file.offset,
             is_open: true,
+            kind: old_file.kind.clone(),
         });
         Some(new_fd)
+    }
+
+    /// Open a pipe read end, returns fd
+    pub fn open_pipe_read(&mut self, pipe_id: usize) -> Option<Fd> {
+        for fd in 3..MAX_OPEN_FILES {
+            if self.files[fd].is_none() {
+                self.files[fd] = Some(OpenFile::new_pipe_read(pipe_id));
+                return Some(fd);
+            }
+        }
+        None
+    }
+
+    /// Open a pipe write end, returns fd
+    pub fn open_pipe_write(&mut self, pipe_id: usize) -> Option<Fd> {
+        for fd in 3..MAX_OPEN_FILES {
+            if self.files[fd].is_none() {
+                self.files[fd] = Some(OpenFile::new_pipe_write(pipe_id));
+                return Some(fd);
+            }
+        }
+        None
+    }
+
+    /// Close fd with pipe cleanup (closes pipe ends)
+    fn close_with_pipe_cleanup(&mut self, fd: Fd) {
+        if fd >= MAX_OPEN_FILES {
+            return;
+        }
+        if let Some(file) = self.files[fd].take() {
+            match file.kind {
+                FileKind::PipeRead(pipe_id) => {
+                    super::pipe::pipe_close_read(pipe_id);
+                }
+                FileKind::PipeWrite(pipe_id) => {
+                    super::pipe::pipe_close_write(pipe_id);
+                }
+                FileKind::Regular => {}
+            }
+        }
     }
 
     /// Seek in a file. Returns new offset or error.

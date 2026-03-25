@@ -7,6 +7,7 @@
 pub mod numbers;
 pub mod handler;
 pub mod filedesc;
+pub mod pipe;
 
 /// System call numbers
 /// Based on Linux syscall ABI for x86_64
@@ -17,7 +18,10 @@ pub enum SyscallNumber {
     Write = 1,
     Open = 2,
     Close = 3,
+    Stat = 4,
+    Fstat = 5,
     Lseek = 8,
+    Pipe = 22,
     Dup = 32,
     Dup2 = 33,
     GetPid = 39,
@@ -27,8 +31,11 @@ pub enum SyscallNumber {
     Wait4 = 61,
     GetCwd = 79,
     Chdir = 80,
+    Rename = 82,
     Mkdir = 83,
     Rmdir = 84,
+    Unlink = 87,
+    Nanosleep = 35,
     ClockGetTime = 228,
 }
 
@@ -39,9 +46,13 @@ impl SyscallNumber {
             1 => Some(SyscallNumber::Write),
             2 => Some(SyscallNumber::Open),
             3 => Some(SyscallNumber::Close),
+            4 => Some(SyscallNumber::Stat),
+            5 => Some(SyscallNumber::Fstat),
             8 => Some(SyscallNumber::Lseek),
+            22 => Some(SyscallNumber::Pipe),
             32 => Some(SyscallNumber::Dup),
             33 => Some(SyscallNumber::Dup2),
+            35 => Some(SyscallNumber::Nanosleep),
             39 => Some(SyscallNumber::GetPid),
             57 => Some(SyscallNumber::Fork),
             59 => Some(SyscallNumber::Execve),
@@ -49,8 +60,10 @@ impl SyscallNumber {
             61 => Some(SyscallNumber::Wait4),
             79 => Some(SyscallNumber::GetCwd),
             80 => Some(SyscallNumber::Chdir),
+            82 => Some(SyscallNumber::Rename),
             83 => Some(SyscallNumber::Mkdir),
             84 => Some(SyscallNumber::Rmdir),
+            87 => Some(SyscallNumber::Unlink),
             228 => Some(SyscallNumber::ClockGetTime),
             _ => None,
         }
@@ -117,9 +130,13 @@ pub fn syscall_dispatcher(
         SyscallNumber::Write => handler::sys_write(arg1, arg2, arg3),
         SyscallNumber::Open => handler::sys_open(arg1, arg2),
         SyscallNumber::Close => handler::sys_close(arg1),
+        SyscallNumber::Stat => handler::sys_stat(arg1, arg2),
+        SyscallNumber::Fstat => handler::sys_fstat(arg1, arg2),
         SyscallNumber::Lseek => handler::sys_lseek(arg1, arg2 as isize, arg3),
+        SyscallNumber::Pipe => handler::sys_pipe(arg1),
         SyscallNumber::Dup => handler::sys_dup(arg1),
         SyscallNumber::Dup2 => handler::sys_dup2(arg1, arg2),
+        SyscallNumber::Nanosleep => handler::sys_nanosleep(arg1, arg2),
         SyscallNumber::GetPid => handler::sys_getpid(),
         SyscallNumber::Fork => handler::sys_fork(),
         SyscallNumber::Execve => handler::sys_execve(arg1, arg2, arg3),
@@ -128,7 +145,9 @@ pub fn syscall_dispatcher(
         SyscallNumber::GetCwd => handler::sys_getcwd(arg1, arg2),
         SyscallNumber::Chdir => handler::sys_chdir(arg1),
         SyscallNumber::Mkdir => handler::sys_mkdir(arg1, arg2),
+        SyscallNumber::Rename => handler::sys_rename(arg1, arg2),
         SyscallNumber::Rmdir => handler::sys_rmdir(arg1),
+        SyscallNumber::Unlink => handler::sys_unlink(arg1),
         SyscallNumber::ClockGetTime => handler::sys_clock_gettime(arg1, arg2),
     }
 }

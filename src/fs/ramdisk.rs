@@ -324,6 +324,26 @@ impl FileSystem for RamDisk {
         let normalized = normalize_path(path);
         self.files.iter().any(|f| f.name == normalized && f.is_directory)
     }
+
+    fn rename(&mut self, old_path: &str, new_path: &str) -> VfsResult<()> {
+        let old_norm = normalize_path(old_path);
+        let new_norm = normalize_path(new_path);
+
+        // Check destination doesn't already exist
+        if self.files.iter().any(|f| f.name == new_norm) {
+            return Err(VfsError::FileExists);
+        }
+
+        // Find and rename the file/directory
+        let file = self.files.iter_mut().find(|f| f.name == old_norm);
+        match file {
+            Some(f) => {
+                f.name = new_norm;
+                Ok(())
+            }
+            None => Err(VfsError::FileNotFound),
+        }
+    }
 }
 
 // Global RAM disk instance

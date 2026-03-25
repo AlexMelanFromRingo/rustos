@@ -16,6 +16,7 @@ pub struct Shell {
     aliases: Vec<(String, String)>,  // Command aliases (alias, command)
     current_dir: String,  // Current working directory
     hostname: String,  // System hostname
+    env_vars: Vec<(String, String)>,  // Environment variables
 }
 
 impl Shell {
@@ -30,7 +31,15 @@ impl Shell {
             aliases: Vec::new(),
             current_dir: String::from("/"),
             hostname: String::from("rustos"),
+            env_vars: Vec::new(),
         };
+
+        // Set default environment variables
+        shell.env_vars.push((String::from("HOME"), String::from("/")));
+        shell.env_vars.push((String::from("PATH"), String::from("/bin")));
+        shell.env_vars.push((String::from("SHELL"), String::from("/bin/sh")));
+        shell.env_vars.push((String::from("USER"), String::from("root")));
+        shell.env_vars.push((String::from("TERM"), String::from("vga")));
 
         // Load command history from file
         shell.load_history();
@@ -371,6 +380,9 @@ impl Shell {
             self.save_history();
         }
 
+        // Expand environment variables ($VAR)
+        let command = self.expand_env_vars(&command);
+
         // Check for output redirection
         if command.contains('>') {
             self.execute_with_redirection(&command);
@@ -433,6 +445,11 @@ impl Shell {
             "mkdir" => self.cmd_mkdir(args),
             "rmdir" => self.cmd_rmdir(args),
             "usermode" => self.cmd_usermode(),
+            "export" => self.cmd_export(args),
+            "printenv" | "env" => self.cmd_printenv(args),
+            "unset" => self.cmd_unset(args),
+            "renice" => self.cmd_renice(args),
+            "stat" => self.cmd_stat(args),
             "exec" => self.cmd_exec(args),
             _ => {
                 // Check if it's an alias
@@ -454,6 +471,7 @@ impl Shell {
                         aliases: self.aliases.clone(),
                         current_dir: self.current_dir.clone(),
                         hostname: self.hostname.clone(),
+                        env_vars: self.env_vars.clone(),
                     };
                     temp_shell.execute();
                     // Update history from temp shell
@@ -472,7 +490,7 @@ impl Shell {
         println!("  echo      - Echo the arguments");
         println!("  hello     - Print a greeting");
         println!("  uptime    - Show system uptime");
-        println!("  date      - Show system uptime as date");
+        println!("  date      - Show current date and time (from RTC)");
         println!("  time      - Show current timer ticks");
         println!("  meminfo   - Display memory information");
         println!("  version   - Show RustOS version");
@@ -487,6 +505,7 @@ impl Shell {
         println!("Process management:");
         println!("  ps        - List all processes");
         println!("  kill      - Terminate a process (usage: kill <pid>)");
+        println!("  renice    - Change process priority (usage: renice <nice> <pid>)");
         println!();
         println!("File system commands:");
         println!("  pwd       - Print working directory");
@@ -506,6 +525,7 @@ impl Shell {
         println!("  wc        - Count lines/words/bytes (usage: wc filename)");
         println!("  grep      - Search for pattern in file (usage: grep [-i] [-n] pattern file)");
         println!("  edit      - Simple text editor (usage: edit filename)");
+        println!("  stat      - Show file status (usage: stat <file>)");
         println!("  df        - Show disk space usage");
         println!("  du        - Show file sizes (usage: du [file1 file2 ...])");
         println!("  find      - Find files by pattern (usage: find <pattern>)");
@@ -513,19 +533,25 @@ impl Shell {
         println!("  mount     - Mount FAT32 disk (usage: mount fat32)");
         println!("  umount    - Unmount FAT32 disk");
         println!();
+        println!("Environment:");
+        println!("  export    - Set environment variable (usage: export VAR=value)");
+        println!("  printenv  - Print environment variables (usage: printenv [VAR])");
+        println!("  env       - Same as printenv");
+        println!("  unset     - Remove environment variable (usage: unset VAR)");
+        println!();
         println!("Aliases:");
         println!("  alias     - Create command alias (usage: alias <name> <command>)");
         println!("  unalias   - Remove alias (usage: unalias <name>)");
         println!("  which     - Show command type/location");
         println!();
         println!("Pipes and redirection:");
-        println!("  cat <file> | grep <pattern>  - Search in file");
-        println!("  cat <file> | wc              - Count lines/words/bytes");
-        println!("  ls | grep <pattern>          - Filter file list");
-        println!("  echo text > file             - Write to file (overwrite)");
-        println!("  echo text >> file            - Append to file");
-        println!("  cat file > newfile           - Copy file contents");
-        println!("  ls > filelist.txt            - Save file list");
+        println!("  <cmd> | grep <pattern>  - Search output for pattern");
+        println!("  <cmd> | wc [-l|-w|-c]   - Count lines/words/bytes");
+        println!("  <cmd> | head [-n N]     - Show first N lines");
+        println!("  <cmd> | tail [-n N]     - Show last N lines");
+        println!("  <cmd> | sort [-r]       - Sort output");
+        println!("  echo text > file        - Write to file (overwrite)");
+        println!("  echo text >> file       - Append to file");
         println!();
         println!("Keyboard shortcuts:");
         println!("  LEFT/RIGHT - Move cursor left/right");
@@ -1020,12 +1046,13 @@ impl Shell {
         let pm = PROCESS_MANAGER.lock();
         let processes = pm.all_processes();
 
-        println!("  PID  STATE       STACK");
-        println!("  ---  -----       -----");
+        println!("  PID  NI  STATE       STACK");
+        println!("  ---  --  -----       -----");
 
         for process in processes {
-            println!("{:5}  {:<11} {} bytes",
+            println!("{:5}  {:3}  {:<11} {} bytes",
                 process.pid,
+                process.nice,
                 process.state.as_str(),
                 process.stack.len()
             );
@@ -1038,6 +1065,37 @@ impl Shell {
             println!("Current: PID {}", current_pid);
         } else {
             println!("Current: None");
+        }
+    }
+
+    fn cmd_renice(&self, args: &[&str]) {
+        use crate::process::scheduler;
+
+        if args.len() < 2 {
+            println!("Usage: renice <nice> <pid>");
+            println!("  nice: -20 (highest priority) to 19 (lowest)");
+            return;
+        }
+
+        let nice: i8 = match args[0].parse() {
+            Ok(n) => n,
+            Err(_) => {
+                println!("Error: Invalid nice value '{}'", args[0]);
+                return;
+            }
+        };
+
+        let pid: usize = match args[1].parse() {
+            Ok(p) => p,
+            Err(_) => {
+                println!("Error: Invalid PID '{}'", args[1]);
+                return;
+            }
+        };
+
+        match scheduler::set_nice(pid, nice) {
+            Some(old) => println!("PID {}: nice {} -> {}", pid, old, nice.clamp(-20, 19)),
+            None => println!("Error: Process {} not found", pid),
         }
     }
 
@@ -1587,6 +1645,36 @@ impl Shell {
         None
     }
 
+    /// Expand $VAR references in a command string
+    fn expand_env_vars(&self, input: &str) -> String {
+        let mut result = String::with_capacity(input.len());
+        let bytes = input.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'$' && i + 1 < bytes.len() {
+                i += 1;
+                // Collect variable name (alphanumeric + underscore)
+                let start = i;
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    i += 1;
+                }
+                if start < i {
+                    let var_name = &input[start..i];
+                    if let Some((_, value)) = self.env_vars.iter().find(|(k, _)| k == var_name) {
+                        result.push_str(value);
+                    }
+                    // If variable not found, expand to empty string (like sh)
+                } else {
+                    result.push('$');
+                }
+            } else {
+                result.push(input[i..].chars().next().unwrap());
+                i += input[i..].chars().next().unwrap().len_utf8();
+            }
+        }
+        result
+    }
+
     fn cmd_pwd(&self) {
         println!("{}", self.current_dir);
     }
@@ -1802,14 +1890,12 @@ impl Shell {
             Ok(seconds) => {
                 println!("Sleeping for {} second(s)...", seconds);
 
-                // Simple busy-wait sleep using timer ticks
+                // Use timer ticks with hlt instruction to save CPU
                 use crate::task::timer::current_ticks;
-                let start = current_ticks();
-                let target = start + (seconds * 18);  // ~18 ticks per second
+                let target = current_ticks() + (seconds * 18); // ~18.2 Hz PIT
 
                 while current_ticks() < target {
-                    // Busy wait
-                    core::hint::spin_loop();
+                    x86_64::instructions::hlt(); // Sleep until next interrupt
                 }
 
                 println!("Done");
@@ -1946,6 +2032,130 @@ impl Shell {
 
         // Should never reach here - user_mode_demo calls sys_exit
         println!("ERROR: Returned from user mode unexpectedly!");
+    }
+
+    /// Set or display environment variables
+    fn cmd_export(&mut self, args: &[&str]) {
+        if args.is_empty() {
+            // Display all environment variables
+            for (key, value) in &self.env_vars {
+                println!("{}={}", key, value);
+            }
+            return;
+        }
+
+        for arg in args {
+            if let Some(eq_pos) = arg.find('=') {
+                let key = &arg[..eq_pos];
+                let value = &arg[eq_pos + 1..];
+                if key.is_empty() {
+                    println!("export: invalid variable name");
+                    continue;
+                }
+                // Update existing or insert new
+                if let Some(entry) = self.env_vars.iter_mut().find(|(k, _)| k == key) {
+                    entry.1 = String::from(value);
+                } else {
+                    self.env_vars.push((String::from(key), String::from(value)));
+                }
+            } else {
+                // Just a name without value — check if it exists
+                if self.env_vars.iter().any(|(k, _)| k == *arg) {
+                    // Already exported, nothing to do
+                } else {
+                    // Set empty value
+                    self.env_vars.push((String::from(*arg), String::new()));
+                }
+            }
+        }
+    }
+
+    /// Print environment variables
+    fn cmd_printenv(&self, args: &[&str]) {
+        if args.is_empty() {
+            for (key, value) in &self.env_vars {
+                println!("{}={}", key, value);
+            }
+        } else {
+            for name in args {
+                if let Some((_, value)) = self.env_vars.iter().find(|(k, _)| k == *name) {
+                    println!("{}", value);
+                }
+            }
+        }
+    }
+
+    /// Remove environment variables
+    fn cmd_unset(&mut self, args: &[&str]) {
+        if args.is_empty() {
+            println!("Usage: unset <variable> [variable ...]");
+            return;
+        }
+        for name in args {
+            self.env_vars.retain(|(k, _)| k != *name);
+        }
+    }
+
+    /// Display file status information
+    fn cmd_stat(&self, args: &[&str]) {
+        if args.is_empty() {
+            println!("Usage: stat <file> [file ...]");
+            return;
+        }
+
+        use crate::fs::vfs::VfsContext;
+        use crate::fs::ramdisk::RAMDISK;
+        use crate::fs::fat32::FAT32;
+        use crate::fs::vfs::FileSystem;
+
+        for filename in args {
+            let path = if filename.starts_with('/') {
+                String::from(*filename)
+            } else if self.current_dir == "/" {
+                format!("/{}", filename)
+            } else {
+                format!("{}/{}", self.current_dir, filename)
+            };
+
+            let is_dir = VfsContext::is_directory(&path);
+            let file_size = if is_dir {
+                0usize
+            } else {
+                let data = {
+                    if let Some(ref fs) = *FAT32.lock() {
+                        fs.read(&path).ok()
+                    } else {
+                        RAMDISK.lock().read(&path).ok()
+                    }
+                };
+                match data {
+                    Some(d) => d.len(),
+                    None => {
+                        if !is_dir {
+                            println!("stat: cannot stat '{}': No such file or directory", filename);
+                            continue;
+                        }
+                        0
+                    }
+                }
+            };
+
+            let file_type = if is_dir { "directory" } else { "regular file" };
+            let mode_str = if is_dir { "drwxr-xr-x" } else { "-rw-r--r--" };
+            let mode_oct = if is_dir { "0755" } else { "0644" };
+            let blocks = (file_size + 511) / 512;
+
+            println!("  File: {}", filename);
+            println!("  Size: {:<15} Blocks: {:<10} {}", file_size, blocks, file_type);
+            println!("Access: ({}/{})  Uid: (    0/    root)   Gid: (    0/    root)", mode_oct, mode_str);
+
+            // Show timestamps from RTC
+            let dt = crate::drivers::rtc::read_datetime();
+            let mut buf = [0u8; 32];
+            let len = dt.format(&mut buf);
+            let time_str = core::str::from_utf8(&buf[..len]).unwrap_or("unknown");
+            println!("Modify: {}", time_str);
+        }
     }
 
     /// Execute ELF binary in user mode

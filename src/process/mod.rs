@@ -46,6 +46,7 @@ pub struct Process {
     pub user_stack_addr: Option<u64>,    // User space stack address
     pub user_stack_size: Option<u64>,    // User space stack size
     pub entry_point: Option<u64>,        // Entry point for exec
+    pub nice: i8,                        // Nice value: -20 (highest priority) to 19 (lowest)
 }
 
 impl Process {
@@ -70,6 +71,7 @@ impl Process {
             user_stack_addr: None,
             user_stack_size: None,
             entry_point: Some(entry_point as u64),
+            nice: 0,
         }
     }
 
@@ -86,6 +88,7 @@ impl Process {
             user_stack_addr: Some(stack_addr),
             user_stack_size: Some(stack_size),
             entry_point: Some(entry_point),
+            nice: 0,
         }
     }
 
@@ -101,6 +104,7 @@ impl Process {
             user_stack_addr: self.user_stack_addr,
             user_stack_size: self.user_stack_size,
             entry_point: self.entry_point,
+            nice: self.nice,
         }
     }
 }

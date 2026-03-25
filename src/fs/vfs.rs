@@ -90,6 +90,9 @@ pub trait FileSystem {
     /// Check if path is a directory
     fn is_directory(&self, path: &str) -> bool;
 
+    /// Rename/move a file or directory
+    fn rename(&mut self, old_path: &str, new_path: &str) -> VfsResult<()>;
+
     /// Get free space (in bytes)
     fn free_space(&self) -> usize {
         self.total_space().saturating_sub(self.used_space())
@@ -256,6 +259,17 @@ impl VfsContext {
         drop(fat32);
 
         RAMDISK.lock().is_directory(path)
+    }
+
+    /// Rename/move a file or directory
+    pub fn rename(old_path: &str, new_path: &str) -> VfsResult<()> {
+        let mut fat32 = FAT32.lock();
+        if let Some(ref mut fs) = *fat32 {
+            return fs.rename(old_path, new_path);
+        }
+        drop(fat32);
+
+        RAMDISK.lock().rename(old_path, new_path)
     }
 
     /// Check if FAT32 is currently mounted

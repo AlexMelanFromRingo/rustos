@@ -66,43 +66,58 @@ pub fn sys_read(fd: usize, buf_ptr: usize, count: usize) -> isize {
                 None => return SyscallError::BadFileDescriptor.as_isize(),
             };
 
+            let kind = file.kind.clone();
             let path = file.path.clone();
             let offset = file.offset;
+            drop(fd_table);
 
-            // Try to read from filesystem
-            let data = {
-                // Try FAT32 first
-                if let Some(ref fs) = *FAT32.lock() {
-                    fs.read(&path).ok()
-                } else {
-                    // Fall back to RAMDISK
-                    RAMDISK.lock().read(&path).ok()
-                }
-            };
-
-            match data {
-                Some(file_data) => {
-                    // Calculate how much to read
-                    let available = file_data.len().saturating_sub(offset);
-                    let to_read = count.min(available);
-
-                    if to_read == 0 {
-                        return 0;  // EOF
-                    }
-
-                    // Copy to user buffer
-                    let slice = unsafe {
-                        core::slice::from_raw_parts_mut(buf_ptr as *mut u8, to_read)
+            match kind {
+                filedesc::FileKind::PipeRead(pipe_id) => {
+                    // Read from pipe
+                    let mut buf = unsafe {
+                        core::slice::from_raw_parts_mut(buf_ptr as *mut u8, count)
                     };
-                    slice.copy_from_slice(&file_data[offset..offset + to_read]);
-
-                    // Update offset
-                    drop(fd_table);
-                    filedesc::get_fd_table().get_mut(fd).unwrap().offset += to_read;
-
-                    to_read as isize
+                    match super::pipe::pipe_read(pipe_id, &mut buf) {
+                        Ok(n) => n as isize,
+                        Err(super::pipe::PipeError::WouldBlock) => 0,
+                        Err(_) => SyscallError::InvalidArgument.as_isize(),
+                    }
                 }
-                None => SyscallError::FileNotFound.as_isize(),
+                filedesc::FileKind::PipeWrite(_) => {
+                    // Can't read from write end of pipe
+                    SyscallError::BadFileDescriptor.as_isize()
+                }
+                filedesc::FileKind::Regular => {
+                    // Try to read from filesystem
+                    let data = {
+                        if let Some(ref fs) = *FAT32.lock() {
+                            fs.read(&path).ok()
+                        } else {
+                            RAMDISK.lock().read(&path).ok()
+                        }
+                    };
+
+                    match data {
+                        Some(file_data) => {
+                            let available = file_data.len().saturating_sub(offset);
+                            let to_read = count.min(available);
+
+                            if to_read == 0 {
+                                return 0;  // EOF
+                            }
+
+                            let slice = unsafe {
+                                core::slice::from_raw_parts_mut(buf_ptr as *mut u8, to_read)
+                            };
+                            slice.copy_from_slice(&file_data[offset..offset + to_read]);
+
+                            filedesc::get_fd_table().get_mut(fd).unwrap().offset += to_read;
+
+                            to_read as isize
+                        }
+                        None => SyscallError::FileNotFound.as_isize(),
+                    }
+                }
             }
         }
     }
@@ -143,12 +158,13 @@ pub fn sys_write(fd: usize, buf_ptr: usize, count: usize) -> isize {
             count as isize
         }
         _ => {
-            // Write to file
+            // Write to file or pipe
             let file = match fd_table.get(fd) {
                 Some(f) => f,
                 None => return SyscallError::BadFileDescriptor.as_isize(),
             };
 
+            let kind = file.kind.clone();
             let path = file.path.clone();
             let _is_append = (file.flags & flags::O_APPEND) != 0;
 
@@ -159,12 +175,25 @@ pub fn sys_write(fd: usize, buf_ptr: usize, count: usize) -> isize {
                 core::slice::from_raw_parts(buf_ptr as *const u8, count)
             };
 
+            // Handle pipe writes
+            match kind {
+                filedesc::FileKind::PipeWrite(pipe_id) => {
+                    return match super::pipe::pipe_write(pipe_id, data) {
+                        Ok(n) => n as isize,
+                        Err(super::pipe::PipeError::BrokenPipe) => SyscallError::InvalidArgument.as_isize(),
+                        Err(super::pipe::PipeError::WouldBlock) => 0,
+                        Err(_) => SyscallError::InvalidArgument.as_isize(),
+                    };
+                }
+                filedesc::FileKind::PipeRead(_) => {
+                    return SyscallError::BadFileDescriptor.as_isize();
+                }
+                filedesc::FileKind::Regular => {}
+            }
+
             // Try to write to filesystem
             let result = {
-                // Try FAT32 first (read-only for now)
                 let _fat32_locked = FAT32.lock();
-
-                // Write to RAMDISK (convert slice to Vec)
                 RAMDISK.lock().write(&path, data.to_vec())
             };
 
@@ -479,6 +508,59 @@ pub fn sys_rmdir(path_ptr: usize) -> isize {
     }
 }
 
+/// sys_unlink - delete a file
+pub fn sys_unlink(path_ptr: usize) -> isize {
+    if path_ptr == 0 {
+        return SyscallError::InvalidArgument.as_isize();
+    }
+
+    let path = unsafe { read_user_string(path_ptr) };
+    let path = match path {
+        Some(p) => p,
+        None => return SyscallError::InvalidArgument.as_isize(),
+    };
+
+    use crate::fs::vfs::{VfsContext, VfsError};
+
+    // Don't allow unlinking directories (use rmdir for that)
+    if VfsContext::is_directory(&path) {
+        return SyscallError::PermissionDenied.as_isize(); // EISDIR
+    }
+
+    match VfsContext::delete(&path) {
+        Ok(_) => 0,
+        Err(VfsError::FileNotFound) => SyscallError::FileNotFound.as_isize(),
+        Err(_) => SyscallError::PermissionDenied.as_isize(),
+    }
+}
+
+/// sys_rename - rename/move a file or directory
+pub fn sys_rename(old_ptr: usize, new_ptr: usize) -> isize {
+    if old_ptr == 0 || new_ptr == 0 {
+        return SyscallError::InvalidArgument.as_isize();
+    }
+
+    let old_path = unsafe { read_user_string(old_ptr) };
+    let old_path = match old_path {
+        Some(p) => p,
+        None => return SyscallError::InvalidArgument.as_isize(),
+    };
+
+    let new_path = unsafe { read_user_string(new_ptr) };
+    let new_path = match new_path {
+        Some(p) => p,
+        None => return SyscallError::InvalidArgument.as_isize(),
+    };
+
+    use crate::fs::vfs::{VfsContext, VfsError};
+    match VfsContext::rename(&old_path, &new_path) {
+        Ok(_) => 0,
+        Err(VfsError::FileNotFound) => SyscallError::FileNotFound.as_isize(),
+        Err(VfsError::FileExists) => SyscallError::InvalidArgument.as_isize(),
+        Err(_) => SyscallError::PermissionDenied.as_isize(),
+    }
+}
+
 /// Helper: read a null-terminated string from user space (max 256 bytes)
 unsafe fn read_user_string(ptr: usize) -> Option<String> {
     let mut len = 0;
@@ -491,6 +573,40 @@ unsafe fn read_user_string(ptr: usize) -> Option<String> {
     }
     let slice = unsafe { core::slice::from_raw_parts(raw, len) };
     core::str::from_utf8(slice).ok().map(String::from)
+}
+
+/// sys_nanosleep - suspend execution for a specified time
+///
+/// req: pointer to struct { tv_sec: i64, tv_nsec: i64 }
+/// rem: pointer to struct for remaining time (ignored for now)
+pub fn sys_nanosleep(req: usize, _rem: usize) -> isize {
+    if req == 0 {
+        return SyscallError::InvalidArgument.as_isize();
+    }
+
+    // Read timespec from user space
+    let (seconds, _nsec) = unsafe {
+        let ts = req as *const [i64; 2];
+        ((*ts)[0], (*ts)[1])
+    };
+
+    if seconds < 0 {
+        return SyscallError::InvalidArgument.as_isize();
+    }
+
+    // Convert to timer ticks (~18.2 Hz PIT)
+    // 1 second ≈ 18 ticks
+    let ticks = (seconds as u64) * 18;
+
+    // Put process to sleep via scheduler
+    let mut sched = crate::process::scheduler::SCHEDULER.lock();
+    sched.sleep_ticks(ticks);
+    drop(sched);
+
+    // Trigger reschedule so another process can run
+    crate::process::scheduler::schedule();
+
+    0
 }
 
 /// sys_clock_gettime - get time from a specified clock
@@ -531,6 +647,214 @@ pub fn sys_clock_gettime(clock_id: usize, timespec_ptr: usize) -> isize {
         }
         _ => SyscallError::InvalidArgument.as_isize(),
     }
+}
+
+/// sys_pipe - create a pipe
+///
+/// pipefd: pointer to int[2], filled with [read_fd, write_fd]
+pub fn sys_pipe(pipefd: usize) -> isize {
+    if pipefd == 0 {
+        return SyscallError::InvalidArgument.as_isize();
+    }
+
+    // Create kernel pipe
+    let pipe_id = match super::pipe::create_pipe() {
+        Some(id) => id,
+        None => return SyscallError::OutOfMemory.as_isize(),
+    };
+
+    // Allocate file descriptors for both ends
+    let mut fd_table = filedesc::get_fd_table();
+
+    let read_fd = match fd_table.open_pipe_read(pipe_id) {
+        Some(fd) => fd,
+        None => {
+            super::pipe::pipe_close_read(pipe_id);
+            super::pipe::pipe_close_write(pipe_id);
+            return SyscallError::OutOfMemory.as_isize();
+        }
+    };
+
+    let write_fd = match fd_table.open_pipe_write(pipe_id) {
+        Some(fd) => fd,
+        None => {
+            fd_table.close(read_fd);
+            super::pipe::pipe_close_write(pipe_id);
+            return SyscallError::OutOfMemory.as_isize();
+        }
+    };
+
+    drop(fd_table);
+
+    // Write fds to user space
+    unsafe {
+        let fds = pipefd as *mut [i32; 2];
+        (*fds)[0] = read_fd as i32;
+        (*fds)[1] = write_fd as i32;
+    }
+
+    0
+}
+
+/// Linux x86_64 stat structure layout (144 bytes)
+/// See: man 2 stat, struct stat in <sys/stat.h>
+#[repr(C)]
+struct LinuxStat {
+    st_dev: u64,        // Device ID
+    st_ino: u64,        // Inode number
+    st_nlink: u64,      // Number of hard links
+    st_mode: u32,       // File type and mode
+    st_uid: u32,        // User ID
+    st_gid: u32,        // Group ID
+    __pad0: u32,
+    st_rdev: u64,       // Device ID (if special file)
+    st_size: i64,       // Total size in bytes
+    st_blksize: i64,    // Block size for filesystem I/O
+    st_blocks: i64,     // Number of 512B blocks allocated
+    st_atime: i64,      // Access time (seconds)
+    st_atime_nsec: i64, // Access time (nanoseconds)
+    st_mtime: i64,      // Modification time (seconds)
+    st_mtime_nsec: i64, // Modification time (nanoseconds)
+    st_ctime: i64,      // Status change time (seconds)
+    st_ctime_nsec: i64, // Status change time (nanoseconds)
+    __unused: [i64; 3],
+}
+
+// File type bits for st_mode
+const S_IFDIR: u32 = 0o040000;  // Directory
+const S_IFREG: u32 = 0o100000;  // Regular file
+
+/// Fill a LinuxStat struct for a given path
+fn fill_stat(path: &str, stat_ptr: usize) -> isize {
+    use crate::fs::vfs::VfsContext;
+
+    // Check if path exists and get info
+    let is_dir = VfsContext::is_directory(path);
+    let file_size = if is_dir {
+        0i64
+    } else {
+        // Try to read file to get size
+        let data = {
+            if let Some(ref fs) = *FAT32.lock() {
+                fs.read(path).ok()
+            } else {
+                RAMDISK.lock().read(path).ok()
+            }
+        };
+        match data {
+            Some(d) => d.len() as i64,
+            None => {
+                if !is_dir {
+                    return SyscallError::FileNotFound.as_isize();
+                }
+                0
+            }
+        }
+    };
+
+    // Get current time from RTC for timestamps
+    let dt = crate::drivers::rtc::read_datetime();
+    let now = dt.to_unix_timestamp() as i64;
+
+    let mode = if is_dir {
+        S_IFDIR | 0o755
+    } else {
+        S_IFREG | 0o644
+    };
+
+    let blocks = (file_size + 511) / 512;
+
+    // Simple inode: hash the path
+    let ino = path.bytes().fold(1u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
+
+    let stat = LinuxStat {
+        st_dev: 0,
+        st_ino: ino,
+        st_nlink: 1,
+        st_mode: mode,
+        st_uid: 0,   // root
+        st_gid: 0,   // root
+        __pad0: 0,
+        st_rdev: 0,
+        st_size: file_size,
+        st_blksize: 4096,
+        st_blocks: blocks,
+        st_atime: now,
+        st_atime_nsec: 0,
+        st_mtime: now,
+        st_mtime_nsec: 0,
+        st_ctime: now,
+        st_ctime_nsec: 0,
+        __unused: [0; 3],
+    };
+
+    unsafe {
+        let dest = stat_ptr as *mut LinuxStat;
+        core::ptr::write(dest, stat);
+    }
+
+    0
+}
+
+/// sys_stat - get file status by path
+pub fn sys_stat(path_ptr: usize, stat_ptr: usize) -> isize {
+    if path_ptr == 0 || stat_ptr == 0 {
+        return SyscallError::InvalidArgument.as_isize();
+    }
+
+    let path = unsafe { read_user_string(path_ptr) };
+    let path = match path {
+        Some(p) => p,
+        None => return SyscallError::InvalidArgument.as_isize(),
+    };
+
+    fill_stat(&path, stat_ptr)
+}
+
+/// sys_fstat - get file status by file descriptor
+pub fn sys_fstat(fd: usize, stat_ptr: usize) -> isize {
+    if stat_ptr == 0 {
+        return SyscallError::InvalidArgument.as_isize();
+    }
+
+    // stdin/stdout/stderr are character devices
+    if fd < 3 {
+        let stat = LinuxStat {
+            st_dev: 0,
+            st_ino: fd as u64,
+            st_nlink: 1,
+            st_mode: 0o020000 | 0o666, // S_IFCHR | rw-rw-rw-
+            st_uid: 0,
+            st_gid: 0,
+            __pad0: 0,
+            st_rdev: 0,
+            st_size: 0,
+            st_blksize: 1024,
+            st_blocks: 0,
+            st_atime: 0,
+            st_atime_nsec: 0,
+            st_mtime: 0,
+            st_mtime_nsec: 0,
+            st_ctime: 0,
+            st_ctime_nsec: 0,
+            __unused: [0; 3],
+        };
+        unsafe {
+            let dest = stat_ptr as *mut LinuxStat;
+            core::ptr::write(dest, stat);
+        }
+        return 0;
+    }
+
+    let fd_table = filedesc::get_fd_table();
+    let file = match fd_table.get(fd) {
+        Some(f) => f,
+        None => return SyscallError::BadFileDescriptor.as_isize(),
+    };
+    let path = file.path.clone();
+    drop(fd_table);
+
+    fill_stat(&path, stat_ptr)
 }
 
 /// sys_chdir - change current working directory
