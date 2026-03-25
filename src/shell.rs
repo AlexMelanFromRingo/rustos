@@ -476,7 +476,7 @@ impl Shell {
             "ps" => self.cmd_ps(),
             "kill" => self.cmd_kill(args),
             "grep" => self.cmd_grep(args),
-            "ls" => self.cmd_ls(),
+            "ls" => self.cmd_ls(args),
             "cat" => self.cmd_cat(args),
             "write" => self.cmd_write(args),
             "rm" => self.cmd_rm(args),
@@ -746,12 +746,18 @@ impl Shell {
         }
     }
 
-    fn cmd_ls(&self) {
+    fn cmd_ls(&self, args: &[&str]) {
         use crate::fs::vfs::VfsContext;
         use crate::vga_buffer::{WRITER, Color};
         use x86_64::instructions::interrupts;
 
-        match VfsContext::list_dir(&self.current_dir) {
+        let dir = if args.is_empty() {
+            self.current_dir.as_str()
+        } else {
+            args[0]
+        };
+
+        match VfsContext::list_dir(dir) {
             Ok(files) => {
                 if files.is_empty() {
                     println!("Empty directory");
@@ -785,7 +791,7 @@ impl Shell {
                 }
             }
             Err(_) => {
-                println!("ls: cannot list '{}'", self.current_dir);
+                println!("ls: cannot list '{}'", dir);
             }
         }
     }
@@ -1349,9 +1355,8 @@ impl Shell {
     }
 
     /// Execute command with output redirection (>, >>)
-    fn execute_with_redirection(&self, command_line: &str) {
-        use crate::fs::ramdisk::RAMDISK;
-        use crate::fs::vfs::FileSystem;
+    fn execute_with_redirection(&mut self, command_line: &str) {
+        use crate::fs::vfs::VfsContext;
 
         // Determine redirect type (> or >>)
         let (append, parts) = if command_line.contains(">>") {
@@ -1373,7 +1378,7 @@ impl Shell {
             return;
         }
 
-        // Parse command and arguments
+        // Parse and capture output using the VGA capture buffer
         let cmd_parts: Vec<&str> = command.split_whitespace().collect();
         if cmd_parts.is_empty() {
             println!("Error: No command specified");
@@ -1383,94 +1388,68 @@ impl Shell {
         let cmd = cmd_parts[0];
         let args = &cmd_parts[1..];
 
-        // Capture output based on command
-        let output = match cmd {
-            "echo" => {
-                // Echo command - join args with spaces
-                Some(args.join(" "))
-            }
-            "cat" => {
-                // Cat command - read file contents
-                if args.is_empty() {
-                    println!("Usage: cat <filename>");
-                    return;
-                }
-                let ramdisk = RAMDISK.lock();
-                match ramdisk.read(args[0]) {
-                    Ok(content) => {
-                        match core::str::from_utf8(&content) {
-                            Ok(text) => Some(text.to_string()),
-                            Err(_) => {
-                                println!("Error: File '{}' is binary", args[0]);
-                                return;
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        println!("Error: File '{}' not found", args[0]);
-                        return;
-                    }
-                }
-            }
-            "ls" => {
-                // List files
-                let ramdisk = RAMDISK.lock();
-                let files = ramdisk.list();
-                let mut output = String::new();
-                for file in files {
-                    output.push_str(&format!("{}  {} bytes\n", file.name, file.size));
-                }
-                Some(output)
-            }
+        // Capture the command's println! output
+        crate::vga_buffer::start_capture();
+        match cmd {
+            "echo" => self.cmd_echo(args),
+            "cat" => self.cmd_cat(args),
+            "ls" => self.cmd_ls(args),
+            "help" => self.cmd_help(),
+            "ps" => self.cmd_ps(),
+            "date" => self.cmd_date(),
+            "uptime" => self.cmd_uptime(),
+            "dmesg" => self.cmd_dmesg(args),
+            "printenv" | "env" => self.cmd_printenv(args),
+            "free" => self.cmd_free(args),
+            "uname" => self.cmd_uname(args),
+            "df" => self.cmd_df(),
+            "history" => self.cmd_history(),
+            "hostname" => self.cmd_hostname(args),
+            "whoami" => println!("root"),
+            "id" => println!("uid=0(root) gid=0(root) groups=0(root)"),
             _ => {
+                let _ = crate::vga_buffer::stop_capture();
                 println!("Error: Command '{}' does not support output redirection", cmd);
-                println!("Supported: echo, cat, ls");
                 return;
             }
-        };
+        }
+        let content = crate::vga_buffer::stop_capture();
 
-        if let Some(content) = output {
-            let mut ramdisk = RAMDISK.lock();
+        if content.is_empty() {
+            return;
+        }
 
-            // Handle append vs overwrite
-            let final_content = if append {
-                // Read existing content and append
-                match ramdisk.read(filename) {
-                    Ok(existing) => {
-                        match core::str::from_utf8(&existing) {
-                            Ok(existing_text) => {
-                                format!("{}{}\n", existing_text, content)
-                            }
-                            Err(_) => {
-                                println!("Error: Cannot append to binary file");
-                                return;
-                            }
+        // Handle append vs overwrite via VFS
+        let final_content = if append {
+            match VfsContext::read(filename) {
+                Ok(existing) => {
+                    match core::str::from_utf8(&existing) {
+                        Ok(existing_text) => {
+                            format!("{}{}", existing_text, content)
+                        }
+                        Err(_) => {
+                            println!("Error: Cannot append to binary file");
+                            return;
                         }
                     }
-                    Err(_) => {
-                        // File doesn't exist, just write new content
-                        format!("{}\n", content)
-                    }
                 }
-            } else {
-                // Overwrite
-                format!("{}\n", content)
-            };
-
-            match ramdisk.write(filename, final_content.as_bytes().to_vec()) {
-                Ok(_) => println!("Output written to '{}'", filename),
-                Err(_) => println!("Error writing to file '{}'", filename),
+                Err(_) => content,
             }
+        } else {
+            content
+        };
+
+        match VfsContext::write(filename, final_content.as_bytes().to_vec()) {
+            Ok(_) => println!("Output written to '{}'", filename),
+            Err(_) => println!("Error writing to file '{}'", filename),
         }
     }
 
     /// Execute a pipeline of commands
     ///
-    /// Captures the text output of the first command as a string,
-    /// then pipes it as input to the second command (grep, wc, head, tail).
-    fn execute_pipeline(&self, command_line: &str) {
-        use crate::fs::vfs::VfsContext;
-
+    /// Uses output capture to grab the text output of the first command,
+    /// then pipes it as input to the second command (grep, wc, head, tail, sort).
+    fn execute_pipeline(&mut self, command_line: &str) {
         let commands: Vec<&str> = command_line.split('|').map(|s| s.trim()).collect();
 
         if commands.len() < 2 {
@@ -1478,67 +1457,52 @@ impl Shell {
             return;
         }
 
-        let first_cmd: Vec<&str> = commands[0].split_whitespace().collect();
         let second_cmd: Vec<&str> = commands[1].split_whitespace().collect();
 
-        if first_cmd.is_empty() || second_cmd.is_empty() {
+        if commands[0].trim().is_empty() || second_cmd.is_empty() {
             println!("Error: Invalid pipe syntax");
             return;
         }
 
-        // Step 1: Capture output from first command
-        let output = match first_cmd[0] {
-            "cat" => {
-                if first_cmd.len() < 2 {
-                    println!("cat: missing filename");
-                    return;
-                }
-                match VfsContext::read(first_cmd[1]) {
-                    Ok(data) => match core::str::from_utf8(&data) {
-                        Ok(s) => String::from(s),
-                        Err(_) => { println!("Error: binary file"); return; }
-                    },
-                    Err(_) => { println!("cat: {}: not found", first_cmd[1]); return; }
-                }
+        // Step 1: Capture output from first command using VGA capture buffer
+        crate::vga_buffer::start_capture();
+
+        // Parse and execute the first command normally — output goes to capture buffer
+        let first_parts: Vec<&str> = commands[0].split_whitespace().collect();
+        if !first_parts.is_empty() {
+            let cmd = first_parts[0];
+            let args = &first_parts[1..];
+            match cmd {
+                "help" => self.cmd_help(),
+                "echo" => self.cmd_echo(args),
+                "uptime" => self.cmd_uptime(),
+                "meminfo" => self.cmd_meminfo(),
+                "version" => self.cmd_version(),
+                "history" => self.cmd_history(),
+                "ps" => self.cmd_ps(),
+                "ls" => self.cmd_ls(args),
+                "cat" => self.cmd_cat(args),
+                "date" => self.cmd_date(),
+                "dmesg" => self.cmd_dmesg(args),
+                "uname" => self.cmd_uname(args),
+                "free" => self.cmd_free(args),
+                "printenv" | "env" => self.cmd_printenv(args),
+                "df" => self.cmd_df(),
+                "pwd" => self.cmd_pwd(),
+                "hostname" => self.cmd_hostname(args),
+                "whoami" => println!("root"),
+                "id" => println!("uid=0(root) gid=0(root) groups=0(root)"),
+                "top" => self.cmd_top(),
+                "kill" => self.cmd_kill(args),
+                _ => println!("Pipe: '{}' cannot produce output", cmd),
             }
-            "ls" => {
-                match VfsContext::list_dir(&self.current_dir) {
-                    Ok(files) => {
-                        let mut out = String::new();
-                        for f in &files {
-                            if f.is_directory {
-                                out.push_str(&f.name);
-                                out.push('/');
-                            } else {
-                                out.push_str(&f.name);
-                            }
-                            out.push('\n');
-                        }
-                        out
-                    }
-                    Err(_) => { println!("ls: error"); return; }
-                }
-            }
-            "echo" => {
-                let mut out = first_cmd[1..].join(" ");
-                out.push('\n');
-                out
-            }
-            "ps" => {
-                use crate::process::PROCESS_MANAGER;
-                use core::fmt::Write;
-                let pm = PROCESS_MANAGER.lock();
-                let mut out = String::from("  PID STATE\n");
-                for proc in pm.processes() {
-                    let _ = writeln!(out, "{:5} {}", proc.pid, proc.state.as_str());
-                }
-                out
-            }
-            _ => {
-                println!("Pipe: '{}' cannot produce output", first_cmd[0]);
-                return;
-            }
-        };
+        }
+
+        let output = crate::vga_buffer::stop_capture();
+
+        if output.is_empty() {
+            return;
+        }
 
         // Step 2: Feed output through second command
         match second_cmd[0] {

@@ -262,15 +262,35 @@ macro_rules! println {
     ($($arg:tt)*) => ($crate::print!("{}\n", format_args!($($arg)*)));
 }
 
+/// Global output capture buffer for shell pipelines.
+/// When active, _print() writes to this buffer instead of VGA/serial.
+static CAPTURE_BUFFER: spin::Mutex<Option<alloc::string::String>> = spin::Mutex::new(None);
+
+/// Start capturing print output into a string buffer.
+pub fn start_capture() {
+    *CAPTURE_BUFFER.lock() = Some(alloc::string::String::new());
+}
+
+/// Stop capturing and return the captured output.
+pub fn stop_capture() -> alloc::string::String {
+    CAPTURE_BUFFER.lock().take().unwrap_or_default()
+}
+
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
     use x86_64::instructions::interrupts;
 
     interrupts::without_interrupts(|| {
-        WRITER.lock().write_fmt(args).unwrap();
-        // Mirror output to serial port for testing/debugging
-        crate::serial::_print(args);
+        let mut capture = CAPTURE_BUFFER.lock();
+        if let Some(ref mut buf) = *capture {
+            let _ = buf.write_fmt(args);
+        } else {
+            drop(capture);
+            WRITER.lock().write_fmt(args).unwrap();
+            // Mirror output to serial port for testing/debugging
+            crate::serial::_print(args);
+        }
     });
 }
 
