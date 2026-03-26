@@ -19,6 +19,9 @@ entry_point!(kernel_main);
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
+    // Use serial output to avoid VGA WRITER deadlock if panic occurs while WRITER is held
+    rustos::serial_println!("KERNEL PANIC: {}", info);
+    // Also try VGA (best-effort, may deadlock if WRITER is already locked)
     println!("{}", info);
     rustos::hlt_loop();
 }
@@ -103,16 +106,14 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 async fn status_task() {
     use rustos::task::timer::Timer;
 
-    let mut counter = 0u64;
-
     loop {
-        // Wait ~3 seconds (assuming ~18.2 Hz timer)
-        Timer::new(54).await;
+        // Wait ~60 seconds (assuming ~18.2 Hz timer)
+        Timer::new(1092).await;
 
-        counter += 1;
-        if counter % 5 == 0 {
-            println!("[Info] System running... ({} updates)", counter);
-        }
+        // Periodic system status
+        let ticks = rustos::task::timer::current_ticks();
+        let uptime = ticks / 18;
+        println!("[uptime: {}s]", uptime);
     }
 }
 

@@ -1,14 +1,15 @@
 /// User space memory management
 ///
-/// This module provides identity-mapped memory regions for user space programs.
+/// This module provides memory regions for user space programs.
 /// User space uses the lower half of virtual address space (0x0000_0000 - 0x7FFF_FFFF).
+/// Pages are backed by freshly allocated physical frames (not identity-mapped).
 
 use x86_64::{
     structures::paging::{
-        Page, PhysFrame, Mapper, Size4KiB, PageTableFlags, FrameAllocator,
+        Page, Mapper, Size4KiB, PageTableFlags, FrameAllocator,
         mapper::MapToError,
     },
-    VirtAddr, PhysAddr,
+    VirtAddr,
 };
 
 /// User space memory region
@@ -43,15 +44,16 @@ where
         | PageTableFlags::WRITABLE
         | PageTableFlags::USER_ACCESSIBLE;
 
-    // Map all pages in user space region
+    // Map all pages in user space region using freshly allocated frames.
+    // We do NOT identity-map because physical addresses in this range may
+    // already be in use by the kernel (heap, page tables, etc.).
     let start_page = Page::containing_address(VirtAddr::new(USER_SPACE_START));
     let end_page = Page::containing_address(VirtAddr::new(USER_SPACE_END - 1));
 
     for page in Page::range_inclusive(start_page, end_page) {
-        // Identity map: virtual address = physical address
-        let frame = PhysFrame::containing_address(PhysAddr::new(page.start_address().as_u64()));
+        let frame = frame_allocator.allocate_frame()
+            .ok_or(MapToError::FrameAllocationFailed)?;
 
-        // Map the page
         unsafe {
             mapper.map_to(page, frame, flags, frame_allocator)?
                 .flush();

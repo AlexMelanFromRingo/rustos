@@ -187,8 +187,189 @@ fn syscall_exit(code: usize) -> ! {
 /// Get size of user_mode_demo function
 /// This is approximate - we use a fixed size for now
 pub fn get_demo_size() -> usize {
-    // The function is small, 4KB should be enough
     4096
+}
+
+/// User program A: prints messages in a loop, then exits.
+///
+/// Written as a naked function to be fully position-independent.
+/// All data is constructed from 64-bit immediates (no RIP-relative .rodata refs).
+/// This is critical because the code is copied to user space at a different address.
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn user_program_a() {
+    core::arch::naked_asm!(
+        // Print "[A] Hello!\n" (11 bytes)
+        "sub rsp, 16",
+        "movabs rax, 0x6f6c6c6548205d41", // "A] Hello" (little-endian)
+        "mov byte ptr [rsp], 0x5b",        // '['
+        "mov qword ptr [rsp+1], rax",
+        "mov byte ptr [rsp+9], 0x21",      // '!'
+        "mov byte ptr [rsp+10], 0x0a",     // '\n'
+        "mov rax, 1",
+        "mov rdi, 1",
+        "mov rsi, rsp",
+        "mov rdx, 11",
+        "syscall",
+        "add rsp, 16",
+
+        // Loop 5 times
+        "xor r12, r12",
+        "2:",
+        "cmp r12, 5",
+        "jge 3f",
+
+        // Print "[A] tick\n" (9 bytes)
+        "sub rsp, 16",
+        "movabs rax, 0x6b636974205d415b", // "[A] tick"
+        "mov qword ptr [rsp], rax",
+        "mov byte ptr [rsp+8], 0x0a",
+        "mov rax, 1",
+        "mov rdi, 1",
+        "mov rsi, rsp",
+        "mov rdx, 9",
+        "syscall",
+        "add rsp, 16",
+
+        // Busy-wait ~3M iterations
+        "mov r13, 3000000",
+        "4:",
+        "dec r13",
+        "jnz 4b",
+
+        "inc r12",
+        "jmp 2b",
+
+        "3:",
+        // Print "[A] done\n" (9 bytes)
+        "sub rsp, 16",
+        "movabs rax, 0x656e6f64205d415b", // "[A] done"
+        "mov qword ptr [rsp], rax",
+        "mov byte ptr [rsp+8], 0x0a",
+        "mov rax, 1",
+        "mov rdi, 1",
+        "mov rsi, rsp",
+        "mov rdx, 9",
+        "syscall",
+        "add rsp, 16",
+
+        // exit(0)
+        "mov rax, 60",
+        "xor rdi, rdi",
+        "syscall",
+        "ud2",
+    );
+}
+
+/// User program B: prints messages in a loop, then exits.
+/// Naked function — fully position-independent, all data from immediates.
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn user_program_b() {
+    core::arch::naked_asm!(
+        // Print "[B] Hello!\n" (11 bytes)
+        "sub rsp, 16",
+        "movabs rax, 0x6f6c6c6548205d42", // "B] Hello"
+        "mov byte ptr [rsp], 0x5b",
+        "mov qword ptr [rsp+1], rax",
+        "mov byte ptr [rsp+9], 0x21",
+        "mov byte ptr [rsp+10], 0x0a",
+        "mov rax, 1",
+        "mov rdi, 1",
+        "mov rsi, rsp",
+        "mov rdx, 11",
+        "syscall",
+        "add rsp, 16",
+
+        // Loop 5 times
+        "xor r12, r12",
+        "2:",
+        "cmp r12, 5",
+        "jge 3f",
+
+        // Print "[B] tick\n" (9 bytes)
+        "sub rsp, 16",
+        "movabs rax, 0x6b636974205d425b", // "[B] tick"
+        "mov qword ptr [rsp], rax",
+        "mov byte ptr [rsp+8], 0x0a",
+        "mov rax, 1",
+        "mov rdi, 1",
+        "mov rsi, rsp",
+        "mov rdx, 9",
+        "syscall",
+        "add rsp, 16",
+
+        // Busy-wait
+        "mov r13, 3000000",
+        "4:",
+        "dec r13",
+        "jnz 4b",
+
+        "inc r12",
+        "jmp 2b",
+
+        "3:",
+        // Print "[B] done\n" (9 bytes)
+        "sub rsp, 16",
+        "movabs rax, 0x656e6f64205d425b", // "[B] done"
+        "mov qword ptr [rsp], rax",
+        "mov byte ptr [rsp+8], 0x0a",
+        "mov rax, 1",
+        "mov rdi, 1",
+        "mov rsi, rsp",
+        "mov rdx, 9",
+        "syscall",
+        "add rsp, 16",
+
+        // exit(0)
+        "mov rax, 60",
+        "xor rdi, rdi",
+        "syscall",
+        "ud2",
+    );
+}
+
+/// Spawn two user processes and run them with preemptive scheduling.
+/// Returns after both processes have exited.
+pub fn spawn_preemptive_test() {
+    use crate::memory::user_allocator;
+    use crate::process::scheduler;
+
+    // Disable interrupts during setup to avoid deadlocks with timer ISR.
+    // Also avoid any println! between setup and idle loop — the serial/VGA
+    // locks can deadlock with the timer handler under certain conditions.
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let prog_a_ptr = user_program_a as *const () as *const u8;
+        let user_a_addr = unsafe { copy_to_user_space(prog_a_ptr, 4096) }
+            .expect("Failed to allocate user space for program A");
+        let (stack_a_bottom, stack_a_size) = user_allocator::allocate_user_stack()
+            .expect("Failed to allocate stack for A");
+        let stack_a_top = stack_a_bottom.as_u64() + stack_a_size;
+
+        let prog_b_ptr = user_program_b as *const () as *const u8;
+        let user_b_addr = unsafe { copy_to_user_space(prog_b_ptr, 4096) }
+            .expect("Failed to allocate user space for program B");
+        let (stack_b_bottom, stack_b_size) = user_allocator::allocate_user_stack()
+            .expect("Failed to allocate stack for B");
+        let stack_b_top = stack_b_bottom.as_u64() + stack_b_size;
+
+        scheduler::spawn_user(user_a_addr.as_u64(), stack_a_top);
+        scheduler::spawn_user(user_b_addr.as_u64(), stack_b_top);
+    });
+
+    // Enter idle — timer ISR will dispatch user processes.
+    // IMPORTANT: Do NOT call println! here — go straight to HLT loop.
+    crate::interrupts::enter_preemptive_idle();
+
+    // Post-test cleanup: reset TSS.RSP0 to boot privilege stack and
+    // remove terminated/zombie processes from the process table.
+    unsafe {
+        let boot_rsp0 = core::ptr::addr_of!(crate::gdt::BOOT_PRIVILEGE_STACK) as u64 + 4096 * 5;
+        crate::gdt::set_tss_rsp0(boot_rsp0);
+    }
+    crate::process::PROCESS_MANAGER.lock().cleanup_dead_processes();
+
+    crate::println!("All user processes finished. Returned to shell.");
 }
 
 /// Jump to Ring 3 with arbitrary entry point and stack

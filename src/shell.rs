@@ -256,7 +256,7 @@ impl Shell {
                 "grep", "head", "hello", "help", "history", "hostname", "id",
                 "kill", "less", "ls", "meminfo", "mkdir", "more", "mount", "mv",
                 "printenv", "ps", "pwd", "reboot", "renice", "rm", "rmdir",
-                "shutdown", "sleep", "stat", "tail", "time", "top", "touch",
+                "shutdown", "sleep", "spawn", "stat", "tail", "time", "top", "touch",
                 "tree", "umount", "uname", "unalias", "unset", "uptime",
                 "usermode", "version", "wc", "which", "whoami", "write",
             ];
@@ -512,6 +512,7 @@ impl Shell {
             "mkdir" => self.cmd_mkdir(args),
             "rmdir" => self.cmd_rmdir(args),
             "usermode" => self.cmd_usermode(),
+            "spawn" => self.cmd_spawn(args),
             "export" => self.cmd_export(args),
             "printenv" | "env" => self.cmd_printenv(args),
             "unset" => self.cmd_unset(args),
@@ -2246,6 +2247,16 @@ impl Shell {
 
         // Should never reach here - user_mode_demo calls sys_exit
         println!("ERROR: Returned from user mode unexpectedly!");
+    }
+
+    fn cmd_spawn(&mut self, args: &[&str]) {
+        if args.is_empty() || args[0] == "test" {
+            // Spawn preemptive multitasking test
+            crate::userspace::spawn_preemptive_test();
+        } else {
+            println!("Usage: spawn test");
+            println!("  test  — Run two user processes with preemptive scheduling");
+        }
     }
 
     /// Set or display environment variables

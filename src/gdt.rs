@@ -100,7 +100,7 @@ static TSS_STORAGE: TssStorage = TssStorage(core::cell::UnsafeCell::new(TaskStat
 static mut IST_STACK: [u8; 4096 * 5] = [0; 4096 * 5];
 
 /// Boot-time privilege stack (used as initial RSP0 before any process runs)
-static mut BOOT_PRIVILEGE_STACK: [u8; 4096 * 5] = [0; 4096 * 5];
+pub static mut BOOT_PRIVILEGE_STACK: [u8; 4096 * 5] = [0; 4096 * 5];
 
 /// Initialize TSS fields. Called once at boot before GDT.load().
 fn init_tss() {

@@ -4,6 +4,7 @@ use lazy_static::lazy_static;
 use crate::println;
 use pic8259::ChainedPics;
 use spin;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 pub const PIC_1_OFFSET: u8 = 32;
 pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
@@ -65,6 +66,35 @@ pub fn init_pics() {
     unsafe {
         PICS.lock().initialize();
         PICS.lock().write_masks(0, 0);
+    }
+}
+
+// =============================================================================
+// Preemptive scheduling support — kernel idle ↔ user mode switching
+// =============================================================================
+
+/// When true, the timer ISR will dispatch ready user processes even from kernel mode.
+/// Set by `enter_preemptive_idle()`, cleared when all user processes finish.
+pub static PREEMPTIVE_MODE: AtomicBool = AtomicBool::new(false);
+
+/// Saved kernel TrapFrame for returning to shell after all user processes exit.
+/// Only valid when PREEMPTIVE_MODE is true.
+static mut KERNEL_RETURN_FRAME: crate::process::context::TrapFrame = crate::process::context::TrapFrame::empty();
+
+/// Whether KERNEL_RETURN_FRAME has been saved (only save once from the idle loop).
+static KERNEL_FRAME_SAVED: AtomicBool = AtomicBool::new(false);
+
+/// Enter preemptive idle loop. Called from shell after spawning user processes.
+/// Saves kernel state and enters HLT loop; timer ISR dispatches user processes.
+/// Returns when all user processes have exited.
+pub fn enter_preemptive_idle() {
+    KERNEL_FRAME_SAVED.store(false, Ordering::SeqCst);
+    PREEMPTIVE_MODE.store(true, Ordering::SeqCst);
+
+    // HLT loop — timer interrupts wake us, ISR handles user process dispatch.
+    // When PREEMPTIVE_MODE is cleared (all processes done), we break out.
+    while PREEMPTIVE_MODE.load(Ordering::SeqCst) {
+        x86_64::instructions::hlt();
     }
 }
 
@@ -158,10 +188,58 @@ extern "C" fn timer_preempt_handler(frame: *mut crate::process::context::TrapFra
     let from_user = trap.cs & 3 == 3;
 
     if !from_user {
-        // Kernel mode — just run scheduler tick (for sleep wakeups, signal delivery)
-        // No context switch in kernel mode (the shell's async loop handles its own scheduling)
+        // Kernel mode — run scheduler tick (sleep wakeups, signal delivery)
         let mut sched = SCHEDULER.lock();
         sched.tick_kernel_only();
+
+        // If preemptive mode is active and there are user processes ready, dispatch one
+        if PREEMPTIVE_MODE.load(Ordering::Relaxed) {
+            let mut pm = PROCESS_MANAGER.lock();
+            let ready = sched.ready_count();
+            if pm.current_pid.is_none() && ready > 0 {
+                // Save the kernel idle frame ONLY on first dispatch —
+                // subsequent dispatches from sys_exit's HLT must NOT
+                // overwrite it, or we'll return to the wrong stack.
+                if !KERNEL_FRAME_SAVED.load(Ordering::Relaxed) {
+                    unsafe { KERNEL_RETURN_FRAME = *frame; }
+                    KERNEL_FRAME_SAVED.store(true, Ordering::Relaxed);
+                }
+
+                // Pick the next user process (use _with_pm to avoid re-locking PM)
+                if let Some(next_pid) = sched.dequeue_next_with_pm(&pm) {
+                    let valid = pm.get_process(next_pid)
+                        .map(|p| p.is_user && p.has_trap_frame)
+                        .unwrap_or(false);
+                    if valid {
+                        let next = pm.get_process_mut(next_pid).unwrap();
+                        next.state = crate::process::ProcessState::Running;
+                        let kstack_top = next.kernel_stack_top;
+                        let tf_ptr = &mut next.trap_frame as *mut crate::process::context::TrapFrame;
+                        pm.current_pid = Some(next_pid);
+                        if kstack_top != 0 {
+                            unsafe { crate::gdt::set_tss_rsp0(kstack_top); }
+                        }
+                        drop(pm);
+                        drop(sched);
+                        return tf_ptr;
+                    }
+                    sched.enqueue(next_pid);
+                }
+                drop(pm);
+            } else if pm.current_pid.is_none() && ready == 0 {
+                drop(pm);
+                drop(sched);
+                PREEMPTIVE_MODE.store(false, Ordering::SeqCst);
+                KERNEL_FRAME_SAVED.store(false, Ordering::SeqCst);
+                // Return the saved kernel idle frame, not the current frame
+                // (which may be from sys_exit's HLT on the SYSCALL stack).
+                let kf = core::ptr::addr_of_mut!(KERNEL_RETURN_FRAME);
+                return kf;
+            } else {
+                drop(pm);
+            }
+        }
+
         drop(sched);
         return frame; // Return same frame — no switch
     }

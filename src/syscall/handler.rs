@@ -144,14 +144,17 @@ pub fn sys_write(fd: usize, buf_ptr: usize, count: usize) -> isize {
                 core::slice::from_raw_parts(buf_ptr as *const u8, count)
             };
 
-            // Print to console
-            match core::str::from_utf8(slice) {
-                Ok(s) => crate::print!("{}", s),
-                Err(_) => {
-                    // Print as hex if not UTF-8
-                    for byte in slice {
-                        crate::print!("{:02x}", byte);
-                    }
+            // Write to serial directly (avoids VGA → serial lock nesting deadlock
+            // that occurs when called from SYSCALL handler with IF=0)
+            use x86_64::instructions::port::Port;
+            for &byte in slice {
+                unsafe {
+                    // Wait for UART TX buffer ready
+                    let mut status_port = Port::<u8>::new(0x3F8 + 5);
+                    while status_port.read() & 0x20 == 0 {}
+                    // Write byte
+                    let mut data_port = Port::<u8>::new(0x3F8);
+                    data_port.write(byte);
                 }
             }
 
@@ -257,21 +260,36 @@ pub fn sys_close(fd: usize) -> isize {
 
 /// sys_exit - terminate current process
 pub fn sys_exit(exit_code: usize) -> isize {
-    println!("\nProcess exited with code: {}", exit_code);
-
-    // Exit current process (becomes zombie for parent to reap)
     let mut pm = PROCESS_MANAGER.lock();
-    if let Some(pid) = pm.current_pid {
+    let pid = pm.current_pid;
+    if let Some(pid) = pid {
         pm.exit(pid, exit_code as i32);
-        pm.current_pid = None;  // Clear current process
+        pm.current_pid = None;
     }
     drop(pm);
 
-    // Yield to scheduler - this should switch to another process
-    crate::process::scheduler::schedule();
+    // Also dequeue from scheduler
+    if let Some(pid) = pid {
+        crate::process::scheduler::SCHEDULER.lock().dequeue(pid);
+    }
 
-    // If we reach here, there are no other processes to run
-    // Restore kernel context and return to shell
+    // If in preemptive mode, enable interrupts and enter HLT loop.
+    // The timer ISR will dispatch the next user process or clear
+    // PREEMPTIVE_MODE when none remain, returning to the original
+    // idle loop via KERNEL_RETURN_FRAME.
+    //
+    // IMPORTANT: The SYSCALL instruction clears IF via SFMASK,
+    // so we must re-enable interrupts before HLT.
+    if crate::interrupts::PREEMPTIVE_MODE.load(core::sync::atomic::Ordering::SeqCst) {
+        // Enable interrupts so timer ISR can fire and dispatch next process
+        x86_64::instructions::interrupts::enable();
+        loop {
+            x86_64::instructions::hlt();
+        }
+    }
+
+    // Non-preemptive: try cooperative schedule, then restore kernel context
+    crate::process::scheduler::schedule();
     unsafe {
         crate::userspace::restore_kernel_context_and_return();
     }

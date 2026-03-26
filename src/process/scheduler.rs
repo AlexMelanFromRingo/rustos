@@ -54,6 +54,29 @@ impl Scheduler {
         self.ready_queue.retain(|&p| p != pid);
     }
 
+    /// Get and remove the next process from the ready queue (public for ISR use).
+    /// Uses an already-locked ProcessManager to avoid deadlock in ISR context.
+    pub fn dequeue_next_with_pm(&mut self, pm: &crate::process::ProcessManager) -> Option<Pid> {
+        if self.ready_queue.is_empty() {
+            return None;
+        }
+        let mut best_idx = 0;
+        let mut best_nice: i8 = 19;
+        for (i, &pid) in self.ready_queue.iter().enumerate() {
+            let nice = pm.get_process(pid).map(|p| p.nice).unwrap_or(19);
+            if nice < best_nice {
+                best_nice = nice;
+                best_idx = i;
+            }
+        }
+        self.ready_queue.remove(best_idx)
+    }
+
+    /// Get and remove the next process from the ready queue (locks PM internally).
+    pub fn dequeue_next(&mut self) -> Option<Pid> {
+        self.next_process()
+    }
+
     /// Get the next process to run (priority-aware round-robin)
     fn next_process(&mut self) -> Option<Pid> {
         if self.ready_queue.is_empty() {
@@ -310,11 +333,21 @@ pub fn spawn(entry_point: usize, stack_size: usize) -> Pid {
     pid
 }
 
-/// Spawn a user-mode process for preemptive scheduling
+/// Spawn a user-mode process for preemptive scheduling.
+/// Allocates kernel stack and creates process struct BEFORE locking PM
+/// to avoid deadlock with timer ISR (which also locks PM).
 pub fn spawn_user(entry_point: u64, user_stack_top: u64) -> Pid {
-    let mut pm = PROCESS_MANAGER.lock();
-    let pid = pm.create_user_process(entry_point, user_stack_top, None);
-    drop(pm);
+    // Allocate PID under brief PM lock
+    let pid = {
+        let mut pm = PROCESS_MANAGER.lock();
+        let pid = pm.next_pid;
+        pm.next_pid += 1;
+        pid
+    };
+    // Build process struct WITHOUT holding PM (allocates kernel stack on heap)
+    let process = crate::process::Process::new_user(pid, None, entry_point, user_stack_top);
+    // Insert into PM under brief lock
+    PROCESS_MANAGER.lock().insert_process(process);
     SCHEDULER.lock().enqueue(pid);
     pid
 }

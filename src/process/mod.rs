@@ -229,7 +229,7 @@ pub mod signal {
 pub struct ProcessManager {
     processes: Vec<Process>,
     pub current_pid: Option<Pid>,
-    next_pid: Pid,
+    pub next_pid: Pid,
 }
 
 impl ProcessManager {
@@ -257,6 +257,11 @@ impl ProcessManager {
         let process = Process::new_user(pid, parent_pid, entry_point, user_stack_top);
         self.processes.push(process);
         pid
+    }
+
+    /// Insert a pre-built process into the process table.
+    pub fn insert_process(&mut self, process: Process) {
+        self.processes.push(process);
     }
 
     pub fn get_process_mut(&mut self, pid: Pid) -> Option<&mut Process> {
@@ -481,6 +486,15 @@ impl ProcessManager {
 
             None
         }
+    }
+
+    /// Remove all terminated and zombie processes from the process list.
+    /// Called after preemptive tests to clean up stale entries.
+    pub fn cleanup_dead_processes(&mut self) {
+        self.processes.retain(|p| {
+            p.state != ProcessState::Terminated && p.state != ProcessState::Zombie
+        });
+        self.current_pid = None;
     }
 
     pub fn get_children(&self, parent_pid: Pid) -> Vec<Pid> {
