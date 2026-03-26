@@ -13,7 +13,7 @@ Reference architecture: Linux/Unix-like.
 - [x] Add frame deallocation support ✅
 - [ ] Implement slab allocator for kernel objects (replace fixed-size block allocator)
 - [ ] Add kernel virtual memory allocator (vmalloc equivalent)
-- [ ] Guard pages for stack overflow detection
+- [x] Guard pages for kernel stack overflow detection ✅
 - [ ] Per-process address spaces (separate page tables per process)
 
 ### 1.2 Process Management
