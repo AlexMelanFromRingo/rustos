@@ -231,8 +231,8 @@ pub unsafe extern "C" fn user_program_a() {
         "syscall",
         "add rsp, 16",
 
-        // Busy-wait ~3M iterations
-        "mov r13, 3000000",
+        // Busy-wait ~50M iterations (long enough for timer preemption)
+        "mov r13, 50000000",
         "4:",
         "dec r13",
         "jnz 4b",
