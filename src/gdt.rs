@@ -12,36 +12,63 @@ const IA32_STAR: u32 = 0xC000_0081;
 const IA32_LSTAR: u32 = 0xC000_0082;
 const IA32_FMASK: u32 = 0xC000_0084;
 
-/// Per-process kernel stack size (16 KiB)
+/// Per-process kernel stack size (16 KiB = 4 pages)
 pub const KERNEL_STACK_SIZE: usize = 4096 * 4;
+
+/// Number of pages per kernel stack (not counting guard page)
+const STACK_PAGES: usize = KERNEL_STACK_SIZE / 4096;
 
 /// Maximum concurrent processes with kernel stacks
 pub const MAX_PROCESSES: usize = 64;
 
-/// Kernel stack pool — heap-allocated to avoid BSS bloat that overlaps user space.
+/// Virtual address base for kernel stack region.
+/// Each slot occupies (1 guard + STACK_PAGES) pages.
+const KSTACK_VIRT_BASE: u64 = 0x5555_5555_0000;
+
+/// Total pages per slot: 1 guard + STACK_PAGES
+const PAGES_PER_SLOT: usize = 1 + STACK_PAGES;
+
+/// Kernel stack pool — uses virtual memory pages with guard pages.
+/// Each slot has an unmapped guard page at the bottom, then STACK_PAGES
+/// of mapped memory. Stack overflow hits the guard page → page fault.
 struct KernelStackPool {
-    /// Each slot: Option<Vec<u8>> holding the stack memory
-    stacks: [Option<alloc::vec::Vec<u8>>; MAX_PROCESSES],
-    /// Cached stack top addresses
-    tops: [u64; MAX_PROCESSES],
+    /// Whether each slot is allocated
+    in_use: [bool; MAX_PROCESSES],
 }
 
 impl KernelStackPool {
     fn new() -> Self {
         KernelStackPool {
-            stacks: core::array::from_fn(|_| None),
-            tops: [0u64; MAX_PROCESSES],
+            in_use: [false; MAX_PROCESSES],
         }
+    }
+
+    /// Virtual address of the guard page for a given slot
+    fn slot_guard_addr(slot: usize) -> u64 {
+        KSTACK_VIRT_BASE + (slot as u64) * (PAGES_PER_SLOT as u64) * 4096
+    }
+
+    /// Virtual address of the stack bottom (first usable page) for a given slot
+    fn slot_stack_bottom(slot: usize) -> u64 {
+        Self::slot_guard_addr(slot) + 4096 // skip guard page
+    }
+
+    /// Virtual address of the stack top for a given slot
+    fn slot_stack_top(slot: usize) -> u64 {
+        Self::slot_stack_bottom(slot) + KERNEL_STACK_SIZE as u64
     }
 
     fn allocate(&mut self) -> Option<(u64, u64, usize)> {
         for i in 0..MAX_PROCESSES {
-            if self.stacks[i].is_none() {
-                let stack = alloc::vec![0u8; KERNEL_STACK_SIZE];
-                let bottom = stack.as_ptr() as u64;
-                let top = bottom + KERNEL_STACK_SIZE as u64;
-                self.tops[i] = top;
-                self.stacks[i] = Some(stack);
+            if !self.in_use[i] {
+                // Map stack pages (skip guard page — leave it unmapped)
+                let mapped = self.map_stack_pages(i);
+                if !mapped {
+                    return None;
+                }
+                self.in_use[i] = true;
+                let bottom = Self::slot_stack_bottom(i);
+                let top = Self::slot_stack_top(i);
                 return Some((bottom, top, i));
             }
         }
@@ -49,14 +76,61 @@ impl KernelStackPool {
     }
 
     fn free(&mut self, slot: usize) {
-        if slot < MAX_PROCESSES {
-            self.stacks[slot] = None;
-            self.tops[slot] = 0;
+        if slot < MAX_PROCESSES && self.in_use[slot] {
+            self.unmap_stack_pages(slot);
+            self.in_use[slot] = false;
         }
     }
 
     fn stack_top(&self, slot: usize) -> u64 {
-        self.tops[slot]
+        Self::slot_stack_top(slot)
+    }
+
+    /// Map the stack pages for a slot (guard page is NOT mapped)
+    fn map_stack_pages(&self, slot: usize) -> bool {
+        use x86_64::structures::paging::{Page, PageTableFlags, Mapper, Size4KiB, FrameAllocator};
+
+        let stack_bottom = Self::slot_stack_bottom(slot);
+        let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+
+        // Get mapper and frame allocator
+        let mut mapper = unsafe { crate::memory::get_mapper() };
+
+        crate::memory::with_frame_allocator(|alloc| {
+            for page_idx in 0..STACK_PAGES {
+                let virt = stack_bottom + (page_idx as u64) * 4096;
+                let page = Page::<Size4KiB>::containing_address(VirtAddr::new(virt));
+                let frame = alloc.allocate_frame().expect("out of physical frames for kernel stack");
+                unsafe {
+                    mapper.map_to(page, frame, flags, alloc)
+                        .expect("failed to map kernel stack page")
+                        .flush();
+                }
+            }
+            // Zero the stack memory
+            unsafe {
+                core::ptr::write_bytes(stack_bottom as *mut u8, 0, KERNEL_STACK_SIZE);
+            }
+        }).is_some()
+    }
+
+    /// Unmap and deallocate the stack pages for a slot
+    fn unmap_stack_pages(&self, slot: usize) {
+        use x86_64::structures::paging::{Page, Mapper, Size4KiB};
+
+        let stack_bottom = Self::slot_stack_bottom(slot);
+        let mut mapper = unsafe { crate::memory::get_mapper() };
+
+        crate::memory::with_frame_allocator(|alloc| {
+            for page_idx in 0..STACK_PAGES {
+                let virt = stack_bottom + (page_idx as u64) * 4096;
+                let page = Page::<Size4KiB>::containing_address(VirtAddr::new(virt));
+                if let Ok((frame, flush)) = mapper.unmap(page) {
+                    flush.flush();
+                    unsafe { alloc.deallocate_frame(frame); }
+                }
+            }
+        });
     }
 }
 
@@ -73,11 +147,12 @@ where F: FnOnce(&mut KernelStackPool) -> R {
 }
 
 /// Allocate a per-process kernel stack. Returns (stack_top, slot_index).
+/// The stack has an unmapped guard page at the bottom for overflow detection.
 pub fn allocate_kernel_stack() -> Option<(u64, usize)> {
     with_pool(|pool| pool.allocate().map(|(_, top, slot)| (top, slot)))
 }
 
-/// Free a per-process kernel stack.
+/// Free a per-process kernel stack and return its pages to the frame allocator.
 pub fn free_kernel_stack(slot: usize) {
     with_pool(|pool| pool.free(slot));
 }
@@ -85,6 +160,22 @@ pub fn free_kernel_stack(slot: usize) {
 /// Get the stack top for a kernel stack slot.
 pub fn kernel_stack_top(slot: usize) -> u64 {
     with_pool(|pool| pool.stack_top(slot))
+}
+
+/// Check if a virtual address falls within a kernel stack guard page.
+pub fn is_guard_page_address(addr: u64) -> bool {
+    if addr < KSTACK_VIRT_BASE {
+        return false;
+    }
+    let offset = addr - KSTACK_VIRT_BASE;
+    let slot_size = (PAGES_PER_SLOT as u64) * 4096;
+    let total_region = slot_size * MAX_PROCESSES as u64;
+    if offset >= total_region {
+        return false;
+    }
+    // Within a slot, the guard page is the first page (offset 0..4095)
+    let offset_in_slot = offset % slot_size;
+    offset_in_slot < 4096
 }
 
 // =============================================================================

@@ -4,10 +4,38 @@ use x86_64::{
     PhysAddr,
 };
 use bootloader::bootinfo::{MemoryMap, MemoryRegionType};
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 pub mod userspace;
 pub mod user_allocator;
+
+/// Saved physical memory offset for creating mappers at runtime
+static PHYS_MEM_OFFSET: AtomicU64 = AtomicU64::new(0);
+
+/// Global frame allocator, available after boot initialization
+static FRAME_ALLOCATOR: spin::Mutex<Option<BitmapFrameAllocator>> = spin::Mutex::new(None);
+
+/// Store the frame allocator globally so it can be used at runtime
+/// (e.g., for mapping guard pages, per-process page tables).
+pub fn store_frame_allocator(alloc: BitmapFrameAllocator) {
+    *FRAME_ALLOCATOR.lock() = Some(alloc);
+}
+
+/// Run a closure with exclusive access to the global frame allocator.
+pub fn with_frame_allocator<F, R>(f: F) -> Option<R>
+where F: FnOnce(&mut BitmapFrameAllocator) -> R {
+    FRAME_ALLOCATOR.lock().as_mut().map(f)
+}
+
+/// Create a new OffsetPageTable mapper for the active page table.
+///
+/// # Safety
+/// Caller must ensure no other code is modifying the page tables concurrently.
+pub unsafe fn get_mapper() -> OffsetPageTable<'static> {
+    let offset = VirtAddr::new(PHYS_MEM_OFFSET.load(Ordering::Relaxed));
+    let level_4_table = unsafe { active_level_4_table(offset) };
+    unsafe { OffsetPageTable::new(level_4_table, offset) }
+}
 
 /// Returns a mutable reference to the active level 4 table.
 ///
@@ -36,6 +64,9 @@ unsafe fn active_level_4_table(physical_memory_offset: VirtAddr)
 /// `physical_memory_offset`. Also, this function must be only called once
 /// to avoid aliasing `&mut` references (which is undefined behavior).
 pub unsafe fn init(physical_memory_offset: VirtAddr) -> OffsetPageTable<'static> {
+    // Save offset for runtime mapper creation
+    PHYS_MEM_OFFSET.store(physical_memory_offset.as_u64(), Ordering::Relaxed);
+
     let level_4_table = unsafe { active_level_4_table(physical_memory_offset) };
     unsafe { OffsetPageTable::new(level_4_table, physical_memory_offset) }
 }

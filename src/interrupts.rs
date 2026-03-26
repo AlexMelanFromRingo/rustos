@@ -338,6 +338,16 @@ extern "x86-interrupt" fn page_fault_handler(
     crate::println!("{:#?}", stack_frame);
 
     let addr_u64 = fault_addr.as_u64();
+
+    // Check if this is a kernel stack guard page hit (stack overflow)
+    if crate::gdt::is_guard_page_address(addr_u64) {
+        crate::println!("╔══════════════════════════════════════════╗");
+        crate::println!("║     KERNEL STACK OVERFLOW DETECTED!     ║");
+        crate::println!("╚══════════════════════════════════════════╝");
+        crate::println!("Address 0x{:X} is in a kernel stack guard page.", addr_u64);
+        panic!("Kernel stack overflow");
+    }
+
     if addr_u64 >= crate::memory::userspace::USER_SPACE_START &&
        addr_u64 < crate::memory::userspace::USER_SPACE_END {
         crate::println!("Fault in USER SPACE range (0x{:X} - 0x{:X})",

@@ -78,6 +78,10 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         memory::userspace::USER_SPACE_SIZE / (1024 * 1024),
         memory::userspace::USER_SPACE_START);
 
+    // Store frame allocator globally for runtime use (guard pages, etc.)
+    memory::store_frame_allocator(frame_allocator);
+    klog_info!("Frame allocator stored globally");
+
     // Initialize ATA driver AFTER heap is ready
     rustos::drivers::ata::init();
     klog_info!("ATA driver initialized");
