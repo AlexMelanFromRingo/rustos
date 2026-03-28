@@ -6,6 +6,38 @@ use crate::{print, println};
 
 const MAX_HISTORY: usize = 50;
 
+/// Simple glob pattern matching (supports * and ?)
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let pat: Vec<char> = pattern.chars().collect();
+    let txt: Vec<char> = text.chars().collect();
+    let (plen, tlen) = (pat.len(), txt.len());
+    let (mut pi, mut ti) = (0, 0);
+    let (mut star_pi, mut star_ti) = (usize::MAX, 0);
+
+    while ti < tlen {
+        if pi < plen && (pat[pi] == '?' || pat[pi] == txt[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < plen && pat[pi] == '*' {
+            star_pi = pi;
+            star_ti = ti;
+            pi += 1;
+        } else if star_pi != usize::MAX {
+            pi = star_pi + 1;
+            star_ti += 1;
+            ti = star_ti;
+        } else {
+            return false;
+        }
+    }
+
+    while pi < plen && pat[pi] == '*' {
+        pi += 1;
+    }
+
+    pi == plen
+}
+
 pub struct Shell {
     buffer: String,
     cursor_pos: usize,  // Position in buffer (0 = start, buffer.len() = end)
@@ -441,8 +473,34 @@ impl Shell {
             self.save_history();
         }
 
-        // Expand environment variables ($VAR)
-        let command = self.expand_env_vars(&command);
+        // Expand environment variables ($VAR) — but skip for `for` loops
+        // (for loop handles its own variable substitution)
+        let command = if command.starts_with("for ") {
+            command
+        } else {
+            self.expand_env_vars(&command)
+        };
+
+        // Check for semicolon-separated commands
+        if command.contains(';') {
+            let commands: Vec<&str> = command.split(';').collect();
+            for subcmd in commands {
+                let subcmd = subcmd.trim();
+                if !subcmd.is_empty() {
+                    self.buffer = subcmd.to_string();
+                    self.cursor_pos = self.buffer.len();
+                    self.execute();
+                }
+            }
+            return;
+        }
+
+        // Check for `for` loops: for VAR in ITEMS; do CMD; done
+        // Simplified syntax: for VAR in ITEM1 ITEM2 ... ; do CMD $VAR ; done
+        if command.starts_with("for ") {
+            self.execute_for_loop(&command);
+            return;
+        }
 
         // Check for output redirection
         if command.contains('>') {
@@ -459,7 +517,12 @@ impl Shell {
         // Parse command and arguments
         let parts: Vec<&str> = command.split_whitespace().collect();
         let cmd = parts[0];
-        let args = &parts[1..];
+        let raw_args = &parts[1..];
+
+        // Expand glob patterns in arguments
+        let expanded = self.expand_globs(raw_args);
+        let expanded_refs: Vec<&str> = expanded.iter().map(|s| s.as_str()).collect();
+        let args = &expanded_refs[..];
 
         match cmd {
             "help" => self.cmd_help(),
@@ -519,6 +582,10 @@ impl Shell {
             "renice" => self.cmd_renice(args),
             "stat" => self.cmd_stat(args),
             "exec" => self.cmd_exec(args),
+            "seq" => self.cmd_seq(args),
+            "test" | "[" => self.cmd_test(args),
+            "true" => {},
+            "false" => println!("false"),
             _ => {
                 // Check if it's an alias
                 if let Some(expanded) = self.expand_alias(cmd) {
@@ -1356,6 +1423,66 @@ impl Shell {
     }
 
     /// Execute command with output redirection (>, >>)
+    /// Execute a for loop: for VAR in ITEM1 ITEM2 ...; do CMD; done
+    /// Also supports: for VAR in ITEMS; do CMD; done (all on one line)
+    fn execute_for_loop(&mut self, command: &str) {
+        // Parse: for VAR in ITEM1 ITEM2 ...; do CMD; done
+        // or:   for VAR in ITEM1 ITEM2 ... do CMD done
+        let command = command.trim();
+
+        // Remove "for " prefix
+        let rest = &command[4..];
+
+        // Find variable name
+        let parts: Vec<&str> = rest.splitn(2, " in ").collect();
+        if parts.len() != 2 {
+            println!("Syntax error: expected 'for VAR in ITEMS; do CMD; done'");
+            return;
+        }
+
+        let var_name = parts[0].trim();
+        let rest = parts[1].trim();
+
+        // Find "do" keyword
+        let (items_str, body_str) = if let Some(do_pos) = rest.find(" do ") {
+            (&rest[..do_pos], &rest[do_pos + 4..])
+        } else if let Some(do_pos) = rest.find("; do ") {
+            (&rest[..do_pos], &rest[do_pos + 5..])
+        } else {
+            println!("Syntax error: missing 'do' keyword");
+            return;
+        };
+
+        // Remove trailing "done" or "; done"
+        let body = body_str
+            .trim_end()
+            .trim_end_matches("done")
+            .trim_end()
+            .trim_end_matches(';')
+            .trim();
+
+        if body.is_empty() {
+            println!("Syntax error: empty loop body");
+            return;
+        }
+
+        // Parse items (split by whitespace, expand globs)
+        let items: Vec<&str> = items_str.split_whitespace().collect();
+        let expanded_items = self.expand_globs(&items);
+
+        // Execute body for each item
+        for item in &expanded_items {
+            // Substitute $VAR in the body
+            let expanded_body = body.replace(&format!("${}", var_name), item)
+                .replace(&format!("${{{}}}", var_name), item);
+
+            // Execute the command
+            self.buffer = expanded_body;
+            self.cursor_pos = self.buffer.len();
+            self.execute();
+        }
+    }
+
     fn execute_with_redirection(&mut self, command_line: &str) {
         use crate::fs::vfs::VfsContext;
 
@@ -1757,6 +1884,69 @@ impl Shell {
                 i += input[i..].chars().next().unwrap().len_utf8();
             }
         }
+        result
+    }
+
+    /// Expand glob patterns (*, ?) in arguments
+    fn expand_globs(&self, args: &[&str]) -> Vec<String> {
+        use crate::fs::vfs::VfsContext;
+
+        let mut result = Vec::new();
+
+        for arg in args {
+            if !arg.contains('*') && !arg.contains('?') {
+                result.push(arg.to_string());
+                continue;
+            }
+
+            // Determine the directory to list and the pattern to match
+            let (dir, pattern) = if let Some(pos) = arg.rfind('/') {
+                let dir_part = &arg[..=pos];
+                let pat_part = &arg[pos + 1..];
+                // Resolve relative paths
+                let resolved = if dir_part.starts_with('/') {
+                    dir_part.to_string()
+                } else if self.current_dir == "/" {
+                    format!("/{}", dir_part)
+                } else {
+                    format!("{}/{}", self.current_dir, dir_part)
+                };
+                (resolved, pat_part.to_string())
+            } else {
+                (self.current_dir.clone(), arg.to_string())
+            };
+
+            // List directory entries
+            let mut matched = Vec::new();
+            if let Ok(entries) = VfsContext::list_dir(&dir) {
+                for entry in &entries {
+                    if glob_match(&pattern, &entry.name) {
+                        let full_path = if dir == "/" {
+                            format!("/{}", entry.name)
+                        } else if arg.contains('/') {
+                            // Reconstruct with the prefix
+                            if let Some(pos) = arg.rfind('/') {
+                                format!("{}{}", &arg[..=pos], entry.name)
+                            } else {
+                                entry.name.clone()
+                            }
+                        } else {
+                            entry.name.clone()
+                        };
+                        matched.push(full_path);
+                    }
+                }
+            }
+
+            if matched.is_empty() {
+                // No matches — keep the original pattern (like bash)
+                result.push(arg.to_string());
+            } else {
+                matched.sort();
+                result.extend(matched);
+            }
+        }
+
         result
     }
 
@@ -2384,6 +2574,79 @@ impl Shell {
     }
 
     /// Execute ELF binary in user mode
+    /// seq - print a sequence of numbers
+    fn cmd_seq(&self, args: &[&str]) {
+        let (start, end, step) = match args.len() {
+            1 => {
+                let end: i64 = args[0].parse().unwrap_or(0);
+                (1i64, end, 1i64)
+            }
+            2 => {
+                let start: i64 = args[0].parse().unwrap_or(0);
+                let end: i64 = args[1].parse().unwrap_or(0);
+                (start, end, 1)
+            }
+            3 => {
+                let start: i64 = args[0].parse().unwrap_or(0);
+                let step: i64 = args[1].parse().unwrap_or(1);
+                let end: i64 = args[2].parse().unwrap_or(0);
+                (start, end, step)
+            }
+            _ => {
+                println!("Usage: seq [start] end");
+                return;
+            }
+        };
+
+        if step == 0 {
+            println!("seq: zero step");
+            return;
+        }
+
+        let mut i = start;
+        while (step > 0 && i <= end) || (step < 0 && i >= end) {
+            println!("{}", i);
+            i += step;
+        }
+    }
+
+    /// test - evaluate conditional expressions
+    fn cmd_test(&self, args: &[&str]) {
+        use crate::fs::vfs::VfsContext;
+
+        // Strip trailing "]" if invoked as "["
+        let args = if !args.is_empty() && args[args.len() - 1] == "]" {
+            &args[..args.len() - 1]
+        } else {
+            args
+        };
+
+        let result = match args {
+            ["-f", path] => VfsContext::exists(path) && !VfsContext::is_directory(path),
+            ["-d", path] => VfsContext::is_directory(path),
+            ["-e", path] => VfsContext::exists(path),
+            ["-z", s] => s.is_empty(),
+            ["-n", s] => !s.is_empty(),
+            [a, "=", b] | [a, "==", b] => a == b,
+            [a, "!=", b] => a != b,
+            [a, "-eq", b] => a.parse::<i64>().ok() == b.parse::<i64>().ok(),
+            [a, "-ne", b] => a.parse::<i64>().ok() != b.parse::<i64>().ok(),
+            [a, "-lt", b] => a.parse::<i64>().unwrap_or(0) < b.parse::<i64>().unwrap_or(0),
+            [a, "-gt", b] => a.parse::<i64>().unwrap_or(0) > b.parse::<i64>().unwrap_or(0),
+            _ => {
+                println!("test: unrecognized expression");
+                false
+            }
+        };
+
+        if result {
+            // true — print nothing (exit 0 in real shells)
+        } else {
+            // false — in our shell we just print for now
+            // Real shells use exit codes
+        }
+    }
+
     fn cmd_exec(&mut self, args: &[&str]) {
         if args.is_empty() {
             println!("Usage: exec <filename>");

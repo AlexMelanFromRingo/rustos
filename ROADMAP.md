@@ -158,7 +158,7 @@ Reference architecture: Linux/Unix-like.
 - [x] Environment variable expansion ($VAR) ✅
 - [ ] Command substitution ($(cmd))
 - [ ] Here documents (<<EOF)
-- [ ] Glob expansion (*.txt)
+- [x] Glob expansion (*.txt, /dev/n*) ✅
 
 ### 5.3 Core Utilities
 - [ ] Port coreutils (or implement in Rust): ls, cat, cp, mv, rm, mkdir, chmod, chown, etc.
