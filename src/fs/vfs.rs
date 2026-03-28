@@ -49,6 +49,10 @@ pub enum VfsError {
     IsADirectory,
     /// Directory is not empty
     DirectoryNotEmpty,
+    /// Path is not a file (but expected one)
+    NotAFile,
+    /// File or directory already exists
+    AlreadyExists,
     /// Generic I/O error
     IoError,
 }
@@ -120,6 +124,17 @@ impl VfsContext {
                 .ok_or(VfsError::FileNotFound);
         }
 
+        // Check /sys virtual filesystem
+        if super::sysfs::is_sys_path(path) {
+            return super::sysfs::read_sys(path)
+                .ok_or(VfsError::FileNotFound);
+        }
+
+        // Check /tmp filesystem
+        if super::tmpfs::is_tmp_path(path) {
+            return super::tmpfs::read(path);
+        }
+
         // Try FAT32 first if mounted
         let fat32 = FAT32.lock();
         if let Some(ref fs) = *fat32 {
@@ -148,6 +163,16 @@ impl VfsContext {
             };
         }
 
+        // Check /tmp filesystem
+        if super::tmpfs::is_tmp_path(path) {
+            return super::tmpfs::write(path, data);
+        }
+
+        // /sys and /proc are read-only
+        if super::sysfs::is_sys_path(path) || super::procfs::is_proc_path(path) {
+            return Err(VfsError::PermissionDenied);
+        }
+
         // Try FAT32 first if mounted
         let mut fat32 = FAT32.lock();
         if let Some(ref mut fs) = *fat32 {
@@ -161,6 +186,11 @@ impl VfsContext {
 
     /// Delete a file from the active filesystem
     pub fn delete(path: &str) -> VfsResult<()> {
+        // Check /tmp
+        if super::tmpfs::is_tmp_path(path) {
+            return super::tmpfs::delete(path);
+        }
+
         // Try FAT32 first if mounted
         let mut fat32 = FAT32.lock();
         if let Some(ref mut fs) = *fat32 {
@@ -205,6 +235,16 @@ impl VfsContext {
             return super::devfs::exists(path);
         }
 
+        // Check /sys
+        if super::sysfs::is_sys_path(path) {
+            return super::sysfs::exists(path);
+        }
+
+        // Check /tmp
+        if super::tmpfs::is_tmp_path(path) {
+            return super::tmpfs::exists(path);
+        }
+
         // Check FAT32 first
         let fat32 = FAT32.lock();
         if let Some(ref fs) = *fat32 {
@@ -246,6 +286,11 @@ impl VfsContext {
 
     /// Create a directory
     pub fn mkdir(path: &str) -> VfsResult<()> {
+        // /tmp mkdir
+        if super::tmpfs::is_tmp_path(path) {
+            return super::tmpfs::mkdir(path);
+        }
+
         let mut fat32 = FAT32.lock();
         if let Some(ref mut fs) = *fat32 {
             return fs.mkdir(path);
@@ -278,26 +323,40 @@ impl VfsContext {
             return Ok(super::devfs::list_dev());
         }
 
+        // /sys directory listing
+        if super::sysfs::is_sys_path(path) && super::sysfs::is_directory(path) {
+            return Ok(super::sysfs::list_sys(path));
+        }
+
+        // /tmp directory listing
+        if super::tmpfs::is_tmp_path(path) {
+            return super::tmpfs::list_dir(path);
+        }
+
         let fat32 = FAT32.lock();
         if let Some(ref fs) = *fat32 {
             let mut entries = fs.list_dir(path)?;
             drop(fat32);
-            // Inject virtual directories at root
             if path == "/" {
-                entries.push(FileInfo::directory(String::from("proc")));
-                entries.push(FileInfo::directory(String::from("dev")));
+                Self::inject_virtual_dirs(&mut entries);
             }
             return Ok(entries);
         }
         drop(fat32);
 
         let mut entries = RAMDISK.lock().list_dir(path)?;
-        // Inject virtual directories at root
         if path == "/" {
-            entries.push(FileInfo::directory(String::from("proc")));
-            entries.push(FileInfo::directory(String::from("dev")));
+            Self::inject_virtual_dirs(&mut entries);
         }
         Ok(entries)
+    }
+
+    /// Inject virtual directories into root listing
+    fn inject_virtual_dirs(entries: &mut Vec<FileInfo>) {
+        entries.push(FileInfo::directory(String::from("proc")));
+        entries.push(FileInfo::directory(String::from("dev")));
+        entries.push(FileInfo::directory(String::from("sys")));
+        entries.push(FileInfo::directory(String::from("tmp")));
     }
 
     /// Check if path is a directory
@@ -310,6 +369,16 @@ impl VfsContext {
         // Check /dev
         if super::devfs::is_dev_path(path) {
             return super::devfs::is_directory(path);
+        }
+
+        // Check /sys
+        if super::sysfs::is_sys_path(path) {
+            return super::sysfs::is_directory(path);
+        }
+
+        // Check /tmp
+        if super::tmpfs::is_tmp_path(path) {
+            return super::tmpfs::is_directory(path);
         }
 
         let fat32 = FAT32.lock();

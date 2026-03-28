@@ -100,9 +100,9 @@ Reference architecture: Linux/Unix-like.
 
 ### 3.4 Special Filesystems
 - [x] `/proc` — process information filesystem (uptime, meminfo, version, cpuinfo, kmsg, loadavg, stat, per-pid) ✅
-- [ ] `/sys` — sysfs for device information
+- [x] `/sys` — sysfs (kernel info, device tree: serial, keyboard, timer, rtc, vga) ✅
 - [x] `/dev` — device nodes (null, zero, random, urandom, console, tty, kmsg, mem) ✅
-- [ ] `/tmp` — tmpfs (RAM-backed filesystem)
+- [x] `/tmp` — tmpfs (RAM-backed, 128 files, 512 KiB/file) ✅
 - [ ] devtmpfs for automatic device node creation
 
 ---
