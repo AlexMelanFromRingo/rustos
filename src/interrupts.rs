@@ -17,6 +17,7 @@ pub static PICS: spin::Mutex<ChainedPics> =
 pub enum InterruptIndex {
     Timer = PIC_1_OFFSET,
     Keyboard,
+    Serial1 = PIC_1_OFFSET + 4,
     PrimaryATA = PIC_2_OFFSET + 6,
     SecondaryATA = PIC_2_OFFSET + 7,
 }
@@ -50,6 +51,8 @@ lazy_static! {
 
         idt[InterruptIndex::Keyboard.as_usize()]
             .set_handler_fn(keyboard_interrupt_handler);
+        idt[InterruptIndex::Serial1.as_usize()]
+            .set_handler_fn(serial1_interrupt_handler);
         idt[InterruptIndex::PrimaryATA.as_usize()]
             .set_handler_fn(primary_ata_interrupt_handler);
         idt[InterruptIndex::SecondaryATA.as_usize()]
@@ -370,6 +373,21 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(
     unsafe {
         PICS.lock()
             .notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8());
+    }
+}
+
+extern "x86-interrupt" fn serial1_interrupt_handler(
+    _stack_frame: InterruptStackFrame)
+{
+    use x86_64::instructions::port::Port;
+
+    let mut port = Port::<u8>::new(0x3F8);
+    let byte: u8 = unsafe { port.read() };
+    crate::task::keyboard::add_serial_byte(byte);
+
+    unsafe {
+        PICS.lock()
+            .notify_end_of_interrupt(InterruptIndex::Serial1.as_u8());
     }
 }
 

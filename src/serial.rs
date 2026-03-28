@@ -32,6 +32,16 @@ macro_rules! serial_print {
     };
 }
 
+/// Enable COM1 receive interrupts (IRQ4)
+pub fn enable_serial_interrupts() {
+    use x86_64::instructions::port::Port;
+    unsafe {
+        // IER register at COM1+1: bit 0 = Receive Data Available interrupt
+        let mut ier = Port::<u8>::new(0x3F9);
+        ier.write(0x01);
+    }
+}
+
 /// Prints to the host through the serial interface, appending a newline.
 #[macro_export]
 macro_rules! serial_println {

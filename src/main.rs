@@ -139,10 +139,13 @@ fn try_mount_fat32() -> Result<(), &'static str> {
 async fn keyboard_task() {
     use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
     use futures_util::stream::StreamExt;
-    use rustos::task::keyboard::ScancodeStream;
+    use rustos::task::keyboard::{InputStream, InputEvent};
     use rustos::shell::Shell;
     use rustos::vga_buffer::WRITER;
     use x86_64::instructions::interrupts;
+
+    // Enable serial input interrupts
+    rustos::serial::enable_serial_interrupts();
 
     // Try to auto-mount FAT32 at startup
     match try_mount_fat32() {
@@ -161,7 +164,7 @@ async fn keyboard_task() {
     println!("Active filesystem: {}", rustos::fs::vfs::VfsContext::filesystem_name());
     println!();
 
-    let mut scancodes = ScancodeStream::new();
+    let mut input_stream = InputStream::new();
     let mut keyboard = Keyboard::new(
         ScancodeSet1::new(),
         layouts::Us104Key,
@@ -171,10 +174,35 @@ async fn keyboard_task() {
     let mut shell = Shell::new();
     shell.print_prompt();
 
-    while let Some(scancode) = scancodes.next().await {
-        if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
-            if let Some(key) = keyboard.process_keyevent(key_event) {
-                let prompt_len = shell.prompt_len();  // Cache prompt length
+    while let Some(event) = input_stream.next().await {
+        // Decode the event into a key action
+        let decoded_key = match event {
+            InputEvent::Scancode(scancode) => {
+                if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
+                    keyboard.process_keyevent(key_event)
+                } else {
+                    None
+                }
+            }
+            InputEvent::SerialByte(byte) => {
+                // Convert serial byte to DecodedKey
+                match byte {
+                    b'\r' | b'\n' => Some(DecodedKey::Unicode('\n')),
+                    0x7F | 0x08 => Some(DecodedKey::Unicode('\u{0008}')), // DEL/BS → backspace
+                    0x09 => Some(DecodedKey::Unicode('\t')),
+                    0x01 => Some(DecodedKey::Unicode('\u{0001}')), // Ctrl+A
+                    0x05 => Some(DecodedKey::Unicode('\u{0005}')), // Ctrl+E
+                    0x15 => Some(DecodedKey::Unicode('\u{0015}')), // Ctrl+U
+                    0x17 => Some(DecodedKey::Unicode('\u{0017}')), // Ctrl+W
+                    0x1B => None, // Escape sequence start — ignore for now
+                    b if b >= 0x20 && b <= 0x7E => Some(DecodedKey::Unicode(b as char)),
+                    _ => None,
+                }
+            }
+        };
+
+        if let Some(key) = decoded_key {
+                let prompt_len = shell.prompt_len();
                 match key {
                     DecodedKey::Unicode(character) => {
                         if character == '\n' {
@@ -516,7 +544,6 @@ async fn keyboard_task() {
                         }
                     }
                 }
-            }
         }
     }
 }

@@ -221,6 +221,33 @@ pub fn exists(path: &str) -> bool {
     read_proc(path).is_some()
 }
 
+/// List /proc entries as FileInfo
+pub fn list_proc() -> Vec<crate::fs::vfs::FileInfo> {
+    use crate::fs::vfs::FileInfo;
+    use alloc::string::ToString;
+
+    let mut entries = Vec::new();
+
+    // Static entries
+    entries.push(FileInfo::new("uptime".to_string(), 0));
+    entries.push(FileInfo::new("meminfo".to_string(), 0));
+    entries.push(FileInfo::new("version".to_string(), 0));
+    entries.push(FileInfo::new("cpuinfo".to_string(), 0));
+    entries.push(FileInfo::new("kmsg".to_string(), 0));
+    entries.push(FileInfo::new("loadavg".to_string(), 0));
+    entries.push(FileInfo::new("stat".to_string(), 0));
+
+    // Per-process directories
+    let pm = crate::process::PROCESS_MANAGER.lock();
+    for process in pm.all_processes() {
+        if process.state != crate::process::ProcessState::Terminated {
+            entries.push(FileInfo::directory(format!("{}", process.pid)));
+        }
+    }
+
+    entries
+}
+
 /// Check if a /proc path is a directory
 pub fn is_directory(path: &str) -> bool {
     let path = path.trim_start_matches("/proc");
