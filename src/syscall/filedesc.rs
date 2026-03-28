@@ -39,6 +39,7 @@ pub enum FileKind {
 }
 
 /// Opened file information
+#[derive(Debug)]
 pub struct OpenFile {
     pub path: String,
     pub flags: usize,
@@ -79,7 +80,8 @@ impl OpenFile {
     }
 }
 
-/// File descriptor table for current process
+/// File descriptor table for a process
+#[derive(Debug)]
 pub struct FileDescriptorTable {
     files: Vec<Option<OpenFile>>,
 }
@@ -100,6 +102,27 @@ impl FileDescriptorTable {
         self.files[STDIN] = Some(OpenFile::new(String::from("/dev/stdin"), flags::O_RDONLY));
         self.files[STDOUT] = Some(OpenFile::new(String::from("/dev/stdout"), flags::O_WRONLY));
         self.files[STDERR] = Some(OpenFile::new(String::from("/dev/stderr"), flags::O_WRONLY));
+    }
+
+    /// Create a new FD table with stdin/stdout/stderr pre-opened
+    pub fn with_stdio() -> Self {
+        let mut table = FileDescriptorTable { files: Vec::new() };
+        table.init();
+        table
+    }
+
+    /// Clone this FD table (for fork). All open FDs are duplicated.
+    pub fn clone_table(&self) -> Self {
+        let files = self.files.iter().map(|slot| {
+            slot.as_ref().map(|f| OpenFile {
+                path: f.path.clone(),
+                flags: f.flags,
+                offset: f.offset,
+                is_open: f.is_open,
+                kind: f.kind.clone(),
+            })
+        }).collect();
+        FileDescriptorTable { files }
     }
 
     /// Open a new file, returns fd
@@ -280,15 +303,115 @@ impl FileDescriptorTable {
     }
 }
 
-/// Global file descriptor table (per-process in the future)
-pub static FD_TABLE: Mutex<FileDescriptorTable> = Mutex::new(FileDescriptorTable::new());
+/// Kernel's own FD table (used by shell/kernel context when no user process is active)
+pub static KERNEL_FD_TABLE: Mutex<FileDescriptorTable> = Mutex::new(FileDescriptorTable::new());
 
-/// Initialize file descriptor table
+/// Per-process FD tables, keyed by PID
+static PROCESS_FD_TABLES: Mutex<alloc::collections::BTreeMap<crate::process::Pid, FileDescriptorTable>> =
+    Mutex::new(alloc::collections::BTreeMap::new());
+
+/// Initialize the kernel FD table
 pub fn init() {
-    FD_TABLE.lock().init();
+    KERNEL_FD_TABLE.lock().init();
 }
 
-/// Get file descriptor table
-pub fn get_fd_table() -> spin::MutexGuard<'static, FileDescriptorTable> {
-    FD_TABLE.lock()
+/// Register a new process's FD table (called when creating processes)
+pub fn register_process(pid: crate::process::Pid, fd_table: FileDescriptorTable) {
+    PROCESS_FD_TABLES.lock().insert(pid, fd_table);
+}
+
+/// Unregister a process's FD table (called when process exits)
+pub fn unregister_process(pid: crate::process::Pid) {
+    PROCESS_FD_TABLES.lock().remove(&pid);
+}
+
+/// Access a specific process's FD table by PID (for /proc/<pid>/fdinfo)
+pub fn with_process_fd_table<F>(pid: crate::process::Pid, f: F)
+where
+    F: FnOnce(&FileDescriptorTable),
+{
+    let tables = PROCESS_FD_TABLES.lock();
+    if let Some(table) = tables.get(&pid) {
+        f(table);
+    }
+}
+
+/// Clone a process's FD table (for fork)
+pub fn clone_process_fds(parent_pid: crate::process::Pid, child_pid: crate::process::Pid) {
+    let tables = PROCESS_FD_TABLES.lock();
+    if let Some(parent_table) = tables.get(&parent_pid) {
+        let cloned = parent_table.clone_table();
+        drop(tables);
+        PROCESS_FD_TABLES.lock().insert(child_pid, cloned);
+    }
+}
+
+/// Execute a closure with the current process's FD table (or kernel table if no process).
+/// This is the primary way syscall handlers should access file descriptors.
+pub fn with_fd_table<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut FileDescriptorTable) -> R,
+{
+    // Check if there's a current user process
+    let current_pid = {
+        crate::process::PROCESS_MANAGER.lock().current_pid
+    };
+
+    if let Some(pid) = current_pid {
+        let mut tables = PROCESS_FD_TABLES.lock();
+        if let Some(table) = tables.get_mut(&pid) {
+            return f(table);
+        }
+    }
+
+    // Fallback to kernel FD table
+    f(&mut KERNEL_FD_TABLE.lock())
+}
+
+/// Get file descriptor table for the current context.
+/// Returns the current process's FD table if a user process is running,
+/// otherwise returns the kernel's FD table.
+///
+/// IMPORTANT: This acquires either PROCESS_FD_TABLES or KERNEL_FD_TABLE lock.
+/// Do not hold PROCESS_MANAGER lock while calling this.
+pub fn get_fd_table() -> FdTableAccess {
+    let current_pid = {
+        crate::process::PROCESS_MANAGER.lock().current_pid
+    };
+
+    if let Some(pid) = current_pid {
+        let tables = PROCESS_FD_TABLES.lock();
+        // Check if this process has a registered FD table
+        if tables.get(&pid).is_some() {
+            return FdTableAccess::Process(tables, pid);
+        }
+    }
+
+    FdTableAccess::Kernel(KERNEL_FD_TABLE.lock())
+}
+
+/// Wrapper that provides access to the appropriate FD table
+pub enum FdTableAccess {
+    Kernel(spin::MutexGuard<'static, FileDescriptorTable>),
+    Process(spin::MutexGuard<'static, alloc::collections::BTreeMap<crate::process::Pid, FileDescriptorTable>>, crate::process::Pid),
+}
+
+impl core::ops::Deref for FdTableAccess {
+    type Target = FileDescriptorTable;
+
+    fn deref(&self) -> &FileDescriptorTable {
+        match self {
+            FdTableAccess::Kernel(guard) => guard,
+            FdTableAccess::Process(map, pid) => map.get(pid).unwrap(),
+        }
+    }
+}
+
+impl core::ops::DerefMut for FdTableAccess {
+    fn deref_mut(&mut self) -> &mut FileDescriptorTable {
+        match self {
+            FdTableAccess::Kernel(guard) => &mut *guard,
+            FdTableAccess::Process(map, pid) => map.get_mut(pid).unwrap(),
+        }
+    }
 }

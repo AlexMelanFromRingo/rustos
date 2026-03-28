@@ -18,7 +18,7 @@ Reference architecture: Linux/Unix-like.
 
 ### 1.2 Process Management
 - [ ] Per-process page tables (full address space isolation)
-- [ ] Per-process file descriptor tables (current: single global table)
+- [x] Per-process file descriptor tables (FdTableAccess with process/kernel dispatch) ✅
 - [ ] Per-process working directory (current: shell-level only)
 - [ ] Proper `fork()` with COW (Copy-On-Write) pages
 - [ ] `waitpid()` with blocking (current: non-blocking poll)
@@ -101,7 +101,7 @@ Reference architecture: Linux/Unix-like.
 ### 3.4 Special Filesystems
 - [x] `/proc` — process information filesystem (uptime, meminfo, version, cpuinfo, kmsg, loadavg, stat, per-pid) ✅
 - [ ] `/sys` — sysfs for device information
-- [ ] `/dev` — device nodes (character and block devices)
+- [x] `/dev` — device nodes (null, zero, random, urandom, console, tty, kmsg, mem) ✅
 - [ ] `/tmp` — tmpfs (RAM-backed filesystem)
 - [ ] devtmpfs for automatic device node creation
 

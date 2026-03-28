@@ -154,7 +154,7 @@ fn read_proc_pid(pid: usize, subpath: &str) -> Option<Vec<u8>> {
     match subpath {
         "" | "." => {
             // List /proc/[pid] directory
-            Some("status\ncmdline\nstat\nmaps\n".as_bytes().to_vec())
+            Some("status\ncmdline\nstat\nmaps\nfdinfo\n".as_bytes().to_vec())
         }
 
         "status" => {
@@ -203,6 +203,25 @@ fn read_proc_pid(pid: usize, subpath: &str) -> Option<Vec<u8>> {
             if let Some(entry) = process.entry_point {
                 s.push_str(&format!("{:016x}-{:016x} r-xp 00000000 00:00 0 [text]\n",
                     entry, entry + 0x1000));
+            }
+            Some(s.into_bytes())
+        }
+
+        "fdinfo" => {
+            // Show open file descriptors for this process
+            drop(pm); // Release PROCESS_MANAGER before locking FD tables
+            let mut s = String::new();
+            crate::syscall::filedesc::with_process_fd_table(pid, |table| {
+                for fd in 0..256 {
+                    if let Some(file) = table.get(fd) {
+                        if file.is_open {
+                            s.push_str(&format!("{}\t{}\toffset={}\n", fd, file.path, file.offset));
+                        }
+                    }
+                }
+            });
+            if s.is_empty() {
+                s.push_str("(no FD table registered for this process)\n");
             }
             Some(s.into_bytes())
         }

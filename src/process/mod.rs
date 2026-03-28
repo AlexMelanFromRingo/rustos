@@ -246,6 +246,7 @@ impl ProcessManager {
         self.next_pid += 1;
         let process = Process::new(pid, entry_point, stack_size);
         self.processes.push(process);
+        crate::syscall::filedesc::register_process(pid, crate::syscall::filedesc::FileDescriptorTable::with_stdio());
         pid
     }
 
@@ -256,6 +257,7 @@ impl ProcessManager {
         self.next_pid += 1;
         let process = Process::new_user(pid, parent_pid, entry_point, user_stack_top);
         self.processes.push(process);
+        crate::syscall::filedesc::register_process(pid, crate::syscall::filedesc::FileDescriptorTable::with_stdio());
         pid
     }
 
@@ -426,6 +428,8 @@ impl ProcessManager {
         };
 
         self.processes.push(child);
+        // Clone parent's FD table for the child
+        crate::syscall::filedesc::clone_process_fds(parent_pid, child_pid);
         Ok(child_pid)
     }
 
@@ -473,6 +477,7 @@ impl ProcessManager {
 
         if let Some((child_pid, exit_code)) = child {
             self.processes.retain(|p| p.pid != child_pid);
+            crate::syscall::filedesc::unregister_process(child_pid);
             Some((child_pid, exit_code))
         } else {
             let has_children = self.processes.iter()
@@ -491,6 +496,14 @@ impl ProcessManager {
     /// Remove all terminated and zombie processes from the process list.
     /// Called after preemptive tests to clean up stale entries.
     pub fn cleanup_dead_processes(&mut self) {
+        // Collect PIDs of dead processes before removing them
+        let dead_pids: Vec<Pid> = self.processes.iter()
+            .filter(|p| p.state == ProcessState::Terminated || p.state == ProcessState::Zombie)
+            .map(|p| p.pid)
+            .collect();
+        for pid in &dead_pids {
+            crate::syscall::filedesc::unregister_process(*pid);
+        }
         self.processes.retain(|p| {
             p.state != ProcessState::Terminated && p.state != ProcessState::Zombie
         });
