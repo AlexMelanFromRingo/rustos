@@ -944,3 +944,195 @@ pub fn sys_getuid() -> isize {
 pub fn sys_getgid() -> isize {
     0
 }
+
+/// mmap flags
+const _MAP_PRIVATE: usize = 0x02;
+const MAP_ANONYMOUS: usize = 0x20;
+const MAP_FIXED: usize = 0x10;
+
+/// mmap protection flags
+const PROT_READ: usize = 0x1;
+const PROT_WRITE: usize = 0x2;
+
+/// sys_mmap - map virtual memory
+///
+/// Currently only supports anonymous private mappings (MAP_ANONYMOUS | MAP_PRIVATE).
+/// File-backed mappings are not yet implemented.
+pub fn sys_mmap(addr: usize, length: usize, prot: usize, flags: usize, fd: isize, _offset: usize) -> isize {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    // Virtual address allocator for mmap region (above program break area)
+    static MMAP_BASE: AtomicUsize = AtomicUsize::new(0x1000_0000); // Start at 256 MiB
+
+    if length == 0 {
+        return SyscallError::InvalidArgument.as_isize();
+    }
+
+    // Only support anonymous private mappings for now
+    if flags & MAP_ANONYMOUS == 0 {
+        // File-backed mapping requested
+        if fd < 0 {
+            return SyscallError::InvalidArgument.as_isize();
+        }
+        // Not implemented yet
+        return SyscallError::NotImplemented.as_isize();
+    }
+
+    // Round length up to page boundary
+    let page_size = 4096usize;
+    let aligned_length = (length + page_size - 1) & !(page_size - 1);
+
+    // Determine mapping address
+    let map_addr = if flags & MAP_FIXED != 0 {
+        // MAP_FIXED: use requested address exactly
+        if addr == 0 || addr % page_size != 0 {
+            return SyscallError::InvalidArgument.as_isize();
+        }
+        addr
+    } else if addr != 0 {
+        // Hint address — try to use it, but we just use our allocator
+        let base = MMAP_BASE.fetch_add(aligned_length, Ordering::Relaxed);
+        base
+    } else {
+        // No address preference — allocate from mmap region
+        let base = MMAP_BASE.fetch_add(aligned_length, Ordering::Relaxed);
+        base
+    };
+
+    // Sanity check: don't allow mappings above a reasonable limit
+    if map_addr + aligned_length > 0x8000_0000_0000 {
+        return SyscallError::OutOfMemory.as_isize();
+    }
+
+    // For anonymous mappings, we need to allocate physical frames and map them.
+    // Currently all processes share the kernel page table, so we map into it.
+    let result = crate::memory::with_frame_allocator(|frame_alloc| {
+        use x86_64::structures::paging::{FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB};
+        use x86_64::VirtAddr;
+
+        let mut mapper = unsafe { crate::memory::get_mapper() };
+        let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+        let flags = if prot & PROT_READ == 0 { flags } else { flags }; // All pages readable
+        let flags = if prot & PROT_WRITE != 0 { flags | PageTableFlags::WRITABLE } else {
+            flags & !PageTableFlags::WRITABLE
+        };
+        let flags = flags | PageTableFlags::USER_ACCESSIBLE;
+
+        let start_page: Page<Size4KiB> = Page::containing_address(VirtAddr::new(map_addr as u64));
+        let num_pages = aligned_length / page_size;
+
+        for i in 0..num_pages {
+            let page = start_page + i as u64;
+            let frame = frame_alloc.allocate_frame()
+                .ok_or(SyscallError::OutOfMemory)?;
+            unsafe {
+                mapper.map_to(page, frame, flags, frame_alloc)
+                    .map_err(|_| SyscallError::OutOfMemory)?
+                    .flush();
+            }
+        }
+
+        // Zero the mapped memory (anonymous mappings must be zeroed)
+        unsafe {
+            core::ptr::write_bytes(map_addr as *mut u8, 0, aligned_length);
+        }
+
+        Ok::<usize, SyscallError>(map_addr)
+    });
+
+    match result {
+        Some(Ok(addr)) => addr as isize,
+        Some(Err(e)) => e.as_isize(),
+        None => SyscallError::OutOfMemory.as_isize(),
+    }
+}
+
+/// sys_munmap - unmap virtual memory
+pub fn sys_munmap(addr: usize, length: usize) -> isize {
+    if addr == 0 || length == 0 || addr % 4096 != 0 {
+        return SyscallError::InvalidArgument.as_isize();
+    }
+
+    let page_size = 4096usize;
+    let aligned_length = (length + page_size - 1) & !(page_size - 1);
+    let num_pages = aligned_length / page_size;
+
+    use x86_64::structures::paging::{Mapper, Page, Size4KiB};
+    use x86_64::VirtAddr;
+
+    let mut mapper = unsafe { crate::memory::get_mapper() };
+    let start_page: Page<Size4KiB> = Page::containing_address(VirtAddr::new(addr as u64));
+
+    for i in 0..num_pages {
+        let page = start_page + i as u64;
+        if let Ok((frame, flush)) = mapper.unmap(page) {
+            flush.flush();
+            // Return the frame to the allocator
+            crate::memory::with_frame_allocator(|alloc| {
+                unsafe { alloc.deallocate_frame(frame); }
+            });
+        }
+        // Ignore pages that weren't mapped
+    }
+
+    0 // Success
+}
+
+/// sys_ioctl - device control
+///
+/// Basic ioctl support. Currently handles terminal-related ioctls.
+pub fn sys_ioctl(fd: usize, request: usize, _arg: usize) -> isize {
+    // Common ioctl request codes
+    const TCGETS: usize = 0x5401;      // Get terminal attributes
+    const TCSETS: usize = 0x5402;      // Set terminal attributes
+    const TIOCGWINSZ: usize = 0x5413;  // Get window size
+    const _TIOCSWINSZ: usize = 0x5414;  // Set window size
+    const FIONREAD: usize = 0x541B;    // Bytes available to read
+
+    match request {
+        TIOCGWINSZ => {
+            // Return terminal window size (80x25 VGA text mode)
+            if _arg != 0 {
+                // struct winsize { unsigned short ws_row, ws_col, ws_xpixel, ws_ypixel; }
+                let winsize = unsafe { &mut *(_arg as *mut [u16; 4]) };
+                winsize[0] = 25;  // rows
+                winsize[1] = 80;  // cols
+                winsize[2] = 0;   // xpixel (unused)
+                winsize[3] = 0;   // ypixel (unused)
+            }
+            0
+        }
+
+        TCGETS | TCSETS => {
+            // Terminal attributes — return success (stub)
+            // Real implementation would manage terminal modes (raw, cooked, etc.)
+            if fd <= 2 {
+                0 // Success for stdin/stdout/stderr
+            } else {
+                SyscallError::InvalidArgument.as_isize()
+            }
+        }
+
+        FIONREAD => {
+            // Return number of bytes available to read
+            if fd == 0 {
+                // STDIN: check keyboard queue
+                let count = crate::task::keyboard::SCANCODE_QUEUE
+                    .try_get()
+                    .map(|q| q.len())
+                    .unwrap_or(0);
+                if _arg != 0 {
+                    unsafe { *(_arg as *mut i32) = count as i32; }
+                }
+                0
+            } else {
+                0
+            }
+        }
+
+        _ => {
+            // Unknown ioctl — return ENOTTY for non-terminal fds
+            SyscallError::NotImplemented.as_isize()
+        }
+    }
+}

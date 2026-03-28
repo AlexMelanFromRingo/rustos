@@ -45,11 +45,11 @@ Reference architecture: Linux/Unix-like.
 ## Phase 2: System Call Layer (Linux ABI Compatibility)
 
 ### 2.1 Core Syscalls
-- [ ] `mmap` / `munmap` — memory-mapped files and anonymous mappings
+- [x] `mmap` / `munmap` — anonymous private mappings with frame allocation ✅
 - [x] `brk` — heap management for user programs ✅
 - [x] `lseek` — file seek ✅
 - [x] `stat` / `fstat` — file metadata (Linux-compatible 144-byte struct) ✅
-- [ ] `ioctl` — device control
+- [x] `ioctl` — terminal control (TIOCGWINSZ, TCGETS, FIONREAD) ✅
 - [x] `dup` / `dup2` — file descriptor duplication ✅
 - [x] `pipe` — inter-process communication (4 KiB kernel buffer) ✅
 - [ ] `select` / `poll` / `epoll` — I/O multiplexing
