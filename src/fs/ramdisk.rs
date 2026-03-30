@@ -12,11 +12,44 @@ const MAX_FILES: usize = 256;
 const MAX_FILE_SIZE: usize = 1024 * 1024; // 1 MiB per file
 const MAX_FILENAME_LEN: usize = 255;
 
+/// File type
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FileType {
+    Regular,
+    Directory,
+    Symlink,
+}
+
+/// Unix-style permission mode bits
+pub type Mode = u16;
+
+pub const S_IRWXU: Mode = 0o700; // owner rwx
+pub const S_IRUSR: Mode = 0o400;
+pub const S_IWUSR: Mode = 0o200;
+pub const S_IXUSR: Mode = 0o100;
+pub const S_IRWXG: Mode = 0o070; // group rwx
+pub const S_IRWXO: Mode = 0o007; // other rwx
+
+/// Default permissions: rw-r--r-- for files, rwxr-xr-x for directories
+pub const DEFAULT_FILE_MODE: Mode = 0o644;
+pub const DEFAULT_DIR_MODE: Mode = 0o755;
+
+/// Get current timestamp in seconds (from PIT ticks)
+fn current_timestamp() -> u64 {
+    crate::task::timer::current_ticks() / 18
+}
+
 #[derive(Clone)]
 pub struct File {
-    pub name: String, // Full path (e.g. "/home/test.txt" or just "test.txt" for root)
+    pub name: String,       // Full path (e.g. "/home/test.txt" or just "test.txt" for root)
     pub content: Vec<u8>,
-    pub is_directory: bool,
+    pub file_type: FileType,
+    pub mode: Mode,         // Permission bits
+    pub uid: u32,           // Owner user ID
+    pub gid: u32,           // Owner group ID
+    pub ctime: u64,         // Creation time (seconds since boot)
+    pub mtime: u64,         // Modification time
+    pub atime: u64,         // Access time
 }
 
 impl File {
@@ -27,14 +60,58 @@ impl File {
         if content.len() > MAX_FILE_SIZE {
             return Err("File too large");
         }
-        Ok(File { name, content, is_directory: false })
+        let now = current_timestamp();
+        Ok(File {
+            name, content,
+            file_type: FileType::Regular,
+            mode: DEFAULT_FILE_MODE,
+            uid: 0, gid: 0,
+            ctime: now, mtime: now, atime: now,
+        })
     }
 
     pub fn new_directory(name: String) -> Result<Self, &'static str> {
         if name.len() > MAX_FILENAME_LEN {
             return Err("Filename too long");
         }
-        Ok(File { name, content: Vec::new(), is_directory: true })
+        let now = current_timestamp();
+        Ok(File {
+            name, content: Vec::new(),
+            file_type: FileType::Directory,
+            mode: DEFAULT_DIR_MODE,
+            uid: 0, gid: 0,
+            ctime: now, mtime: now, atime: now,
+        })
+    }
+
+    pub fn new_symlink(name: String, target: String) -> Result<Self, &'static str> {
+        if name.len() > MAX_FILENAME_LEN {
+            return Err("Filename too long");
+        }
+        let now = current_timestamp();
+        Ok(File {
+            name, content: target.into_bytes(),
+            file_type: FileType::Symlink,
+            mode: 0o777, // symlinks are always rwxrwxrwx
+            uid: 0, gid: 0,
+            ctime: now, mtime: now, atime: now,
+        })
+    }
+
+    pub fn is_directory(&self) -> bool {
+        self.file_type == FileType::Directory
+    }
+
+    pub fn is_symlink(&self) -> bool {
+        self.file_type == FileType::Symlink
+    }
+
+    pub fn symlink_target(&self) -> Option<&str> {
+        if self.file_type == FileType::Symlink {
+            core::str::from_utf8(&self.content).ok()
+        } else {
+            None
+        }
     }
 
     pub fn size(&self) -> usize {
