@@ -50,8 +50,13 @@ pub fn read_dev(path: &str) -> Option<Vec<u8>> {
             Some(buf)
         }
 
-        // /dev/console, /dev/tty — reads return empty (no input buffer)
-        "console" | "tty" => Some(Vec::new()),
+        // /dev/console, /dev/tty, /dev/tty0 — reads from TTY input buffer
+        "console" | "tty" | "tty0" => {
+            let mut tty = crate::tty::TTY0.lock();
+            let mut buf = [0u8; 4096];
+            let n = tty.read(&mut buf);
+            Some(buf[..n].to_vec())
+        }
 
         // /dev/kmsg — kernel log ring buffer (same as dmesg)
         "kmsg" => {
@@ -128,7 +133,7 @@ pub fn exists(path: &str) -> bool {
 
     matches!(path,
         "" | "." | "null" | "zero" | "random" | "urandom" |
-        "console" | "tty" | "kmsg" | "mem"
+        "console" | "tty" | "tty0" | "kmsg" | "mem" | "ptmx"
     )
 }
 
@@ -153,5 +158,7 @@ pub fn list_dev() -> Vec<crate::fs::vfs::FileInfo> {
         FileInfo::new("tty".to_string(), 0),
         FileInfo::new("kmsg".to_string(), 0),
         FileInfo::new("mem".to_string(), 0),
+        FileInfo::new("tty0".to_string(), 0),
+        FileInfo::new("ptmx".to_string(), 0),
     ]
 }

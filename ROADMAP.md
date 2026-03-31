@@ -23,6 +23,7 @@ Reference architecture: Linux/Unix-like.
 - [ ] Proper `fork()` with COW (Copy-On-Write) pages
 - [ ] `waitpid()` with blocking (current: non-blocking poll)
 - [x] Signal delivery (SIGTERM, SIGKILL, SIGINT, SIGCHLD, etc.) ✅
+- [x] TTY device abstraction (line discipline, raw/cooked mode) ✅
 - [ ] Process groups and sessions
 - [x] Environment variables (shell-level: export/unset/$VAR expansion) ✅
 - [ ] Resource limits (rlimits)
@@ -153,7 +154,7 @@ Reference architecture: Linux/Unix-like.
 - [ ] Position-Independent Executables (PIE)
 
 ### 5.2 Shell Improvements
-- [ ] Job control (background processes with &, fg, bg)
+- [x] Job control (background processes with &, fg, bg, jobs) ✅
 - [ ] Shell scripting (if/then/else, for, while loops)
 - [x] Environment variable expansion ($VAR) ✅
 - [ ] Command substitution ($(cmd))

@@ -165,6 +165,22 @@ impl Scheduler {
         Some(current_pid)
     }
 
+    /// Put a specific PID to sleep for N ticks (for background jobs)
+    pub fn sleep_pid(&mut self, pid: Pid, ticks: u64) {
+        let wake_tick = current_ticks() + ticks;
+        self.sleep_queue.push(SleepEntry { pid, wake_tick });
+    }
+
+    /// Wait for a specific PID to terminate (blocking poll)
+    pub fn is_pid_done(&self, pid: Pid) -> bool {
+        let pm = PROCESS_MANAGER.lock();
+        if let Some(proc) = pm.processes.iter().find(|p| p.pid == pid) {
+            matches!(proc.state, ProcessState::Terminated | ProcessState::Zombie)
+        } else {
+            true // process doesn't exist anymore = done
+        }
+    }
+
     /// Preempt current user process — move it to ready queue
     fn preempt(&mut self) {
         let mut pm = PROCESS_MANAGER.lock();

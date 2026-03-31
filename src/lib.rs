@@ -28,6 +28,7 @@ pub mod syscall;
 pub mod userspace;
 pub mod elf;
 pub mod klog;
+pub mod tty;
 
 pub fn init() {
     gdt::init();

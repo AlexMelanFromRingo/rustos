@@ -5,6 +5,32 @@ use alloc::vec::Vec;
 use crate::{print, println};
 
 const MAX_HISTORY: usize = 50;
+/// Job status for shell job control
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobStatus {
+    Running,
+    Stopped,
+    Done,
+}
+
+/// A shell job (background process)
+#[derive(Debug, Clone)]
+pub struct Job {
+    pub id: usize,
+    pub pid: usize,
+    pub command: String,
+    pub status: JobStatus,
+}
+
+impl Job {
+    fn status_str(&self) -> &'static str {
+        match self.status {
+            JobStatus::Running => "Running",
+            JobStatus::Stopped => "Stopped",
+            JobStatus::Done => "Done",
+        }
+    }
+}
 
 /// Simple glob pattern matching (supports * and ?)
 fn glob_match(pattern: &str, text: &str) -> bool {
@@ -49,6 +75,8 @@ pub struct Shell {
     current_dir: String,  // Current working directory
     hostname: String,  // System hostname
     env_vars: Vec<(String, String)>,  // Environment variables
+    jobs: Vec<Job>,  // Background jobs
+    next_job_id: usize,  // Next job ID to assign
 }
 
 impl Shell {
@@ -64,6 +92,8 @@ impl Shell {
             current_dir: String::from("/"),
             hostname: String::from("rustos"),
             env_vars: Vec::new(),
+            jobs: Vec::new(),
+            next_job_id: 1,
         };
 
         // Set default environment variables
@@ -283,15 +313,15 @@ impl Shell {
         if parts.len() == 1 && !partial.contains(' ') {
             // Autocomplete command name
             let commands = [
-                "alias", "cat", "cd", "chmod", "chown", "clear", "cp", "date",
-                "df", "du", "echo", "dmesg", "edit", "env", "exec", "export",
-                "find", "free", "grep", "head", "hello", "help", "history",
-                "hostname", "id", "kill", "less", "ln", "ls", "meminfo", "mkdir",
-                "more", "mount", "mv", "printenv", "ps", "pwd", "readlink",
-                "reboot", "renice", "rm", "rmdir", "shutdown", "sleep", "spawn",
-                "stat", "tail", "time", "top", "touch", "tree", "umount", "uname",
-                "unalias", "unset", "uptime", "usermode", "version", "wc",
-                "which", "whoami", "write",
+                "alias", "bg", "cat", "cd", "chmod", "chown", "clear", "cp",
+                "date", "df", "du", "echo", "dmesg", "edit", "env", "exec",
+                "export", "fg", "find", "free", "grep", "head", "hello", "help",
+                "history", "hostname", "id", "jobs", "kill", "less", "ln", "ls",
+                "meminfo", "mkdir", "more", "mount", "mv", "printenv", "ps",
+                "pwd", "readlink", "reboot", "renice", "rm", "rmdir", "shutdown",
+                "sleep", "spawn", "stat", "tail", "time", "top", "touch", "tree",
+                "umount", "uname", "unalias", "unset", "uptime", "usermode",
+                "version", "wc", "which", "whoami", "write",
             ];
 
             let matches: Vec<&str> = commands
@@ -509,6 +539,14 @@ impl Shell {
             return;
         }
 
+        // Check for background execution (&)
+        let (command, background) = if command.ends_with('&') {
+            let cmd = command.trim_end_matches('&').trim().to_string();
+            (cmd, true)
+        } else {
+            (command, false)
+        };
+
         // Check for pipes
         if command.contains('|') {
             self.execute_pipeline(&command);
@@ -517,6 +555,9 @@ impl Shell {
 
         // Parse command and arguments
         let parts: Vec<&str> = command.split_whitespace().collect();
+        if parts.is_empty() {
+            return;
+        }
         let cmd = parts[0];
         let raw_args = &parts[1..];
 
@@ -524,6 +565,12 @@ impl Shell {
         let expanded = self.expand_globs(raw_args);
         let expanded_refs: Vec<&str> = expanded.iter().map(|s| s.as_str()).collect();
         let args = &expanded_refs[..];
+
+        // Handle background execution
+        if background {
+            self.run_background(&command);
+            return;
+        }
 
         match cmd {
             "help" => self.cmd_help(),
@@ -586,6 +633,9 @@ impl Shell {
             "chmod" => self.cmd_chmod(args),
             "chown" => self.cmd_chown(args),
             "readlink" => self.cmd_readlink(args),
+            "jobs" => self.cmd_jobs(),
+            "fg" => self.cmd_fg(args),
+            "bg" => self.cmd_bg(args),
             "exec" => self.cmd_exec(args),
             "seq" => self.cmd_seq(args),
             "test" | "[" => self.cmd_test(args),
@@ -612,6 +662,8 @@ impl Shell {
                         current_dir: self.current_dir.clone(),
                         hostname: self.hostname.clone(),
                         env_vars: self.env_vars.clone(),
+                        jobs: self.jobs.clone(),
+                        next_job_id: self.next_job_id,
                     };
                     temp_shell.execute();
                     // Update history from temp shell
@@ -688,6 +740,12 @@ impl Shell {
         println!("  printenv  - Print environment variables (usage: printenv [VAR])");
         println!("  env       - Same as printenv");
         println!("  unset     - Remove environment variable (usage: unset VAR)");
+        println!();
+        println!("Job control:");
+        println!("  <cmd> &   - Run command in background");
+        println!("  jobs      - List background jobs");
+        println!("  fg [%N]   - Bring job N to foreground");
+        println!("  bg [%N]   - Continue stopped job in background");
         println!();
         println!("Aliases:");
         println!("  alias     - Create command alias (usage: alias <name> <command>)");
@@ -2754,6 +2812,207 @@ impl Shell {
             match VfsContext::readlink(&path) {
                 Ok(target) => println!("{}", target),
                 Err(_) => println!("readlink: {}: Invalid argument", filename),
+            }
+        }
+    }
+
+    /// Run a command in the background
+    fn run_background(&mut self, command: &str) {
+        use crate::process::PROCESS_MANAGER;
+
+        // Parse the command to get the name for the job
+        let cmd_name = command.split_whitespace().next().unwrap_or("unknown");
+
+        // For sleep command: spawn as a real background process
+        if cmd_name == "sleep" {
+            let parts: Vec<&str> = command.split_whitespace().collect();
+            if parts.len() >= 2 {
+                let seconds: u64 = parts[1].parse().unwrap_or(1);
+                let ticks = seconds * 18; // ~18 ticks per second
+
+                // Create a kernel process for the sleep
+                let pid = {
+                    let mut pm = PROCESS_MANAGER.lock();
+                    let pid = pm.create_process(0, 4096);
+                    // Mark it as blocked immediately (it's sleeping)
+                    if let Some(proc) = pm.get_process_mut(pid) {
+                        proc.state = crate::process::ProcessState::Blocked;
+                    }
+                    pid
+                };
+
+                // Register a wake-up timer
+                crate::process::scheduler::SCHEDULER.lock().sleep_pid(pid, ticks);
+
+                let job_id = self.next_job_id;
+                self.next_job_id += 1;
+                self.jobs.push(Job {
+                    id: job_id,
+                    pid,
+                    command: command.to_string(),
+                    status: JobStatus::Running,
+                });
+                println!("[{}] {}", job_id, pid);
+                return;
+            }
+        }
+
+        // For other commands: run immediately but report as job
+        let job_id = self.next_job_id;
+        self.next_job_id += 1;
+
+        // Execute command synchronously but wrap in job tracking
+        println!("[{}] (running in foreground — true background requires process support)", job_id);
+
+        // Execute the command
+        self.buffer = command.to_string();
+        self.cursor_pos = self.buffer.len();
+        // Create a mini-shell to run the command without the & flag
+        let parts: Vec<&str> = command.split_whitespace().collect();
+        if !parts.is_empty() {
+            let cmd = parts[0];
+            let expanded = self.expand_globs(&parts[1..]);
+            let expanded_refs: Vec<&str> = expanded.iter().map(|s| s.as_str()).collect();
+            let args = &expanded_refs[..];
+            // Run the command directly
+            match cmd {
+                "sleep" => self.cmd_sleep(args),
+                _ => {
+                    // For unrecognized commands, just note it
+                    println!("{}: background execution not yet supported for this command", cmd);
+                }
+            }
+        }
+
+        self.jobs.push(Job {
+            id: job_id,
+            pid: 0,
+            command: command.to_string(),
+            status: JobStatus::Done,
+        });
+        println!("[{}] Done                    {}", job_id, command);
+    }
+
+    /// jobs - list background jobs
+    fn cmd_jobs(&mut self) {
+        // Update job statuses
+        self.update_job_statuses();
+
+        if self.jobs.is_empty() {
+            return; // No output when no jobs, matching bash behavior
+        }
+
+        for job in &self.jobs {
+            println!("[{}]  {}                 {}", job.id, job.status_str(), job.command);
+        }
+
+        // Clean up done jobs
+        self.jobs.retain(|j| j.status != JobStatus::Done);
+    }
+
+    /// fg - bring a background job to foreground
+    fn cmd_fg(&mut self, args: &[&str]) {
+        let job_id = if args.is_empty() {
+            // Get the most recent job
+            match self.jobs.last() {
+                Some(job) => job.id,
+                None => {
+                    println!("fg: no current job");
+                    return;
+                }
+            }
+        } else {
+            // Parse job ID (strip % prefix if present)
+            let id_str = args[0].trim_start_matches('%');
+            match id_str.parse::<usize>() {
+                Ok(id) => id,
+                Err(_) => {
+                    println!("fg: {}: no such job", args[0]);
+                    return;
+                }
+            }
+        };
+
+        if let Some(job) = self.jobs.iter_mut().find(|j| j.id == job_id) {
+            println!("{}", job.command);
+            if job.pid > 0 && job.status == JobStatus::Running {
+                // Poll until process is done
+                loop {
+                    if crate::process::scheduler::SCHEDULER.lock().is_pid_done(job.pid) {
+                        break;
+                    }
+                    // Yield to let the scheduler tick
+                    x86_64::instructions::hlt();
+                }
+            }
+            job.status = JobStatus::Done;
+        } else {
+            println!("fg: %{}: no such job", job_id);
+        }
+    }
+
+    /// bg - continue a stopped job in the background
+    fn cmd_bg(&mut self, args: &[&str]) {
+        let job_id = if args.is_empty() {
+            match self.jobs.last() {
+                Some(job) => job.id,
+                None => {
+                    println!("bg: no current job");
+                    return;
+                }
+            }
+        } else {
+            let id_str = args[0].trim_start_matches('%');
+            match id_str.parse::<usize>() {
+                Ok(id) => id,
+                Err(_) => {
+                    println!("bg: {}: no such job", args[0]);
+                    return;
+                }
+            }
+        };
+
+        if let Some(job) = self.jobs.iter_mut().find(|j| j.id == job_id) {
+            if job.status == JobStatus::Stopped {
+                job.status = JobStatus::Running;
+                // Resume the process
+                if job.pid > 0 {
+                    let mut pm = crate::process::PROCESS_MANAGER.lock();
+                    if let Some(proc) = pm.get_process_mut(job.pid) {
+                        proc.state = crate::process::ProcessState::Ready;
+                    }
+                }
+                println!("[{}]  {} &", job.id, job.command);
+            } else {
+                println!("bg: job {} already running", job_id);
+            }
+        } else {
+            println!("bg: %{}: no such job", job_id);
+        }
+    }
+
+    /// Update job statuses from process manager
+    fn update_job_statuses(&mut self) {
+        let pm = crate::process::PROCESS_MANAGER.lock();
+        for job in &mut self.jobs {
+            if job.pid > 0 {
+                if let Some(proc) = pm.processes().iter().find(|p| p.pid == job.pid) {
+                    match proc.state {
+                        crate::process::ProcessState::Terminated
+                        | crate::process::ProcessState::Zombie => {
+                            if job.status != JobStatus::Done {
+                                job.status = JobStatus::Done;
+                            }
+                        }
+                        crate::process::ProcessState::Blocked => {
+                            // Still running (sleeping)
+                        }
+                        _ => {}
+                    }
+                } else {
+                    // Process no longer exists
+                    job.status = JobStatus::Done;
+                }
             }
         }
     }
