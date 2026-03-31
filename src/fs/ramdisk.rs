@@ -3,10 +3,10 @@
 /// Files are stored with full paths (e.g., "/home/test.txt").
 /// Directories are tracked as entries with is_directory=true and no content.
 /// The root directory "/" always exists implicitly.
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
-use crate::fs::vfs::{FileSystem, FileInfo, VfsError, VfsResult};
+use crate::fs::vfs::{FileSystem, FileInfo, VfsFileType, VfsError, VfsResult};
 
 const MAX_FILES: usize = 256;
 const MAX_FILE_SIZE: usize = 1024 * 1024; // 1 MiB per file
@@ -117,6 +117,27 @@ impl File {
     pub fn size(&self) -> usize {
         self.content.len()
     }
+
+    /// Convert to FileInfo with full metadata
+    pub fn to_info(&self, display_name: &str) -> FileInfo {
+        let vfs_type = match self.file_type {
+            FileType::Regular => VfsFileType::Regular,
+            FileType::Directory => VfsFileType::Directory,
+            FileType::Symlink => VfsFileType::Symlink,
+        };
+        FileInfo {
+            name: String::from(display_name),
+            size: self.size(),
+            is_directory: self.is_directory(),
+            file_type: vfs_type,
+            mode: self.mode,
+            uid: self.uid,
+            gid: self.gid,
+            ctime: self.ctime,
+            mtime: self.mtime,
+            atime: self.atime,
+        }
+    }
 }
 
 /// Normalize a path: strip trailing slashes, ensure no double slashes
@@ -168,12 +189,12 @@ impl RamDisk {
             })?;
 
         // Check if a directory with this name exists
-        if self.files.iter().any(|f| f.name == normalized && f.is_directory) {
+        if self.files.iter().any(|f| f.name == normalized && f.is_directory()) {
             return Err(VfsError::IsADirectory);
         }
 
         // Check if file exists
-        if let Some(existing) = self.files.iter_mut().find(|f| f.name == normalized && !f.is_directory) {
+        if let Some(existing) = self.files.iter_mut().find(|f| f.name == normalized && !f.is_directory()) {
             // Overwrite existing file
             *existing = file;
         } else {
@@ -192,7 +213,7 @@ impl RamDisk {
         let normalized = normalize_path(name);
         self.files
             .iter()
-            .find(|f| f.name == normalized && !f.is_directory)
+            .find(|f| f.name == normalized && !f.is_directory())
             .map(|f| f.content.clone())
             .ok_or(VfsError::FileNotFound)
     }
@@ -203,7 +224,7 @@ impl RamDisk {
         let index = self
             .files
             .iter()
-            .position(|f| f.name == normalized && !f.is_directory)
+            .position(|f| f.name == normalized && !f.is_directory())
             .ok_or(VfsError::FileNotFound)?;
 
         self.files.remove(index);
@@ -221,14 +242,7 @@ impl RamDisk {
 
     /// List all files (flat, for backwards compatibility)
     pub fn list_files(&self) -> Vec<FileInfo> {
-        self.files
-            .iter()
-            .map(|f| {
-                let mut info = FileInfo::new(f.name.clone(), f.size());
-                info.is_directory = f.is_directory;
-                info
-            })
-            .collect()
+        self.files.iter().map(|f| f.to_info(&f.name.clone())).collect()
     }
 
     /// Get total used space
@@ -255,7 +269,7 @@ impl RamDisk {
 
         // Check parent directory exists
         let parent = parent_path(&normalized);
-        if parent != "/" && !self.files.iter().any(|f| f.name == parent && f.is_directory) {
+        if parent != "/" && !self.files.iter().any(|f| f.name == parent && f.is_directory()) {
             return Err(VfsError::FileNotFound);
         }
 
@@ -277,7 +291,7 @@ impl RamDisk {
         }
 
         // Check it exists and is a directory
-        let idx = self.files.iter().position(|f| f.name == normalized && f.is_directory)
+        let idx = self.files.iter().position(|f| f.name == normalized && f.is_directory())
             .ok_or(VfsError::FileNotFound)?;
 
         // Check if empty (no children with this prefix)
@@ -304,7 +318,7 @@ impl RamDisk {
 
         // Verify directory exists
         if normalized != "/" {
-            if !self.files.iter().any(|f| f.name == normalized && f.is_directory) {
+            if !self.files.iter().any(|f| f.name == normalized && f.is_directory()) {
                 return Err(VfsError::NotADirectory);
             }
         }
@@ -342,9 +356,7 @@ impl RamDisk {
             };
 
             if let Some(name) = child_name {
-                let mut info = FileInfo::new(name.to_string(), f.size());
-                info.is_directory = f.is_directory;
-                entries.push(info);
+                entries.push(f.to_info(name));
             }
         }
 
@@ -399,7 +411,7 @@ impl FileSystem for RamDisk {
             return true;
         }
         let normalized = normalize_path(path);
-        self.files.iter().any(|f| f.name == normalized && f.is_directory)
+        self.files.iter().any(|f| f.name == normalized && f.is_directory())
     }
 
     fn rename(&mut self, old_path: &str, new_path: &str) -> VfsResult<()> {
@@ -420,6 +432,69 @@ impl FileSystem for RamDisk {
             }
             None => Err(VfsError::FileNotFound),
         }
+    }
+
+    fn symlink(&mut self, link_path: &str, target: &str) -> VfsResult<()> {
+        let normalized = normalize_path(link_path);
+
+        // Check if already exists
+        if self.files.iter().any(|f| f.name == normalized) {
+            return Err(VfsError::FileExists);
+        }
+
+        // Check parent directory exists
+        let parent = parent_path(&normalized);
+        if parent != "/" && !self.files.iter().any(|f| f.name == parent && f.is_directory()) {
+            return Err(VfsError::FileNotFound);
+        }
+
+        if self.files.len() >= MAX_FILES {
+            return Err(VfsError::TooManyFiles);
+        }
+
+        let link = File::new_symlink(normalized, String::from(target))
+            .map_err(|_| VfsError::InvalidName)?;
+        self.files.push(link);
+        Ok(())
+    }
+
+    fn readlink(&self, path: &str) -> VfsResult<String> {
+        let normalized = normalize_path(path);
+        let file = self.files.iter().find(|f| f.name == normalized)
+            .ok_or(VfsError::FileNotFound)?;
+        match file.symlink_target() {
+            Some(target) => Ok(String::from(target)),
+            None => Err(VfsError::NotAFile), // not a symlink
+        }
+    }
+
+    fn chmod(&mut self, path: &str, mode: u16) -> VfsResult<()> {
+        let normalized = normalize_path(path);
+        let file = self.files.iter_mut().find(|f| f.name == normalized)
+            .ok_or(VfsError::FileNotFound)?;
+        file.mode = mode;
+        file.mtime = current_timestamp();
+        Ok(())
+    }
+
+    fn chown(&mut self, path: &str, uid: u32, gid: u32) -> VfsResult<()> {
+        let normalized = normalize_path(path);
+        let file = self.files.iter_mut().find(|f| f.name == normalized)
+            .ok_or(VfsError::FileNotFound)?;
+        file.uid = uid;
+        file.gid = gid;
+        file.mtime = current_timestamp();
+        Ok(())
+    }
+
+    fn stat(&self, path: &str) -> VfsResult<FileInfo> {
+        if path == "/" {
+            return Ok(FileInfo::directory(String::from("/")));
+        }
+        let normalized = normalize_path(path);
+        let file = self.files.iter().find(|f| f.name == normalized)
+            .ok_or(VfsError::FileNotFound)?;
+        Ok(file.to_info(&file.name.clone()))
     }
 }
 

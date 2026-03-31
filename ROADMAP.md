@@ -58,7 +58,7 @@ Reference architecture: Linux/Unix-like.
 - [x] `clock_gettime` — time (REALTIME from RTC, MONOTONIC from PIT) ✅
 - [x] `getuid` / `getgid` / `geteuid` / `getegid` — user management ✅
 - [x] `mkdir` / `rmdir` / `unlink` / `rename` ✅
-- [ ] `link` / `symlink`
+- [x] `symlink` / `readlink` ✅
 
 ### 2.2 Signal System
 - [x] `kill` — send signal (syscall #62) ✅
@@ -79,10 +79,10 @@ Reference architecture: Linux/Unix-like.
 - [ ] Proper inode abstraction
 - [ ] Dentry cache (directory entry cache)
 - [ ] Mount table with multiple mount points
-- [ ] Path resolution with symlinks
+- [x] Path resolution with symlinks ✅
 - [ ] File locking (flock, fcntl)
-- [ ] File permissions (rwxrwxrwx, uid/gid)
-- [ ] Timestamps (atime, mtime, ctime)
+- [x] File permissions (rwxrwxrwx, uid/gid) ✅
+- [x] Timestamps (atime, mtime, ctime) ✅
 
 ### 3.2 FAT32 Completion
 - [ ] Long Filename (LFN) support (currently 8.3 only)

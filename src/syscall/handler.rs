@@ -741,67 +741,59 @@ struct LinuxStat {
 // File type bits for st_mode
 const S_IFDIR: u32 = 0o040000;  // Directory
 const S_IFREG: u32 = 0o100000;  // Regular file
+const S_IFLNK: u32 = 0o120000;  // Symbolic link
+const S_IFCHR: u32 = 0o020000;  // Character device
 
 /// Fill a LinuxStat struct for a given path
 fn fill_stat(path: &str, stat_ptr: usize) -> isize {
-    use crate::fs::vfs::VfsContext;
+    use crate::fs::vfs::{VfsContext, VfsFileType};
 
-    // Check if path exists and get info
-    let is_dir = VfsContext::is_directory(path);
-    let file_size = if is_dir {
-        0i64
-    } else {
-        // Try to read file to get size
-        let data = {
-            if let Some(ref fs) = *FAT32.lock() {
-                fs.read(path).ok()
-            } else {
-                RAMDISK.lock().read(path).ok()
-            }
-        };
-        match data {
-            Some(d) => d.len() as i64,
-            None => {
-                if !is_dir {
-                    return SyscallError::FileNotFound.as_isize();
-                }
-                0
-            }
-        }
+    let info = match VfsContext::stat(path) {
+        Ok(info) => info,
+        Err(_) => return SyscallError::FileNotFound.as_isize(),
     };
 
-    // Get current time from RTC for timestamps
-    let dt = crate::drivers::rtc::read_datetime();
-    let now = dt.to_unix_timestamp() as i64;
-
-    let mode = if is_dir {
-        S_IFDIR | 0o755
-    } else {
-        S_IFREG | 0o644
+    let type_bits = match info.file_type {
+        VfsFileType::Directory => S_IFDIR,
+        VfsFileType::Regular => S_IFREG,
+        VfsFileType::Symlink => S_IFLNK,
+        VfsFileType::CharDevice => S_IFCHR,
+        VfsFileType::BlockDevice => 0o060000,
     };
+    let mode = type_bits | (info.mode as u32);
 
+    let file_size = info.size as i64;
     let blocks = (file_size + 511) / 512;
 
     // Simple inode: hash the path
     let ino = path.bytes().fold(1u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
+
+    // Use file timestamps if available, otherwise fall back to RTC
+    let (atime, mtime, ctime) = if info.mtime > 0 || info.ctime > 0 {
+        (info.atime as i64, info.mtime as i64, info.ctime as i64)
+    } else {
+        let dt = crate::drivers::rtc::read_datetime();
+        let now = dt.to_unix_timestamp() as i64;
+        (now, now, now)
+    };
 
     let stat = LinuxStat {
         st_dev: 0,
         st_ino: ino,
         st_nlink: 1,
         st_mode: mode,
-        st_uid: 0,   // root
-        st_gid: 0,   // root
+        st_uid: info.uid,
+        st_gid: info.gid,
         __pad0: 0,
         st_rdev: 0,
         st_size: file_size,
         st_blksize: 4096,
         st_blocks: blocks,
-        st_atime: now,
+        st_atime: atime,
         st_atime_nsec: 0,
-        st_mtime: now,
+        st_mtime: mtime,
         st_mtime_nsec: 0,
-        st_ctime: now,
+        st_ctime: ctime,
         st_ctime_nsec: 0,
         __unused: [0; 3],
     };

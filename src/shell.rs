@@ -283,14 +283,15 @@ impl Shell {
         if parts.len() == 1 && !partial.contains(' ') {
             // Autocomplete command name
             let commands = [
-                "alias", "cat", "cd", "clear", "cp", "date", "df", "du", "echo",
-                "dmesg", "edit", "env", "exec", "export", "find", "free",
-                "grep", "head", "hello", "help", "history", "hostname", "id",
-                "kill", "less", "ls", "meminfo", "mkdir", "more", "mount", "mv",
-                "printenv", "ps", "pwd", "reboot", "renice", "rm", "rmdir",
-                "shutdown", "sleep", "spawn", "stat", "tail", "time", "top", "touch",
-                "tree", "umount", "uname", "unalias", "unset", "uptime",
-                "usermode", "version", "wc", "which", "whoami", "write",
+                "alias", "cat", "cd", "chmod", "chown", "clear", "cp", "date",
+                "df", "du", "echo", "dmesg", "edit", "env", "exec", "export",
+                "find", "free", "grep", "head", "hello", "help", "history",
+                "hostname", "id", "kill", "less", "ln", "ls", "meminfo", "mkdir",
+                "more", "mount", "mv", "printenv", "ps", "pwd", "readlink",
+                "reboot", "renice", "rm", "rmdir", "shutdown", "sleep", "spawn",
+                "stat", "tail", "time", "top", "touch", "tree", "umount", "uname",
+                "unalias", "unset", "uptime", "usermode", "version", "wc",
+                "which", "whoami", "write",
             ];
 
             let matches: Vec<&str> = commands
@@ -581,6 +582,10 @@ impl Shell {
             "unset" => self.cmd_unset(args),
             "renice" => self.cmd_renice(args),
             "stat" => self.cmd_stat(args),
+            "ln" => self.cmd_ln(args),
+            "chmod" => self.cmd_chmod(args),
+            "chown" => self.cmd_chown(args),
+            "readlink" => self.cmd_readlink(args),
             "exec" => self.cmd_exec(args),
             "seq" => self.cmd_seq(args),
             "test" | "[" => self.cmd_test(args),
@@ -667,6 +672,10 @@ impl Shell {
         println!("  grep      - Search for pattern in file (usage: grep [-i] [-n] pattern file)");
         println!("  edit      - Simple text editor (usage: edit filename)");
         println!("  stat      - Show file status (usage: stat <file>)");
+        println!("  ln        - Create symbolic link (usage: ln -s <target> <link>)");
+        println!("  chmod     - Change permissions (usage: chmod <mode> <file>)");
+        println!("  chown     - Change ownership (usage: chown <uid[:gid]> <file>)");
+        println!("  readlink  - Show symlink target (usage: readlink <link>)");
         println!("  df        - Show disk space usage");
         println!("  du        - Show file sizes (usage: du [file1 file2 ...])");
         println!("  find      - Find files by pattern (usage: find <pattern>)");
@@ -815,15 +824,19 @@ impl Shell {
     }
 
     fn cmd_ls(&self, args: &[&str]) {
-        use crate::fs::vfs::VfsContext;
+        use crate::fs::vfs::{VfsContext, VfsFileType};
         use crate::vga_buffer::{WRITER, Color};
         use x86_64::instructions::interrupts;
 
-        let dir = if args.is_empty() {
-            self.current_dir.as_str()
-        } else {
-            args[0]
-        };
+        let mut long_format = false;
+        let mut dir = self.current_dir.as_str();
+        for arg in args {
+            if *arg == "-l" || *arg == "-la" || *arg == "-al" {
+                long_format = true;
+            } else {
+                dir = arg;
+            }
+        }
 
         match VfsContext::list_dir(dir) {
             Ok(files) => {
@@ -833,26 +846,48 @@ impl Shell {
                 }
 
                 for file in &files {
-                    if file.is_directory {
-                        // Directories in blue
-                        interrupts::without_interrupts(|| {
-                            WRITER.lock().set_color(Color::LightBlue, Color::Black);
-                        });
-                        print!("  {}/", file.name);
-                    } else {
-                        // Files in cyan
-                        interrupts::without_interrupts(|| {
-                            WRITER.lock().set_color(Color::LightCyan, Color::Black);
-                        });
-                        print!("  {}", file.name);
+                    if long_format {
+                        let mode_str = Self::format_mode(file.file_type, file.mode);
+                        print!("{} {:>5} {:>5} {:>8} ", mode_str, file.uid, file.gid, file.size);
                     }
 
-                    // Reset color and show size
+                    match file.file_type {
+                        VfsFileType::Directory => {
+                            interrupts::without_interrupts(|| {
+                                WRITER.lock().set_color(Color::LightBlue, Color::Black);
+                            });
+                            print!("{}/", file.name);
+                        }
+                        VfsFileType::Symlink => {
+                            interrupts::without_interrupts(|| {
+                                WRITER.lock().set_color(Color::LightGreen, Color::Black);
+                            });
+                            // Show symlink target
+                            let full_path = if dir == "/" {
+                                format!("/{}", file.name)
+                            } else {
+                                format!("{}/{}", dir, file.name)
+                            };
+                            if let Ok(target) = VfsContext::readlink(&full_path) {
+                                print!("{} -> {}", file.name, target);
+                            } else {
+                                print!("{}", file.name);
+                            }
+                        }
+                        _ => {
+                            interrupts::without_interrupts(|| {
+                                WRITER.lock().set_color(Color::LightCyan, Color::Black);
+                            });
+                            print!("{}", file.name);
+                        }
+                    }
+
+                    // Reset color
                     interrupts::without_interrupts(|| {
                         WRITER.lock().reset_color();
                     });
 
-                    if !file.is_directory {
+                    if !long_format && file.file_type == VfsFileType::Regular {
                         print!("  {} bytes", file.size);
                     }
                     println!();
@@ -2518,10 +2553,7 @@ impl Shell {
             return;
         }
 
-        use crate::fs::vfs::VfsContext;
-        use crate::fs::ramdisk::RAMDISK;
-        use crate::fs::fat32::FAT32;
-        use crate::fs::vfs::FileSystem;
+        use crate::fs::vfs::{VfsContext, VfsFileType};
 
         for filename in args {
             let path = if filename.starts_with('/') {
@@ -2532,48 +2564,200 @@ impl Shell {
                 format!("{}/{}", self.current_dir, filename)
             };
 
-            let is_dir = VfsContext::is_directory(&path);
-            let file_size = if is_dir {
-                0usize
-            } else {
-                let data = {
-                    if let Some(ref fs) = *FAT32.lock() {
-                        fs.read(&path).ok()
-                    } else {
-                        RAMDISK.lock().read(&path).ok()
-                    }
-                };
-                match data {
-                    Some(d) => d.len(),
-                    None => {
-                        if !is_dir {
-                            println!("stat: cannot stat '{}': No such file or directory", filename);
-                            continue;
-                        }
-                        0
-                    }
+            let info = match VfsContext::stat(&path) {
+                Ok(info) => info,
+                Err(_) => {
+                    println!("stat: cannot stat '{}': No such file or directory", filename);
+                    continue;
                 }
             };
 
-            let file_type = if is_dir { "directory" } else { "regular file" };
-            let mode_str = if is_dir { "drwxr-xr-x" } else { "-rw-r--r--" };
-            let mode_oct = if is_dir { "0755" } else { "0644" };
-            let blocks = (file_size + 511) / 512;
+            let file_type = match info.file_type {
+                VfsFileType::Directory => "directory",
+                VfsFileType::Regular => "regular file",
+                VfsFileType::Symlink => "symbolic link",
+                VfsFileType::CharDevice => "character device",
+                VfsFileType::BlockDevice => "block device",
+            };
+
+            let mode_str = Self::format_mode(info.file_type, info.mode);
+            let blocks = (info.size + 511) / 512;
 
             println!("  File: {}", filename);
-            println!("  Size: {:<15} Blocks: {:<10} {}", file_size, blocks, file_type);
-            println!("Access: ({}/{})  Uid: (    0/    root)   Gid: (    0/    root)", mode_oct, mode_str);
+            // Show symlink target if applicable
+            if info.file_type == VfsFileType::Symlink {
+                if let Ok(target) = VfsContext::readlink(&path) {
+                    println!("  File: {} -> {}", filename, target);
+                }
+            }
+            println!("  Size: {:<15} Blocks: {:<10} {}", info.size, blocks, file_type);
+            println!("Access: ({:04o}/{})  Uid: ({:>5}/    root)   Gid: ({:>5}/    root)",
+                info.mode, mode_str, info.uid, info.gid);
 
-            // Show timestamps from RTC
+            // Show timestamps
             let dt = crate::drivers::rtc::read_datetime();
             let mut buf = [0u8; 32];
             let len = dt.format(&mut buf);
             let time_str = core::str::from_utf8(&buf[..len]).unwrap_or("unknown");
-            println!("Modify: {}", time_str);
+            if info.mtime > 0 {
+                println!("Modify: boot+{}s (RTC: {})", info.mtime, time_str);
+            } else {
+                println!("Modify: {}", time_str);
+            }
         }
     }
 
-    /// Execute ELF binary in user mode
+    /// Format mode bits as rwxrwxrwx string
+    fn format_mode(file_type: crate::fs::vfs::VfsFileType, mode: u16) -> String {
+        use crate::fs::vfs::VfsFileType;
+        let prefix = match file_type {
+            VfsFileType::Directory => 'd',
+            VfsFileType::Symlink => 'l',
+            VfsFileType::CharDevice => 'c',
+            VfsFileType::BlockDevice => 'b',
+            VfsFileType::Regular => '-',
+        };
+        let mut s = String::with_capacity(10);
+        s.push(prefix);
+        s.push(if mode & 0o400 != 0 { 'r' } else { '-' });
+        s.push(if mode & 0o200 != 0 { 'w' } else { '-' });
+        s.push(if mode & 0o100 != 0 { 'x' } else { '-' });
+        s.push(if mode & 0o040 != 0 { 'r' } else { '-' });
+        s.push(if mode & 0o020 != 0 { 'w' } else { '-' });
+        s.push(if mode & 0o010 != 0 { 'x' } else { '-' });
+        s.push(if mode & 0o004 != 0 { 'r' } else { '-' });
+        s.push(if mode & 0o002 != 0 { 'w' } else { '-' });
+        s.push(if mode & 0o001 != 0 { 'x' } else { '-' });
+        s
+    }
+
+    /// ln - create symbolic links
+    fn cmd_ln(&self, args: &[&str]) {
+        use crate::fs::vfs::VfsContext;
+
+        // Parse -s flag for symbolic link
+        if args.len() < 2 || args[0] != "-s" {
+            println!("Usage: ln -s <target> <link_name>");
+            return;
+        }
+        if args.len() < 3 {
+            println!("Usage: ln -s <target> <link_name>");
+            return;
+        }
+
+        let target = args[1];
+        let link_name = args[2];
+
+        let link_path = if link_name.starts_with('/') {
+            String::from(link_name)
+        } else if self.current_dir == "/" {
+            format!("/{}", link_name)
+        } else {
+            format!("{}/{}", self.current_dir, link_name)
+        };
+
+        match VfsContext::symlink(&link_path, target) {
+            Ok(()) => {}
+            Err(e) => println!("ln: failed to create symlink: {:?}", e),
+        }
+    }
+
+    /// chmod - change file mode bits
+    fn cmd_chmod(&self, args: &[&str]) {
+        use crate::fs::vfs::VfsContext;
+
+        if args.len() < 2 {
+            println!("Usage: chmod <mode> <file>");
+            return;
+        }
+
+        let mode_str = args[0];
+        let filename = args[1];
+
+        // Parse octal mode
+        let mode = match u16::from_str_radix(mode_str, 8) {
+            Ok(m) => m,
+            Err(_) => {
+                println!("chmod: invalid mode '{}'", mode_str);
+                return;
+            }
+        };
+
+        let path = if filename.starts_with('/') {
+            String::from(filename)
+        } else if self.current_dir == "/" {
+            format!("/{}", filename)
+        } else {
+            format!("{}/{}", self.current_dir, filename)
+        };
+
+        match VfsContext::chmod(&path, mode) {
+            Ok(()) => {}
+            Err(e) => println!("chmod: cannot change permissions of '{}': {:?}", filename, e),
+        }
+    }
+
+    /// chown - change file owner and group
+    fn cmd_chown(&self, args: &[&str]) {
+        use crate::fs::vfs::VfsContext;
+
+        if args.len() < 2 {
+            println!("Usage: chown <owner[:group]> <file>");
+            return;
+        }
+
+        let owner_str = args[0];
+        let filename = args[1];
+
+        // Parse owner:group
+        let (uid, gid) = if let Some(colon_pos) = owner_str.find(':') {
+            let uid: u32 = owner_str[..colon_pos].parse().unwrap_or(0);
+            let gid: u32 = owner_str[colon_pos + 1..].parse().unwrap_or(0);
+            (uid, gid)
+        } else {
+            let uid: u32 = owner_str.parse().unwrap_or(0);
+            (uid, 0)
+        };
+
+        let path = if filename.starts_with('/') {
+            String::from(filename)
+        } else if self.current_dir == "/" {
+            format!("/{}", filename)
+        } else {
+            format!("{}/{}", self.current_dir, filename)
+        };
+
+        match VfsContext::chown(&path, uid, gid) {
+            Ok(()) => {}
+            Err(e) => println!("chown: cannot change ownership of '{}': {:?}", filename, e),
+        }
+    }
+
+    /// readlink - print the target of a symbolic link
+    fn cmd_readlink(&self, args: &[&str]) {
+        use crate::fs::vfs::VfsContext;
+
+        if args.is_empty() {
+            println!("Usage: readlink <link>");
+            return;
+        }
+
+        for filename in args {
+            let path = if filename.starts_with('/') {
+                String::from(*filename)
+            } else if self.current_dir == "/" {
+                format!("/{}", filename)
+            } else {
+                format!("{}/{}", self.current_dir, filename)
+            };
+
+            match VfsContext::readlink(&path) {
+                Ok(target) => println!("{}", target),
+                Err(_) => println!("readlink: {}: Invalid argument", filename),
+            }
+        }
+    }
+
     /// seq - print a sequence of numbers
     fn cmd_seq(&self, args: &[&str]) {
         let (start, end, step) = match args.len() {

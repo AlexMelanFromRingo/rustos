@@ -5,8 +5,19 @@
 
 use alloc::vec::Vec;
 use alloc::string::String;
+use alloc::format;
 use crate::fs::fat32::FAT32;
 use crate::fs::ramdisk::RAMDISK;
+
+/// File type for VFS layer
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VfsFileType {
+    Regular,
+    Directory,
+    Symlink,
+    CharDevice,
+    BlockDevice,
+}
 
 /// Information about a file or directory in the filesystem
 #[derive(Debug, Clone)]
@@ -14,15 +25,47 @@ pub struct FileInfo {
     pub name: String,
     pub size: usize,
     pub is_directory: bool,
+    pub file_type: VfsFileType,
+    pub mode: u16,          // Unix permission bits
+    pub uid: u32,
+    pub gid: u32,
+    pub ctime: u64,         // Creation time (seconds since boot)
+    pub mtime: u64,         // Modification time
+    pub atime: u64,         // Access time
 }
 
 impl FileInfo {
     pub fn new(name: String, size: usize) -> Self {
-        FileInfo { name, size, is_directory: false }
+        FileInfo {
+            name, size,
+            is_directory: false,
+            file_type: VfsFileType::Regular,
+            mode: 0o644,
+            uid: 0, gid: 0,
+            ctime: 0, mtime: 0, atime: 0,
+        }
     }
 
     pub fn directory(name: String) -> Self {
-        FileInfo { name, size: 0, is_directory: true }
+        FileInfo {
+            name, size: 0,
+            is_directory: true,
+            file_type: VfsFileType::Directory,
+            mode: 0o755,
+            uid: 0, gid: 0,
+            ctime: 0, mtime: 0, atime: 0,
+        }
+    }
+
+    pub fn symlink(name: String, target_len: usize) -> Self {
+        FileInfo {
+            name, size: target_len,
+            is_directory: false,
+            file_type: VfsFileType::Symlink,
+            mode: 0o777,
+            uid: 0, gid: 0,
+            ctime: 0, mtime: 0, atime: 0,
+        }
     }
 }
 
@@ -97,6 +140,31 @@ pub trait FileSystem {
     /// Rename/move a file or directory
     fn rename(&mut self, old_path: &str, new_path: &str) -> VfsResult<()>;
 
+    /// Create a symbolic link
+    fn symlink(&mut self, _link_path: &str, _target: &str) -> VfsResult<()> {
+        Err(VfsError::PermissionDenied)
+    }
+
+    /// Read the target of a symbolic link
+    fn readlink(&self, _path: &str) -> VfsResult<String> {
+        Err(VfsError::NotAFile)
+    }
+
+    /// Change file permissions
+    fn chmod(&mut self, _path: &str, _mode: u16) -> VfsResult<()> {
+        Err(VfsError::PermissionDenied)
+    }
+
+    /// Change file ownership
+    fn chown(&mut self, _path: &str, _uid: u32, _gid: u32) -> VfsResult<()> {
+        Err(VfsError::PermissionDenied)
+    }
+
+    /// Get detailed file information
+    fn stat(&self, _path: &str) -> VfsResult<FileInfo> {
+        Err(VfsError::FileNotFound)
+    }
+
     /// Get free space (in bytes)
     fn free_space(&self) -> usize {
         self.total_space().saturating_sub(self.used_space())
@@ -110,8 +178,12 @@ pub trait FileSystem {
 pub struct VfsContext;
 
 impl VfsContext {
-    /// Read a file from the active filesystem
+    /// Read a file from the active filesystem (follows symlinks)
     pub fn read(path: &str) -> VfsResult<Vec<u8>> {
+        // Resolve symlinks first
+        let resolved = Self::resolve_path(path)?;
+        let path = resolved.as_str();
+
         // Check /proc virtual filesystem first
         if super::procfs::is_proc_path(path) {
             return super::procfs::read_proc(path)
@@ -401,6 +473,153 @@ impl VfsContext {
         drop(fat32);
 
         RAMDISK.lock().rename(old_path, new_path)
+    }
+
+    /// Create a symbolic link
+    pub fn symlink(link_path: &str, target: &str) -> VfsResult<()> {
+        if super::tmpfs::is_tmp_path(link_path) || super::procfs::is_proc_path(link_path)
+            || super::devfs::is_dev_path(link_path) || super::sysfs::is_sys_path(link_path)
+        {
+            return Err(VfsError::PermissionDenied);
+        }
+
+        let mut fat32 = FAT32.lock();
+        if let Some(ref mut _fs) = *fat32 {
+            // FAT32 doesn't support symlinks
+            return Err(VfsError::PermissionDenied);
+        }
+        drop(fat32);
+
+        RAMDISK.lock().symlink(link_path, target)
+    }
+
+    /// Read symlink target
+    pub fn readlink(path: &str) -> VfsResult<String> {
+        let fat32 = FAT32.lock();
+        if fat32.is_some() {
+            return Err(VfsError::PermissionDenied); // FAT32 no symlinks
+        }
+        drop(fat32);
+
+        RAMDISK.lock().readlink(path)
+    }
+
+    /// Change file permissions
+    pub fn chmod(path: &str, mode: u16) -> VfsResult<()> {
+        if super::procfs::is_proc_path(path) || super::sysfs::is_sys_path(path)
+            || super::devfs::is_dev_path(path)
+        {
+            return Err(VfsError::PermissionDenied);
+        }
+
+        let mut fat32 = FAT32.lock();
+        if let Some(ref mut _fs) = *fat32 {
+            return Err(VfsError::PermissionDenied); // FAT32 no permissions
+        }
+        drop(fat32);
+
+        RAMDISK.lock().chmod(path, mode)
+    }
+
+    /// Change file ownership
+    pub fn chown(path: &str, uid: u32, gid: u32) -> VfsResult<()> {
+        if super::procfs::is_proc_path(path) || super::sysfs::is_sys_path(path)
+            || super::devfs::is_dev_path(path)
+        {
+            return Err(VfsError::PermissionDenied);
+        }
+
+        let mut fat32 = FAT32.lock();
+        if let Some(ref mut _fs) = *fat32 {
+            return Err(VfsError::PermissionDenied);
+        }
+        drop(fat32);
+
+        RAMDISK.lock().chown(path, uid, gid)
+    }
+
+    /// Get detailed file information
+    pub fn stat(path: &str) -> VfsResult<FileInfo> {
+        // Virtual filesystems
+        if super::procfs::is_proc_path(path) {
+            let is_dir = super::procfs::is_directory(path);
+            if is_dir {
+                return Ok(FileInfo::directory(String::from(path)));
+            }
+            let data = super::procfs::read_proc(path).ok_or(VfsError::FileNotFound)?;
+            let mut info = FileInfo::new(String::from(path), data.len());
+            info.mode = 0o444; // read-only
+            return Ok(info);
+        }
+        if super::devfs::is_dev_path(path) {
+            let is_dir = super::devfs::is_directory(path);
+            if is_dir {
+                return Ok(FileInfo::directory(String::from(path)));
+            }
+            let mut info = FileInfo::new(String::from(path), 0);
+            info.file_type = VfsFileType::CharDevice;
+            info.mode = 0o666;
+            return Ok(info);
+        }
+        if super::sysfs::is_sys_path(path) {
+            let is_dir = super::sysfs::is_directory(path);
+            if is_dir {
+                return Ok(FileInfo::directory(String::from(path)));
+            }
+            let data = super::sysfs::read_sys(path).ok_or(VfsError::FileNotFound)?;
+            let mut info = FileInfo::new(String::from(path), data.len());
+            info.mode = 0o444;
+            return Ok(info);
+        }
+        if super::tmpfs::is_tmp_path(path) {
+            if super::tmpfs::is_directory(path) {
+                return Ok(FileInfo::directory(String::from(path)));
+            }
+            let data = super::tmpfs::read(path).map_err(|_| VfsError::FileNotFound)?;
+            return Ok(FileInfo::new(String::from(path), data.len()));
+        }
+
+        let fat32 = FAT32.lock();
+        if let Some(ref fs) = *fat32 {
+            // FAT32 stat: basic info
+            if fs.is_directory(path) {
+                return Ok(FileInfo::directory(String::from(path)));
+            }
+            match fs.read(path) {
+                Ok(data) => return Ok(FileInfo::new(String::from(path), data.len())),
+                Err(e) => return Err(e),
+            }
+        }
+        drop(fat32);
+
+        RAMDISK.lock().stat(path)
+    }
+
+    /// Resolve symlinks in a path (up to 8 levels deep)
+    pub fn resolve_path(path: &str) -> VfsResult<String> {
+        let mut resolved = String::from(path);
+        for _ in 0..8 {
+            match Self::readlink(&resolved) {
+                Ok(target) => {
+                    if target.starts_with('/') {
+                        resolved = target;
+                    } else {
+                        // Relative symlink: resolve against parent
+                        let parent = match resolved.rfind('/') {
+                            Some(idx) if idx > 0 => &resolved[..idx],
+                            _ => "/",
+                        };
+                        resolved = if parent == "/" {
+                            format!("/{}", target)
+                        } else {
+                            format!("{}/{}", parent, target)
+                        };
+                    }
+                }
+                Err(_) => return Ok(resolved), // not a symlink, done
+            }
+        }
+        Err(VfsError::IoError) // too many symlink levels
     }
 
     /// Check if FAT32 is currently mounted
