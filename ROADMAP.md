@@ -124,7 +124,8 @@ Reference architecture: Linux/Unix-like.
 - [ ] Virtio-net driver (QEMU paravirt)
 - [ ] Ethernet frame handling
 - [ ] ARP (Address Resolution Protocol)
-- [ ] IPv4 stack (IP, ICMP)
+- [x] IPv4 stack (IP header parse/serialise, RFC 1071 checksum) ✅
+- [x] ICMP echo (ping over loopback works end-to-end) ✅
 - [ ] UDP
 - [ ] TCP (connection management, flow control, congestion control)
 - [ ] DHCP client

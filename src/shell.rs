@@ -3599,8 +3599,7 @@ impl Shell {
         }
     }
 
-    /// ping: only loopback supported. Sends N UDP probes to addr:7 (echo).
-    /// Note: there's no real ICMP — this is a UDP-based reachability test.
+    /// ping: real ICMP echo. Loopback only in this build (no NIC driver yet).
     fn cmd_ping(&self, args: &[&str]) {
         if args.is_empty() {
             println!("Usage: ping <ip> [count]");
@@ -3619,46 +3618,50 @@ impl Shell {
         }
         let count: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(3);
 
-        use crate::net::socket::{bind, recvfrom, sendto, socket, SocketDomain, SocketProto, SocketType};
-        use crate::net::SocketAddrV4;
+        // Use the lower 16 bits of timer ticks as a unique identifier so
+        // back-to-back pings don't collide with stray queued replies.
+        let ident = (crate::task::timer::current_ticks() as u16) | 0x8000;
+        let payload: &[u8] = b"abcdefghijklmnopqrstuvwabcdefghi"; // 32 bytes
 
-        // Bind a UDP echo server on 127.0.0.1:7
-        let server = socket(SocketDomain::AF_INET, SocketType::Datagram, SocketProto::Udp);
-        let server_addr = SocketAddrV4 { ip: addr, port: 7 };
-        if bind(server, server_addr).is_err() {
-            // Maybe already bound from a previous run; reuse.
-        }
-
-        // Client socket
-        let client = socket(SocketDomain::AF_INET, SocketType::Datagram, SocketProto::Udp);
-
+        println!("PING {}: 32 data bytes", addr);
+        let mut received = 0usize;
         for seq in 0..count {
-            let payload = alloc::format!("PING seq={} time=now", seq);
-            match sendto(client, payload.as_bytes(), server_addr) {
+            let send_tick = crate::task::timer::current_ticks();
+            match crate::net::icmp::send_echo_request(
+                crate::net::Ipv4Addr::LOCALHOST,
+                addr,
+                ident,
+                seq as u16,
+                payload,
+            ) {
                 Ok(_) => {
-                    // The packet was queued onto lo's RX in transmit_ipv4
-                    // and immediately dispatched, so we should be able to recv now.
-                    let mut buf = [0u8; 128];
-                    match recvfrom(server, &mut buf) {
-                        Ok((n, from)) => {
-                            let s = core::str::from_utf8(&buf[..n]).unwrap_or("<binary>");
-                            println!("{} bytes from {}: {}", n, from, s);
-                        }
-                        Err(e) => {
-                            println!("ping: recv error: {:?}", e);
-                            break;
-                        }
+                    // The reply is dispatched synchronously by lo's TX path.
+                    if let Some(reply) = crate::net::icmp::drain_echo_reply(ident, seq as u16) {
+                        let dt_ticks = reply.recv_tick.saturating_sub(send_tick);
+                        let dt_ms = dt_ticks * 55; // ~PIT period
+                        println!(
+                            "{} bytes from {}: icmp_seq={} time={}ms",
+                            reply.payload.len(),
+                            reply.from,
+                            seq,
+                            dt_ms
+                        );
+                        received += 1;
+                    } else {
+                        println!("Request timeout for icmp_seq {}", seq);
                     }
                 }
                 Err(e) => {
-                    println!("ping: send error: {:?}", e);
+                    println!("ping: send error: {}", e);
                     break;
                 }
             }
         }
-
-        crate::net::socket::close(client);
-        crate::net::socket::close(server);
+        let lost = count - received;
+        let loss_pct = if count == 0 { 0 } else { lost * 100 / count };
+        println!("--- {} ping statistics ---", addr);
+        println!("{} packets transmitted, {} received, {}% packet loss",
+            count, received, loss_pct);
     }
 
     /// udptest: send-recv loopback round-trip with payload validation.

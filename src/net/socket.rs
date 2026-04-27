@@ -5,7 +5,7 @@
 //! receive queue.  Outbound datagrams go through the protocol layer
 //! ([`udp`](super::udp)) and onto the routed interface.
 
-use super::ip::{Ipv4Header, IPV4_HEADER_LEN, PROTO_UDP};
+use super::ip::{Ipv4Header, IPV4_HEADER_LEN, PROTO_ICMP, PROTO_UDP};
 use super::udp::{UdpHeader, UDP_HEADER_LEN, build_datagram};
 use super::{Ipv4Addr, SocketAddrV4};
 use alloc::collections::VecDeque;
@@ -179,10 +179,14 @@ pub fn sendto(
 
     let datagram = build_datagram(src, dst, payload);
 
-    // Route + transmit.
-    let mut stack = super::NET_STACK.lock();
-    let iface_entry = stack.route(dst.ip).ok_or(SocketError::NoRoute)?;
-    iface_entry.iface.transmit_ipv4(&datagram).map_err(|_| SocketError::Unreachable)?;
+    // Route + transmit.  Drop the stack lock before draining so callbacks
+    // (e.g. ICMP reply path) can re-enter the stack.
+    {
+        let mut stack = super::NET_STACK.lock();
+        let iface_entry = stack.route(dst.ip).ok_or(SocketError::NoRoute)?;
+        iface_entry.iface.transmit_ipv4(&datagram).map_err(|_| SocketError::Unreachable)?;
+    }
+    super::drain_pending();
     Ok(payload.len())
 }
 
@@ -233,6 +237,7 @@ pub fn ipv4_input(packet: &[u8]) {
 
     match hdr.protocol {
         PROTO_UDP => udp_input(&hdr, &packet[IPV4_HEADER_LEN..hdr.total_length as usize]),
+        PROTO_ICMP => super::icmp::icmp_input(&hdr, &packet[IPV4_HEADER_LEN..hdr.total_length as usize]),
         _ => {} // unknown protocol — silently drop
     }
 }

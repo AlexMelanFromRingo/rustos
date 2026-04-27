@@ -4,8 +4,15 @@
 //! queue and immediately dispatched to the socket layer.
 
 use super::{Ipv4Addr, NetInterface};
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
+use spin::Mutex;
+
+/// Pending loopback datagrams that have been "transmitted" but not yet
+/// dispatched to the protocol layer.  We queue here instead of calling
+/// `ipv4_input` directly to avoid recursive locking on `NET_STACK`.
+static LO_RX_QUEUE: Mutex<VecDeque<Vec<u8>>> = Mutex::new(VecDeque::new());
 
 pub struct LoopbackIface {
     up: bool,
@@ -56,10 +63,17 @@ impl NetInterface for LoopbackIface {
         self.record_tx(packet.len() as u64);
         self.record_rx(packet.len() as u64);
 
-        // Hand the packet to the protocol layer for delivery.
-        super::socket::ipv4_input(packet);
+        // Queue the packet on the RX queue.  The caller will drain it after
+        // releasing NET_STACK so the protocol layer can re-enter sendto/etc.
+        LO_RX_QUEUE.lock().push_back(packet.to_vec());
         Ok(())
     }
+}
+
+/// Pop one queued loopback packet, if any.  Used by `drain_pending` so the
+/// protocol layer can dispatch with `NET_STACK` *not* held.
+pub fn pop_pending() -> Option<Vec<u8>> {
+    LO_RX_QUEUE.lock().pop_front()
 }
 
 /// Convenience: copy a packet without holding the iface mutex (to avoid

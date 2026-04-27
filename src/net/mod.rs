@@ -18,6 +18,7 @@
 
 pub mod ip;
 pub mod udp;
+pub mod icmp;
 pub mod loopback;
 pub mod socket;
 
@@ -146,6 +147,20 @@ pub fn init() {
     stack.register(alloc::boxed::Box::new(loopback::LoopbackIface::new()));
     let lo = stack.interfaces.iter_mut().next().unwrap();
     lo.iface.set_up(true);
+}
+
+/// Dispatch any packets that have been queued on interface RX queues to the
+/// protocol layer.  Callers that send packets must call this *after* dropping
+/// the [`NET_STACK`] lock so the input path can call back into routing.
+///
+/// Loops up to a small ceiling so a busy local-only chatter can't livelock.
+pub fn drain_pending() {
+    for _ in 0..128 {
+        match loopback::pop_pending() {
+            Some(pkt) => socket::ipv4_input(&pkt),
+            None => break,
+        }
+    }
 }
 
 /// Return a single line summary of every registered interface (for ifconfig).
