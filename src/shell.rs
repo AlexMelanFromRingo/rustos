@@ -320,8 +320,9 @@ impl Shell {
                 "meminfo", "mkdir", "more", "mount", "mv", "printenv", "ps",
                 "pwd", "readlink", "reboot", "renice", "rm", "rmdir", "shutdown",
                 "sleep", "spawn", "stat", "tail", "time", "top", "touch", "tree",
-                "umount", "uname", "unalias", "unset", "uptime", "usermode",
-                "version", "wc", "which", "whoami", "write",
+                "umount", "uname", "unalias", "unset", "uptime", "useradd",
+                "usermode", "version", "wc", "which", "whoami", "write",
+                "passwd", "su",
             ];
 
             let matches: Vec<&str> = commands
@@ -605,8 +606,11 @@ impl Shell {
             "date" => self.cmd_date(),
             "dmesg" => self.cmd_dmesg(args),
             "hostname" => self.cmd_hostname(args),
-            "whoami" => println!("root"),
-            "id" => println!("uid=0(root) gid=0(root) groups=0(root)"),
+            "whoami" => self.cmd_whoami(),
+            "id" => self.cmd_id(),
+            "su" => self.cmd_su(args),
+            "passwd" => self.cmd_passwd(args),
+            "useradd" => self.cmd_useradd(args),
             "uname" => self.cmd_uname(args),
             "free" => self.cmd_free(args),
             "top" => self.cmd_top(),
@@ -1626,8 +1630,8 @@ impl Shell {
             "df" => self.cmd_df(),
             "history" => self.cmd_history(),
             "hostname" => self.cmd_hostname(args),
-            "whoami" => println!("root"),
-            "id" => println!("uid=0(root) gid=0(root) groups=0(root)"),
+            "whoami" => self.cmd_whoami(),
+            "id" => self.cmd_id(),
             _ => {
                 let _ = crate::vga_buffer::stop_capture();
                 println!("Error: Command '{}' does not support output redirection", cmd);
@@ -1711,8 +1715,8 @@ impl Shell {
                 "df" => self.cmd_df(),
                 "pwd" => self.cmd_pwd(),
                 "hostname" => self.cmd_hostname(args),
-                "whoami" => println!("root"),
-                "id" => println!("uid=0(root) gid=0(root) groups=0(root)"),
+                "whoami" => self.cmd_whoami(),
+                "id" => self.cmd_id(),
                 "top" => self.cmd_top(),
                 "kill" => self.cmd_kill(args),
                 _ => println!("Pipe: '{}' cannot produce output", cmd),
@@ -3107,6 +3111,306 @@ impl Shell {
 
         // We return here after user program exits!
         println!("\nProgram exited, returned to shell.");
+    }
+
+    /// Print current user name (whoami)
+    fn cmd_whoami(&self) {
+        let creds = crate::users::CURRENT_CREDS.lock();
+        println!("{}", creds.username);
+    }
+
+    /// Print uid/gid/groups (id)
+    fn cmd_id(&self) {
+        let creds = crate::users::CURRENT_CREDS.lock();
+        let db = crate::users::USER_DB.lock();
+        let uname = creds.username.clone();
+        let primary_group_name = db.get_group_by_gid(creds.gid)
+            .map(|g| g.name.clone())
+            .unwrap_or_else(|| String::from("unknown"));
+
+        // Build supplementary group list
+        let mut group_list = String::new();
+        let groups = db.user_groups(&uname);
+        for (i, g) in groups.iter().enumerate() {
+            if i > 0 {
+                group_list.push(',');
+            }
+            group_list.push_str(&format!("{}({})", g.gid, g.name));
+        }
+        if group_list.is_empty() {
+            group_list = format!("{}({})", creds.gid, primary_group_name);
+        }
+
+        println!(
+            "uid={}({}) gid={}({}) groups={}",
+            creds.uid, uname, creds.gid, primary_group_name, group_list
+        );
+    }
+
+    /// Switch user (su)
+    fn cmd_su(&mut self, args: &[&str]) {
+        let target = if args.is_empty() { "root" } else { args[0] };
+        let db = crate::users::USER_DB.lock();
+        let user = match db.get_user(target) {
+            Some(u) => u.clone(),
+            None => {
+                println!("su: user {} does not exist", target);
+                return;
+            }
+        };
+        drop(db);
+
+        // If we're already root, no password needed
+        let need_password = {
+            let creds = crate::users::CURRENT_CREDS.lock();
+            creds.uid != 0
+        };
+
+        if need_password {
+            // Read password from input (echo off would be nicer, but for now just prompt)
+            print!("Password: ");
+            // Read a line from stdin via VFS
+            let pw = self.read_password();
+            let db = crate::users::USER_DB.lock();
+            if !db.check_password(target, &pw) {
+                println!("\nsu: Authentication failure");
+                return;
+            }
+        }
+
+        // Switch credentials
+        let mut creds = crate::users::CURRENT_CREDS.lock();
+        creds.uid = user.uid;
+        creds.gid = user.gid;
+        creds.euid = user.uid;
+        creds.egid = user.gid;
+        creds.username = user.name.clone();
+        drop(creds);
+
+        // Move to user's home directory if it exists
+        if !user.home.is_empty() {
+            self.current_dir = user.home.clone();
+        }
+
+        println!("Switched to user '{}' (uid={})", user.name, user.uid);
+    }
+
+    /// Change password (passwd)
+    fn cmd_passwd(&mut self, args: &[&str]) {
+        let target = if args.is_empty() {
+            crate::users::CURRENT_CREDS.lock().username.clone()
+        } else {
+            String::from(args[0])
+        };
+
+        let creds = crate::users::CURRENT_CREDS.lock();
+        let current_user = creds.username.clone();
+        let is_root = creds.uid == 0;
+        drop(creds);
+
+        // Only root can change other users' passwords
+        if target != current_user && !is_root {
+            println!("passwd: You may not change passwords for other users.");
+            return;
+        }
+
+        // Verify the current password if not root
+        if !is_root {
+            print!("Current password: ");
+            let cur = self.read_password();
+            let db = crate::users::USER_DB.lock();
+            if !db.check_password(&target, &cur) {
+                println!("\npasswd: Authentication failure");
+                return;
+            }
+        }
+
+        print!("New password: ");
+        let pw1 = self.read_password();
+        if pw1.len() < 4 {
+            println!("\npasswd: password too short (minimum 4 characters)");
+            return;
+        }
+        print!("Retype new password: ");
+        let pw2 = self.read_password();
+        if pw1 != pw2 {
+            println!("\npasswd: passwords do not match");
+            return;
+        }
+
+        let mut db = crate::users::USER_DB.lock();
+        match db.set_password(&target, &pw1) {
+            Ok(_) => {
+                // Persist to /etc/shadow style — for now just regenerate /etc/passwd
+                println!("\npasswd: password updated successfully");
+                let _ = self.persist_user_db(&db);
+            }
+            Err(e) => println!("\npasswd: {}", e),
+        }
+    }
+
+    /// Add a new user (useradd)
+    fn cmd_useradd(&mut self, args: &[&str]) {
+        let creds = crate::users::CURRENT_CREDS.lock();
+        if creds.uid != 0 {
+            println!("useradd: only root may add users");
+            return;
+        }
+        drop(creds);
+
+        if args.is_empty() {
+            println!("Usage: useradd [-u UID] [-g GID] [-d HOME] [-s SHELL] <name>");
+            return;
+        }
+
+        let mut uid: Option<u32> = None;
+        let mut gid: u32 = 100; // default: users group
+        let mut home: Option<String> = None;
+        let mut shell: String = String::from("/bin/sh");
+        let mut name: Option<&str> = None;
+
+        let mut i = 0;
+        while i < args.len() {
+            match args[i] {
+                "-u" if i + 1 < args.len() => {
+                    uid = args[i + 1].parse().ok();
+                    i += 2;
+                }
+                "-g" if i + 1 < args.len() => {
+                    gid = args[i + 1].parse().unwrap_or(100);
+                    i += 2;
+                }
+                "-d" if i + 1 < args.len() => {
+                    home = Some(String::from(args[i + 1]));
+                    i += 2;
+                }
+                "-s" if i + 1 < args.len() => {
+                    shell = String::from(args[i + 1]);
+                    i += 2;
+                }
+                arg if !arg.starts_with('-') => {
+                    name = Some(arg);
+                    i += 1;
+                }
+                _ => i += 1,
+            }
+        }
+
+        let name = match name {
+            Some(n) => n,
+            None => {
+                println!("useradd: missing username");
+                return;
+            }
+        };
+
+        // Auto-assign UID if not given
+        let mut db = crate::users::USER_DB.lock();
+        let uid = uid.unwrap_or_else(|| {
+            let mut next = 1000u32;
+            for u in db.users() {
+                if u.uid >= next && u.uid < 65000 {
+                    next = u.uid + 1;
+                }
+            }
+            next
+        });
+
+        let home = home.unwrap_or_else(|| format!("/home/{}", name));
+
+        let user = crate::users::User {
+            name: String::from(name),
+            password_hash: String::from("*"), // locked initially
+            uid,
+            gid,
+            comment: String::new(),
+            home: home.clone(),
+            shell,
+        };
+
+        match db.add_user(user) {
+            Ok(_) => {
+                println!("useradd: created user '{}' (uid={}, gid={})", name, uid, gid);
+                let _ = self.persist_user_db(&db);
+                drop(db);
+                // Create home directory
+                if !home.is_empty() && home != "/" {
+                    use crate::fs::vfs::VfsContext;
+                    let _ = VfsContext::mkdir(&home);
+                }
+            }
+            Err(e) => println!("useradd: {}", e),
+        }
+    }
+
+    /// Read a password line from stdin synchronously, without echoing characters.
+    ///
+    /// Polls the serial and scancode queues directly so this works even though
+    /// the rest of the shell input loop is async.
+    fn read_password(&mut self) -> String {
+        use crate::task::keyboard::{SCANCODE_QUEUE, SERIAL_QUEUE};
+        use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
+
+        let mut keyboard = Keyboard::new(
+            ScancodeSet1::new(),
+            layouts::Us104Key,
+            HandleControl::MapLettersToUnicode,
+        );
+
+        let mut buf = String::new();
+        loop {
+            let mut got_char: Option<char> = None;
+
+            // Serial queue first (already decoded)
+            if let Ok(q) = SERIAL_QUEUE.try_get() {
+                if let Some(byte) = q.pop() {
+                    got_char = match byte {
+                        b'\r' | b'\n' => Some('\n'),
+                        0x7F | 0x08 => Some('\u{0008}'),
+                        b if (0x20..=0x7E).contains(&b) => Some(b as char),
+                        _ => None,
+                    };
+                }
+            }
+
+            // Scancode queue
+            if got_char.is_none() {
+                if let Ok(q) = SCANCODE_QUEUE.try_get() {
+                    if let Some(scancode) = q.pop() {
+                        if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
+                            if let Some(key) = keyboard.process_keyevent(key_event) {
+                                if let DecodedKey::Unicode(c) = key {
+                                    got_char = Some(c);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some(c) = got_char {
+                if c == '\n' || c == '\r' {
+                    println!();
+                    return buf;
+                } else if c == '\u{0008}' || c == '\u{007F}' {
+                    buf.pop();
+                } else if c.is_ascii() && !c.is_control() {
+                    buf.push(c);
+                    // Echo a star to give feedback without revealing the password
+                    print!("*");
+                }
+            } else {
+                x86_64::instructions::interrupts::enable_and_hlt();
+            }
+        }
+    }
+
+    /// Persist user database to /etc/passwd and /etc/group
+    fn persist_user_db(&self, db: &crate::users::UserDb) -> Result<(), ()> {
+        use crate::fs::vfs::VfsContext;
+        let _ = VfsContext::write("/etc/passwd", db.to_passwd_string().as_bytes().to_vec());
+        let _ = VfsContext::write("/etc/group", db.to_group_string().as_bytes().to_vec());
+        Ok(())
     }
 }
 

@@ -90,6 +90,26 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     rustos::init_syscall();
     klog_info!("SYSCALL/SYSRET support initialized");
 
+    // Initialize user database
+    rustos::users::init();
+    rustos::users::init_creds();
+    klog_info!("User database initialized");
+
+    // Create /etc directory and populate with user/group files
+    {
+        use rustos::fs::vfs::VfsContext;
+        let _ = VfsContext::mkdir("/etc");
+        let _ = VfsContext::mkdir("/root");
+        let _ = VfsContext::mkdir("/home");
+        let db = rustos::users::USER_DB.lock();
+        let _ = VfsContext::write("/etc/passwd", db.to_passwd_string().into_bytes());
+        let _ = VfsContext::write("/etc/group", db.to_group_string().into_bytes());
+        let _ = VfsContext::write("/etc/hostname", b"rustos\n".to_vec());
+        let _ = VfsContext::write("/etc/os-release",
+            b"NAME=\"RustOS\"\nID=rustos\nVERSION=\"0.1.0\"\nPRETTY_NAME=\"RustOS 0.1.0\"\n".to_vec());
+    }
+    klog_info!("Filesystem populated (/etc, /root, /home)");
+
     println!("Kernel initialized successfully!");
     klog_info!("Kernel initialization complete");
     println!();

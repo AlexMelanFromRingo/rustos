@@ -29,6 +29,7 @@ pub mod userspace;
 pub mod elf;
 pub mod klog;
 pub mod tty;
+pub mod users;
 
 pub fn init() {
     gdt::init();
