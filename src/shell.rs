@@ -534,6 +534,16 @@ impl Shell {
         // Expand $(...) command substitution before any further parsing.
         let command = self.expand_command_subst(&command);
 
+        // Here-docs: `cat << EOF\nLINE\nLINE\nEOF` — we accept the form
+        // `<< MARKER ; LINE ; LINE ; MARKER` on a single typed line because
+        // our shell doesn't accept multi-line input mid-command.  The
+        // semicolons act as line separators inside the here-doc.
+        let command = if let Some(idx) = command.find("<<") {
+            self.expand_heredoc(&command, idx)
+        } else {
+            command
+        };
+
         // if/then/elif/else/fi
         if command.starts_with("if ") {
             self.execute_if(&command);
@@ -688,6 +698,9 @@ impl Shell {
             "epolltest" => self.cmd_epolltest(),
             "ulimit" => self.cmd_ulimit(args),
             "flock" => self.cmd_flock(args),
+            "fcntl" => self.cmd_fcntl(args),
+            "partprobe" => self.cmd_partprobe(args),
+            "pkg" => self.cmd_pkg(args),
             "mknod" => self.cmd_mknod(args),
             "tsc" => self.cmd_tsc(),
             "seccomp" => self.cmd_seccomp(args),
@@ -695,6 +708,7 @@ impl Shell {
             "setcap" => self.cmd_setcap(args),
             "ifconfig" | "ip" => self.cmd_ifconfig(args),
             "dhclient" => self.cmd_dhclient(args),
+            "arp" => self.cmd_arp(args),
             "netstat" | "ss" => self.cmd_netstat(args),
             "ping" => self.cmd_ping(args),
             "udptest" => self.cmd_udptest(args),
@@ -2105,6 +2119,62 @@ impl Shell {
             }
         }
         result
+    }
+
+    /// Expand a here-doc into a single redirection.  Given input like
+    ///   cat << EOF ; line1 ; line2 ; EOF
+    /// returns
+    ///   cat <<< 'line1\nline2\n'
+    /// where `<<<` is converted to a temp file and `cat < TEMP` is run.
+    /// We pick a deterministic-name temp file in /tmp to keep this reentrant.
+    fn expand_heredoc(&mut self, command: &str, idx: usize) -> String {
+        // command[idx..] starts with "<<".
+        let head = &command[..idx];
+        let tail = &command[idx + 2..]; // after "<<"
+        let tail = tail.trim_start();
+        // Marker is the first whitespace/sep token.
+        let mut marker_end = 0;
+        for (i, ch) in tail.char_indices() {
+            if ch.is_whitespace() || ch == ';' {
+                marker_end = i;
+                break;
+            }
+            marker_end = i + ch.len_utf8();
+        }
+        if marker_end == 0 {
+            return command.to_string();
+        }
+        let marker = &tail[..marker_end];
+        let rest = &tail[marker_end..];
+
+        // Body lines are semicolon-separated until we hit MARKER.
+        let mut body = String::new();
+        let mut after_marker_idx: Option<usize> = None;
+        let mut acc_offset = 0usize;
+        for piece in rest.split(';') {
+            acc_offset += piece.len() + 1; // +1 for the consumed ';'
+            let trimmed = piece.trim();
+            if trimmed == marker {
+                after_marker_idx = Some(acc_offset);
+                break;
+            }
+            if !trimmed.is_empty() {
+                body.push_str(trimmed);
+                body.push('\n');
+            }
+        }
+
+        let temp_path = "/tmp/.heredoc.tmp";
+        let _ = crate::fs::vfs::VfsContext::write(temp_path, body.into_bytes());
+
+        // Splice: HEAD + the temp file as a positional argument.  Most
+        // common use is `cat << EOF ; ... ; EOF`, which becomes
+        // `cat /tmp/.heredoc.tmp` — semantically the same for cat-style
+        // commands.
+        let after = after_marker_idx
+            .and_then(|i| rest.get(i.min(rest.len())..))
+            .unwrap_or("");
+        format!("{} {}{}", head.trim_end(), temp_path, after)
     }
 
     /// Expand `$(cmd)` substitutions by capturing each inner command's output.
@@ -4284,6 +4354,158 @@ impl Shell {
         println!("mknod: /dev/{} ({} {}, {})", name, args[1], major, minor);
     }
 
+    /// pkg: tiny package manager.
+    ///   pkg list                : list installed packages
+    ///   pkg install <pkgfile>   : install from a manifest file
+    ///   pkg remove <name>       : uninstall by name
+    ///   pkg info <name>         : show manifest details
+    ///   pkg sample              : write /tmp/sample.pkg with a 2-file demo
+    fn cmd_pkg(&self, args: &[&str]) {
+        if args.is_empty() || args[0] == "list" {
+            let names = crate::pkg::list_installed();
+            if names.is_empty() {
+                println!("(no packages installed)");
+            } else {
+                for n in names {
+                    if let Some((nm, ver, desc)) = crate::pkg::info(&n) {
+                        println!("{}-{}  {}", nm, ver, desc);
+                    } else {
+                        println!("{}", n);
+                    }
+                }
+            }
+            return;
+        }
+
+        match args[0] {
+            "install" if args.len() >= 2 => {
+                match crate::pkg::install(args[1]) {
+                    Ok(m) => println!("pkg: installed {}-{} ({} files)",
+                        m.name, m.version, m.files.len()),
+                    Err(e) => println!("pkg: {}", e),
+                }
+            }
+            "remove" if args.len() >= 2 => {
+                match crate::pkg::remove(args[1]) {
+                    Ok(n) => println!("pkg: removed {} ({} files unlinked)", args[1], n),
+                    Err(e) => println!("pkg: {}", e),
+                }
+            }
+            "info" if args.len() >= 2 => {
+                match crate::pkg::info(args[1]) {
+                    Some((n, v, d)) => println!("Name: {}\nVersion: {}\nDescription: {}", n, v, d),
+                    None => println!("pkg: {} not installed", args[1]),
+                }
+            }
+            "sample" => {
+                let mut data = alloc::vec::Vec::new();
+                data.extend_from_slice(b"NAME hello\nVERSION 0.1.0\nDESCRIPTION RustOS demo package\n");
+                data.extend_from_slice(b"FILE /usr/share/hello/greet.txt 14\n");
+                data.extend_from_slice(b"hello, rustos\n");
+                data.extend_from_slice(b"FILE /usr/share/hello/version.txt 6\n");
+                data.extend_from_slice(b"0.1.0\n");
+                let _ = crate::fs::vfs::VfsContext::mkdir("/tmp");
+                match crate::fs::vfs::VfsContext::write("/tmp/sample.pkg", data) {
+                    Ok(_) => println!("pkg: wrote /tmp/sample.pkg (try `pkg install /tmp/sample.pkg`)"),
+                    Err(e) => println!("pkg: write failed: {:?}", e),
+                }
+            }
+            _ => println!("Usage: pkg [list | install FILE | remove NAME | info NAME | sample]"),
+        }
+    }
+
+    /// partprobe: parse the MBR sector of the first ATA disk (or a synthetic
+    /// disk image if none is attached) and print the partition table.
+    fn cmd_partprobe(&self, _args: &[&str]) {
+        // Try a real ATA read first.
+        let mut sector = [0u8; 512];
+        let got_real = {
+            let mut drv = crate::drivers::ata::ATA_DRIVE.lock();
+            drv.read_sector(0, &mut sector).is_ok()
+        };
+
+        if !got_real {
+            // Synthesise a small MBR: one bootable Linux partition + one
+            // FAT32 partition.  Lets us exercise the parser in QEMU runs
+            // that don't have a real disk image attached.
+            for b in sector.iter_mut() { *b = 0; }
+            sector[510] = 0x55;
+            sector[511] = 0xAA;
+            // Partition 1 — Linux, bootable
+            sector[446] = 0x80;
+            sector[446 + 4] = 0x83;
+            sector[446 + 8..446 + 12].copy_from_slice(&2048u32.to_le_bytes());
+            sector[446 + 12..446 + 16].copy_from_slice(&102400u32.to_le_bytes());
+            // Partition 2 — FAT32
+            sector[462 + 4] = 0x0C;
+            sector[462 + 8..462 + 12].copy_from_slice(&104448u32.to_le_bytes());
+            sector[462 + 12..462 + 16].copy_from_slice(&102400u32.to_le_bytes());
+            println!("partprobe: no ATA disk; using synthetic MBR for self-test");
+        }
+
+        match crate::partition::parse_mbr(&sector) {
+            Ok(parts) => {
+                if crate::partition::is_gpt_protective(&parts) {
+                    println!("partprobe: GPT protective MBR detected (GPT parsing not yet implemented)");
+                    return;
+                }
+                for line in crate::partition::format_table(&parts) {
+                    println!("{}", line);
+                }
+            }
+            Err(e) => println!("partprobe: {}", e),
+        }
+    }
+
+    /// fcntl: byte-range advisory locks.
+    ///   fcntl list                            : show all byte-range locks
+    ///   fcntl lock {-s|-x} OWNER PATH START LEN
+    ///   fcntl unlock OWNER PATH START LEN
+    fn cmd_fcntl(&self, args: &[&str]) {
+        if args.is_empty() || args[0] == "list" {
+            for (path, locks) in crate::flock::BYTE_LOCKS.lock().snapshot() {
+                println!("{}:", path);
+                for l in locks {
+                    let k = match l.kind {
+                        crate::flock::LockKind::Shared => "SH",
+                        crate::flock::LockKind::Exclusive => "EX",
+                    };
+                    let len = if l.len == 0 { "EOF".into() } else { alloc::format!("{}", l.len) };
+                    println!("  owner={} {}-{} {}", l.owner, l.start, len, k);
+                }
+            }
+            return;
+        }
+
+        match args[0] {
+            "lock" if args.len() >= 6 => {
+                let kind = match args[1] {
+                    "-s" => crate::flock::LockKind::Shared,
+                    "-x" => crate::flock::LockKind::Exclusive,
+                    _ => { println!("fcntl: -s or -x required"); return; }
+                };
+                let owner: usize = args[2].parse().unwrap_or(0);
+                let path = args[3];
+                let start: u64 = args[4].parse().unwrap_or(0);
+                let len: u64 = args[5].parse().unwrap_or(0);
+                let lock = crate::flock::ByteLock { owner, start, len, kind };
+                match crate::flock::BYTE_LOCKS.lock().try_lock(path, lock) {
+                    Ok(()) => println!("fcntl: locked {}@{}+{}", path, start, len),
+                    Err(e) => println!("fcntl: {}", e),
+                }
+            }
+            "unlock" if args.len() >= 5 => {
+                let owner: usize = args[1].parse().unwrap_or(0);
+                let path = args[2];
+                let start: u64 = args[3].parse().unwrap_or(0);
+                let len: u64 = args[4].parse().unwrap_or(0);
+                let n = crate::flock::BYTE_LOCKS.lock().unlock(path, owner, start, len);
+                println!("fcntl: removed {} lock(s)", n);
+            }
+            _ => println!("Usage: fcntl [list | lock {{-s|-x}} OWNER PATH START LEN | unlock OWNER PATH START LEN]"),
+        }
+    }
+
     /// flock: acquire/release advisory file locks.
     ///   flock list                : show all locks
     ///   flock -s OWNER PATH       : take a shared lock as OWNER
@@ -4419,6 +4641,82 @@ impl Shell {
 
         crate::syscall::epoll::epoll_close(ep);
         println!("epolltest: done");
+    }
+
+    /// arp: show / manipulate the ARP cache, or self-test the protocol.
+    ///   arp                  : show cache
+    ///   arp -d IP            : delete an entry
+    ///   arp -s IP MAC        : add a static entry (mac as aa:bb:cc:dd:ee:ff)
+    ///   arp test             : run a request → reply parse round-trip
+    fn cmd_arp(&self, args: &[&str]) {
+        if args.is_empty() {
+            for (ip, mac) in crate::net::arp::cache_snapshot() {
+                println!("{} -> {}", ip, crate::net::eth::fmt_mac(&mac));
+            }
+            return;
+        }
+        match args[0] {
+            "-d" if args.len() >= 2 => {
+                let _ = args[1]; // delete-by-IP not modelled; clear all instead
+                crate::net::arp::cache_clear();
+                println!("arp: cache cleared");
+            }
+            "-s" if args.len() >= 3 => {
+                let ip = match crate::net::Ipv4Addr::parse(args[1]) {
+                    Some(a) => a,
+                    None => { println!("arp: bad IP"); return; }
+                };
+                let mac = match parse_mac(args[2]) {
+                    Some(m) => m,
+                    None => { println!("arp: bad MAC"); return; }
+                };
+                crate::net::arp::cache_insert(ip, mac);
+                println!("arp: {} -> {}", ip, crate::net::eth::fmt_mac(&mac));
+            }
+            "test" => {
+                let my_mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
+                let my_ip = crate::net::Ipv4Addr([10, 0, 2, 15]);
+                let peer_mac = [0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01];
+                let peer_ip = crate::net::Ipv4Addr([10, 0, 2, 2]);
+
+                // Synthesise a request from the peer asking who-has my_ip.
+                let req = crate::net::arp::ArpPacket {
+                    htype: crate::net::arp::HTYPE_ETHERNET,
+                    ptype: crate::net::arp::PTYPE_IPV4,
+                    hlen:  crate::net::arp::HLEN_ETHERNET,
+                    plen:  crate::net::arp::PLEN_IPV4,
+                    op:    crate::net::arp::op::REQUEST,
+                    sender_mac: peer_mac,
+                    sender_ip:  peer_ip,
+                    target_mac: [0u8; 6],
+                    target_ip:  my_ip,
+                };
+                let req_bytes = req.build();
+                println!("arp test: REQUEST {} bytes who-has {}", req_bytes.len(), my_ip);
+
+                // Process it as if it arrived; we should reply.
+                match crate::net::arp::input(&req_bytes, my_mac, my_ip) {
+                    Some(reply_frame) => {
+                        println!("arp test: REPLY frame {} bytes", reply_frame.len());
+                        let arp_payload = &reply_frame[crate::net::eth::ETH_HEADER_LEN..];
+                        if let Some(reply) = crate::net::arp::ArpPacket::parse(arp_payload) {
+                            println!(
+                                "arp test: parsed reply: {} is at {}",
+                                reply.sender_ip,
+                                crate::net::eth::fmt_mac(&reply.sender_mac)
+                            );
+                        }
+                    }
+                    None => println!("arp test: no reply generated"),
+                }
+
+                // Verify peer is now in our cache.
+                if let Some(m) = crate::net::arp::cache_lookup(peer_ip) {
+                    println!("arp test: cache has {} -> {}", peer_ip, crate::net::eth::fmt_mac(&m));
+                }
+            }
+            _ => println!("Usage: arp [test | -s IP MAC | -d IP]"),
+        }
     }
 
     /// dhclient: drive a DHCP DISCOVER → OFFER → REQUEST → ACK round-trip.
@@ -5290,6 +5588,19 @@ impl Shell {
             }
         }
     }
+}
+
+/// Parse "aa:bb:cc:dd:ee:ff" into a [u8; 6].
+fn parse_mac(s: &str) -> Option<[u8; 6]> {
+    let mut out = [0u8; 6];
+    let mut parts = s.split(':');
+    for slot in out.iter_mut() {
+        let p = parts.next()?;
+        if p.len() != 2 { return None; }
+        *slot = u8::from_str_radix(p, 16).ok()?;
+    }
+    if parts.next().is_some() { return None; }
+    Some(out)
 }
 
 /// Find the longest common prefix among a list of strings

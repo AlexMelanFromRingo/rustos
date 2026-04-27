@@ -91,6 +91,66 @@ impl LockTable {
 
 pub static LOCKS: Mutex<LockTable> = Mutex::new(LockTable::new());
 
+/// fcntl-style byte-range lock.  Each lock is identified by (path, start, len);
+/// a request that overlaps an existing lock from a different owner with
+/// incompatible kind is denied.
+#[derive(Debug, Clone)]
+pub struct ByteLock {
+    pub owner: usize,
+    pub start: u64,
+    pub len:   u64,    // 0 means "to end of file"
+    pub kind:  LockKind,
+}
+
+pub struct ByteLockTable {
+    by_path: alloc::collections::BTreeMap<alloc::string::String, alloc::vec::Vec<ByteLock>>,
+}
+
+impl ByteLockTable {
+    pub const fn new() -> Self {
+        ByteLockTable { by_path: alloc::collections::BTreeMap::new() }
+    }
+
+    fn ranges_overlap(a_start: u64, a_len: u64, b_start: u64, b_len: u64) -> bool {
+        let a_end = if a_len == 0 { u64::MAX } else { a_start.saturating_add(a_len) };
+        let b_end = if b_len == 0 { u64::MAX } else { b_start.saturating_add(b_len) };
+        a_start < b_end && b_start < a_end
+    }
+
+    pub fn try_lock(&mut self, path: &str, lock: ByteLock) -> Result<(), &'static str> {
+        let entry = self.by_path.entry(alloc::string::ToString::to_string(path)).or_default();
+        for existing in entry.iter() {
+            if existing.owner == lock.owner { continue; }
+            if Self::ranges_overlap(existing.start, existing.len, lock.start, lock.len) {
+                let conflict = match (existing.kind, lock.kind) {
+                    (LockKind::Exclusive, _) | (_, LockKind::Exclusive) => true,
+                    _ => false,
+                };
+                if conflict { return Err("would block (byte-range conflict)"); }
+            }
+        }
+        entry.push(lock);
+        Ok(())
+    }
+
+    pub fn unlock(&mut self, path: &str, owner: usize, start: u64, len: u64) -> usize {
+        if let Some(entry) = self.by_path.get_mut(path) {
+            let before = entry.len();
+            entry.retain(|l| !(l.owner == owner && l.start == start && l.len == len));
+            let removed = before - entry.len();
+            if entry.is_empty() { self.by_path.remove(path); }
+            return removed;
+        }
+        0
+    }
+
+    pub fn snapshot(&self) -> alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<ByteLock>)> {
+        self.by_path.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    }
+}
+
+pub static BYTE_LOCKS: Mutex<ByteLockTable> = Mutex::new(ByteLockTable::new());
+
 /// Public convenience: acquire/upgrade/release based on `op` flags.
 /// Returns Ok on success, Err with a static error string on failure.
 pub fn flock(path: &str, owner: usize, op: u32) -> Result<(), &'static str> {

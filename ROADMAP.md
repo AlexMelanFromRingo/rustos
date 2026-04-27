@@ -21,7 +21,7 @@ Reference architecture: Linux/Unix-like.
 - [x] Per-process file descriptor tables (FdTableAccess with process/kernel dispatch) ✅
 - [x] Per-process working directory (Process.cwd, sys_chdir/sys_getcwd, SHELL_CWD fallback) ✅
 - [ ] Proper `fork()` with COW (Copy-On-Write) pages
-- [ ] `waitpid()` with blocking (current: non-blocking poll)
+- [x] `waitpid()` with blocking (200k-iter retry loop with HLT yield + WNOHANG support) ✅
 - [x] Signal delivery (SIGTERM, SIGKILL, SIGINT, SIGCHLD, etc.) ✅
 - [x] TTY device abstraction (line discipline, raw/cooked mode) ✅
 - [x] Process groups and sessions (pgid/sid on Process, syscalls 109/121/124/112, ps -o PGID/SID) ✅
@@ -80,12 +80,12 @@ Reference architecture: Linux/Unix-like.
 ## Phase 3: Filesystem Layer
 
 ### 3.1 VFS Enhancement
-- [ ] Proper inode abstraction
-- [ ] Dentry cache (directory entry cache)
+- [x] Proper inode abstraction (Inode struct with stable ino, mode, uid, gid, size, nlink) ✅
+- [x] Dentry cache (path -&gt; Inode, /proc/inodes view) ✅
 - [x] Mount table with multiple mount points (MOUNT_TABLE, /proc/mounts, mount/-t/umount) ✅
 - [x] Path resolution with symlinks ✅
 - [x] File locking (flock — LOCK_SH/EX/NB/UN, advisory lock table) ✅
-- [ ] File locking (fcntl byte-range)
+- [x] File locking (fcntl byte-range — ByteLockTable, overlap detection, fcntl shell command) ✅
 - [x] File permissions (rwxrwxrwx, uid/gid) ✅
 - [x] Timestamps (atime, mtime, ctime) ✅
 
@@ -118,23 +118,23 @@ Reference architecture: Linux/Unix-like.
 - [ ] AHCI/SATA driver (replace PIO ATA with DMA)
 - [ ] NVMe driver for modern storage
 - [ ] Virtio-blk for QEMU performance
-- [ ] Partition table parsing (MBR and GPT)
+- [x] Partition table parsing (MBR; GPT detection via protective entry only) ✅
 
 ### 4.2 Network Stack
 - [ ] RTL8139 NIC driver (simple, well-documented)
 - [ ] E1000 NIC driver (Intel, used by QEMU)
 - [ ] Virtio-net driver (QEMU paravirt)
-- [ ] Ethernet frame handling
-- [ ] ARP (Address Resolution Protocol)
+- [x] Ethernet frame handling (build_frame, EthHeader parse, ethertypes IPv4/ARP/IPv6) ✅
+- [x] ARP (RFC 826: REQUEST/REPLY build+parse, ARP cache, arp shell command) ✅
 - [x] IPv4 stack (IP header parse/serialise, RFC 1071 checksum) ✅
 - [x] ICMP echo (ping over loopback works end-to-end) ✅
-- [ ] UDP
-- [ ] TCP (connection management, flow control, congestion control)
+- [x] UDP (build_datagram + ipv4_input dispatch + sendto/recvfrom) ✅
+- [x] TCP loopback (handshake/send/recv/close) — congestion control NOT implemented ✅
 - [x] DHCP client (DISCOVER/OFFER/REQUEST/ACK build+parse, dhclient shell command, RFC 2131 wire format) ✅
 - [x] DNS resolver (RFC 1035 A-record query/response, /etc/resolv.conf, TTL-bounded cache, /etc/hosts fallback) ✅
-- [ ] Network socket API
-- [ ] `ping` command
-- [ ] `wget` / `curl` equivalent
+- [x] Network socket API (AF_INET/UDP/TCP + AF_UNIX, kernel-side socket/bind/listen/accept/connect/sendto/recvfrom/close) ✅
+- [x] `ping` command (real ICMP echo) ✅
+- [x] `wget` / `curl` equivalent (HTTP/1.0 client, -O / --, dns-aware) ✅
 
 ### 4.3 Input/Output
 - [ ] PS/2 mouse driver
@@ -163,7 +163,7 @@ Reference architecture: Linux/Unix-like.
 - [x] Shell scripting (if/then/elif/else/fi, while/do/done, for/in/do/done) ✅
 - [x] Environment variable expansion ($VAR, $?) ✅
 - [x] Command substitution ($(cmd)) ✅
-- [ ] Here documents (<<EOF)
+- [x] Here documents (<<MARKER ... MARKER, materialised to /tmp/.heredoc.tmp) ✅
 - [x] Glob expansion (*.txt, /dev/n*) ✅
 
 ### 5.3 Core Utilities
@@ -181,10 +181,10 @@ Reference architecture: Linux/Unix-like.
 - [x] `syslog` / `logger` — RFC 3164 ring buffer with periodic flush to /var/log/messages ✅
 
 ### 5.4 Package Manager
-- [ ] Simple package format (.tar.gz with manifest)
+- [x] Simple package format (text manifest + inline FILE blocks) ✅
 - [ ] Package repository support (over network)
 - [ ] Dependency resolution
-- [ ] Install / remove / update operations
+- [x] Install / remove / list / info operations (`pkg` shell command, /var/lib/pkg) ✅
 
 ---
 
@@ -224,7 +224,7 @@ Start with **Option A** (upgrade to bootloader v0.11+) for UEFI support, then ev
 
 ## Phase 7: Security
 
-- [ ] ASLR (Address Space Layout Randomization)
+- [x] ASLR for vmalloc (16 MiB random slide on top of nominal base, TSC + RTC seed) ✅
 - [ ] Stack canaries
 - [x] NX bit enforcement on vmalloc data pages (W^X) ✅
 - [x] Capability-based security model (20 Linux caps, getcap/setcap, current_has/check API) ✅

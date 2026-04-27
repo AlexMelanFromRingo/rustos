@@ -25,6 +25,7 @@ pub fn read_proc(path: &str) -> Option<Vec<u8>> {
             content.push_str("stat\n");
             content.push_str("slabinfo\n");
             content.push_str("mounts\n");
+            content.push_str("inodes\n");
 
             // Add per-process directories
             let pm = crate::process::PROCESS_MANAGER.lock();
@@ -154,6 +155,25 @@ pub fn read_proc(path: &str) -> Option<Vec<u8>> {
                 // Linux /proc/mounts format: src target type opts 0 0
                 s.push_str(&format!("{} {} {} {} 0 0\n",
                     m.source, m.mount_point, m.fs_type, m.options));
+            }
+            Some(s.into_bytes())
+        }
+
+        "inodes" => {
+            let mut s = String::new();
+            s.push_str("# ino  type  mode  uid  gid  size  nlink  path\n");
+            for i in crate::fs::inode::snapshot() {
+                let kind = match i.file_type {
+                    crate::fs::vfs::VfsFileType::Regular => "f",
+                    crate::fs::vfs::VfsFileType::Directory => "d",
+                    crate::fs::vfs::VfsFileType::Symlink => "l",
+                    crate::fs::vfs::VfsFileType::CharDevice => "c",
+                    crate::fs::vfs::VfsFileType::BlockDevice => "b",
+                };
+                s.push_str(&format!(
+                    "{:>5}  {}  {:04o}  {}  {}  {}  {}  {}\n",
+                    i.ino, kind, i.mode, i.uid, i.gid, i.size, i.nlink, i.path
+                ));
             }
             Some(s.into_bytes())
         }

@@ -43,6 +43,8 @@ pub mod flock;
 pub mod tsc;
 pub mod seccomp;
 pub mod capability;
+pub mod partition;
+pub mod pkg;
 
 pub fn init() {
     gdt::init();

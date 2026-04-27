@@ -5,3 +5,4 @@ pub mod procfs;
 pub mod devfs;
 pub mod sysfs;
 pub mod tmpfs;
+pub mod inode;

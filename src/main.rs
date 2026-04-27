@@ -105,6 +105,11 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     rustos::tsc::calibrate();
     klog_info!("TSC calibrated at {} Hz", rustos::tsc::freq_hz());
 
+    // KASLR for vmalloc: slide the base address by a random page offset.
+    rustos::vmalloc::randomise_base(rustos::tsc::read_tsc() ^
+        rustos::drivers::rtc::read_datetime().to_unix_timestamp());
+    klog_info!("vmalloc KASLR base: {:#018x}", rustos::vmalloc::vmalloc_start());
+
     // Bring the network stack up: registers the loopback interface.
     rustos::net::init();
     klog_info!("Network stack initialized: lo @ 127.0.0.1");

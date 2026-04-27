@@ -354,45 +354,47 @@ pub fn sys_execve(filename: usize, _argv: usize, _envp: usize) -> isize {
     0
 }
 
-/// sys_wait4 - wait for child process to exit
-pub fn sys_wait4(pid: usize, wstatus: usize, _options: usize) -> isize {
-    let mut pm = PROCESS_MANAGER.lock();
+/// sys_wait4 - wait for child process to exit (blocks if WNOHANG not set)
+pub fn sys_wait4(pid: usize, wstatus: usize, options: usize) -> isize {
+    const WNOHANG: usize = 1;
 
-    // Get current process ID
-    let parent_pid = match pm.current_pid {
-        Some(pid) => pid,
-        None => return SyscallError::InvalidArgument.as_isize(),
-    };
+    // Bounded retry loop so we don't busy-spin forever (drops back to the
+    // executor between checks).  Skipped when WNOHANG is set.
+    let want_block = options & WNOHANG == 0;
+    let max_iters: u64 = if want_block { 200_000 } else { 1 };
 
-    // Wait for any child if pid == -1
-    let result = if pid == (-1isize) as usize {
-        pm.wait(parent_pid)
-    } else {
-        // Wait for specific child
-        pm.wait(parent_pid).filter(|(child_pid, _)| *child_pid == pid)
-    };
+    for _ in 0..max_iters {
+        let mut pm = PROCESS_MANAGER.lock();
+        let parent_pid = match pm.current_pid {
+            Some(pid) => pid,
+            None => return SyscallError::InvalidArgument.as_isize(),
+        };
+        let result = if pid == (-1isize) as usize {
+            pm.wait(parent_pid)
+        } else {
+            pm.wait(parent_pid).filter(|(child_pid, _)| *child_pid == pid)
+        };
+        drop(pm);
 
-    match result {
-        Some((child_pid, exit_code)) => {
-            println!("wait4: child {} exited with code {}", child_pid, exit_code);
-
-            // Write exit status if pointer provided
-            if wstatus != 0 {
-                unsafe {
-                    let status_ptr = wstatus as *mut i32;
-                    *status_ptr = exit_code << 8;  // Linux wait status format
+        match result {
+            Some((child_pid, exit_code)) => {
+                if wstatus != 0 {
+                    unsafe { *(wstatus as *mut i32) = exit_code << 8; }
                 }
+                return child_pid as isize;
             }
-
-            child_pid as isize
-        }
-        None => {
-            // No zombie children yet
-            // In a real OS, we would block the process here
-            // For now, just return 0 (would wait)
-            0
+            None => {
+                if !want_block {
+                    return 0;
+                }
+                // Yield to interrupts so the timer can advance.
+                x86_64::instructions::interrupts::enable_and_hlt();
+            }
         }
     }
+    // Hit retry ceiling without any child exiting; behave like a non-blocking
+    // wait (Linux returns 0 here when no children are eligible).
+    0
 }
 
 /// sys_getpid - get process ID

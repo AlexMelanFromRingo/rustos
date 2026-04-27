@@ -23,9 +23,50 @@ use x86_64::{
 };
 
 /// vmalloc virtual region: 64 MiB starting well above the heap.
-pub const VMALLOC_START: usize = 0x_5555_0000_0000;
-pub const VMALLOC_END:   usize = VMALLOC_START + 64 * 1024 * 1024;
-pub const VMALLOC_PAGES: usize = (VMALLOC_END - VMALLOC_START) / 4096;
+///
+/// `BASE` is randomised once at boot for KASLR-style address obfuscation.
+/// The randomisation lives in the upper bits of the virtual address; the
+/// region size is constant.  Allocators that only ever see [`VMALLOC_START`]
+/// will get the post-randomisation value via the [`vmalloc_start`] helper.
+pub const VMALLOC_NOMINAL_BASE: usize = 0x_5555_0000_0000;
+pub const VMALLOC_BYTES: usize = 64 * 1024 * 1024;
+pub const VMALLOC_PAGES: usize = VMALLOC_BYTES / 4096;
+/// Maximum slide added to the nominal base.  The actual offset is rounded
+/// to a 4 KiB page so all internal page-index math still works.
+pub const VMALLOC_RAND_RANGE: usize = 0x100_0000; // 16 MiB
+
+static VMALLOC_BASE: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(VMALLOC_NOMINAL_BASE);
+
+/// Randomise the vmalloc base once.  Calls beyond the first are no-ops.
+pub fn randomise_base(seed: u64) {
+    use core::sync::atomic::Ordering;
+    static DONE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+    if DONE.swap(true, Ordering::AcqRel) { return; }
+
+    // Mix the seed with the timer so re-runs aren't deterministic across boots.
+    let mix = seed
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
+    let slide = (mix as usize) & (VMALLOC_RAND_RANGE - 1);
+    let slide = slide & !0xFFF;  // round to 4 KiB
+    VMALLOC_BASE.store(VMALLOC_NOMINAL_BASE + slide, Ordering::Release);
+}
+
+#[inline]
+pub fn vmalloc_start() -> usize {
+    VMALLOC_BASE.load(core::sync::atomic::Ordering::Relaxed)
+}
+#[inline]
+pub fn vmalloc_end() -> usize {
+    vmalloc_start() + VMALLOC_BYTES
+}
+
+// Backwards-compatible aliases for callers that read the constants.  These
+// resolve to the fixed nominal base; live address math should use
+// `vmalloc_start()`.
+pub const VMALLOC_START: usize = VMALLOC_NOMINAL_BASE;
+pub const VMALLOC_END:   usize = VMALLOC_NOMINAL_BASE + VMALLOC_BYTES;
 
 /// Bitmap tracking which 4 KiB pages of the vmalloc region are in use.
 /// Indexed by (vaddr - VMALLOC_START) / 4096.
@@ -94,7 +135,7 @@ pub fn vmalloc(size: usize) -> Result<*mut u8, VmallocError> {
         idx
     };
 
-    let start_vaddr = VMALLOC_START + start_idx * 4096;
+    let start_vaddr = vmalloc_start() + start_idx * 4096;
 
     // Map each page to a fresh frame.
     for i in 0..pages {
@@ -132,7 +173,7 @@ pub fn vfree(ptr: *mut u8) -> Result<(), VmallocError> {
     }
 
     let mut bm = BITMAP.lock();
-    let start_idx = (vaddr - VMALLOC_START) / 4096;
+    let start_idx = (vaddr - vmalloc_start()) / 4096;
     for i in 0..pages { bm.clear(start_idx + i); }
 
     USED_BYTES.fetch_sub(pages * 4096, Ordering::Relaxed);
