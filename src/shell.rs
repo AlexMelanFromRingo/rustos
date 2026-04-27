@@ -336,8 +336,8 @@ impl Shell {
                 "passwd", "su", "service", "systemctl", "runlevel", "init",
                 "telinit", "slabinfo", "login", "logout", "exit", "motd",
                 "polltest", "ifconfig", "ip", "netstat", "ss", "ping",
-                "udptest", "tcptest", "logger", "syslog", "crontab",
-                "nslookup", "host", "getent",
+                "udptest", "tcptest", "httptest", "logger", "syslog",
+                "crontab", "nslookup", "host", "getent",
             ];
 
             let matches: Vec<&str> = commands
@@ -670,6 +670,7 @@ impl Shell {
             "ping" => self.cmd_ping(args),
             "udptest" => self.cmd_udptest(args),
             "tcptest" => self.cmd_tcptest(args),
+            "httptest" => self.cmd_httptest(args),
             "logger" => self.cmd_logger(args),
             "syslog" => self.cmd_syslog(args),
             "crontab" => self.cmd_crontab(args),
@@ -3859,6 +3860,71 @@ impl Shell {
         println!("--- {} ping statistics ---", addr);
         println!("{} packets transmitted, {} received, {}% packet loss",
             count, received, loss_pct);
+    }
+
+    /// httptest: spin up the demo httpd, issue a GET via the kernel TCP
+    /// client, print the response.  Validates: TCP + VFS + HTTP parse.
+    fn cmd_httptest(&self, args: &[&str]) {
+        use crate::net::tcp::{close, connect, listen, recv, send};
+        use crate::net::{Ipv4Addr, SocketAddrV4};
+
+        let port: u16 = args.first().and_then(|s| s.parse().ok()).unwrap_or(8000);
+        let path: &str = args.get(1).copied().unwrap_or("/");
+
+        let server_addr = SocketAddrV4 { ip: Ipv4Addr::LOCALHOST, port };
+
+        let server = match listen(server_addr, 4) {
+            Ok(h) => h,
+            Err(e) => { println!("httptest: listen error: {:?}", e); return; }
+        };
+        println!("httptest: server listening on {}", server_addr);
+
+        // Connect from a client.
+        let client = match connect(server_addr) {
+            Ok(h) => h,
+            Err(e) => {
+                println!("httptest: connect error: {:?}", e);
+                let _ = close(server);
+                return;
+            }
+        };
+
+        // Send a GET request.
+        let req = alloc::format!(
+            "GET {} HTTP/1.0\r\nHost: 127.0.0.1\r\nUser-Agent: rustos-shell\r\n\r\n",
+            path
+        );
+        if let Err(e) = send(client, req.as_bytes()) {
+            println!("httptest: send error: {:?}", e);
+            let _ = close(client); let _ = close(server);
+            return;
+        }
+
+        // Server side: accept + serve once.
+        match crate::httpd::serve_once(server) {
+            Ok(_) => {}
+            Err(e) => {
+                println!("httptest: serve error: {}", e);
+                let _ = close(client); let _ = close(server);
+                return;
+            }
+        }
+
+        // Read the response on the client side.
+        let mut buf = [0u8; 4096];
+        match recv(client, &mut buf) {
+            Ok(n) => {
+                let resp = core::str::from_utf8(&buf[..n]).unwrap_or("<binary>");
+                println!("--- HTTP response ({} bytes) ---", n);
+                print!("{}", resp);
+                if !resp.ends_with('\n') { println!(); }
+                println!("--- end ---");
+            }
+            Err(e) => println!("httptest: client recv error: {:?}", e),
+        }
+
+        let _ = close(client);
+        let _ = close(server);
     }
 
     /// tcptest: end-to-end TCP loopback handshake + send/recv + close.

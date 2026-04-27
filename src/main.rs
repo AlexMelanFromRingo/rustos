@@ -99,6 +99,9 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     rustos::net::init();
     klog_info!("Network stack initialized: lo @ 127.0.0.1");
 
+    // Provision /var/www so the demo httpd has something to serve.
+    rustos::httpd::install_default_docroot();
+
     // Initialize user database
     rustos::users::init();
     rustos::users::init_creds();
