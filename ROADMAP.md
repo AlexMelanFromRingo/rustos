@@ -26,7 +26,7 @@ Reference architecture: Linux/Unix-like.
 - [x] TTY device abstraction (line discipline, raw/cooked mode) ✅
 - [ ] Process groups and sessions
 - [x] Environment variables (shell-level: export/unset/$VAR expansion) ✅
-- [ ] Resource limits (rlimits)
+- [x] Resource limits (15 RLIMIT_* resources, getrlimit/setrlimit syscalls 97/160, ulimit shell command) ✅
 
 ### 1.3 Scheduler Improvements
 - [x] Priority-based scheduling (nice values -20..19, dynamic quantum) ✅
@@ -54,7 +54,8 @@ Reference architecture: Linux/Unix-like.
 - [x] `dup` / `dup2` — file descriptor duplication ✅
 - [x] `pipe` — inter-process communication (4 KiB kernel buffer) ✅
 - [x] `select` / `poll` — I/O multiplexing (do_poll, do_select, fd_readiness, pollfd ABI struct, FD_SETSIZE=1024) ✅
-- [ ] `epoll` — scalable I/O multiplexing
+- [x] `epoll` — epoll_create/_ctl/_wait, EPOLLIN/OUT/PRI/ERR/HUP/ET, syscalls 213/232/233 ✅
+- [x] AF_UNIX domain sockets (SOCK_STREAM listen/accept/connect, SOCK_DGRAM sendto/recvfrom) ✅
 - [x] `socket` / `bind` — kernel-side AF_INET/SOCK_DGRAM (UDP) ✅
 - [x] `listen` / `accept` / `connect` — TCP loopback (3-way handshake, send/recv, FIN close) ✅
 - [x] `sendto` / `recvfrom` — UDP datagram I/O over loopback ✅
@@ -129,7 +130,7 @@ Reference architecture: Linux/Unix-like.
 - [ ] UDP
 - [ ] TCP (connection management, flow control, congestion control)
 - [ ] DHCP client
-- [ ] DNS resolver
+- [x] DNS resolver (RFC 1035 A-record query/response, /etc/resolv.conf, TTL-bounded cache, /etc/hosts fallback) ✅
 - [ ] Network socket API
 - [ ] `ping` command
 - [ ] `wget` / `curl` equivalent

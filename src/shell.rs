@@ -335,9 +335,10 @@ impl Shell {
                 "usermode", "version", "wc", "which", "whoami", "write",
                 "passwd", "su", "service", "systemctl", "runlevel", "init",
                 "telinit", "slabinfo", "login", "logout", "exit", "motd",
-                "polltest", "ifconfig", "ip", "netstat", "ss", "ping",
-                "udptest", "tcptest", "httptest", "logger", "syslog",
-                "crontab", "nslookup", "host", "getent",
+                "polltest", "epolltest", "ifconfig", "ip", "netstat", "ss",
+                "ping", "udptest", "tcptest", "httptest", "unixtest",
+                "logger", "syslog", "crontab", "nslookup", "host", "getent",
+                "vmstat", "vmalloc-test", "ulimit", "dns-cache",
             ];
 
             let matches: Vec<&str> = commands
@@ -666,17 +667,21 @@ impl Shell {
             "logout" | "exit" => self.cmd_logout(),
             "motd" => self.cmd_motd(),
             "polltest" => self.cmd_polltest(),
+            "epolltest" => self.cmd_epolltest(),
+            "ulimit" => self.cmd_ulimit(args),
             "ifconfig" | "ip" => self.cmd_ifconfig(args),
             "netstat" | "ss" => self.cmd_netstat(args),
             "ping" => self.cmd_ping(args),
             "udptest" => self.cmd_udptest(args),
             "tcptest" => self.cmd_tcptest(args),
             "httptest" => self.cmd_httptest(args),
+            "unixtest" => self.cmd_unixtest(args),
             "logger" => self.cmd_logger(args),
             "syslog" => self.cmd_syslog(args),
             "crontab" => self.cmd_crontab(args),
             "nslookup" | "host" => self.cmd_nslookup(args),
             "getent" => self.cmd_getent(args),
+            "dns-cache" => self.cmd_dns_cache(args),
             "test" | "[" => self.cmd_test(args),
             "true" => {},
             "false" => println!("false"),
@@ -3601,25 +3606,46 @@ impl Shell {
         println!("({})", level.as_str());
     }
 
-    /// nslookup / host <name>: resolve a hostname via /etc/hosts.
+    /// nslookup / host <name>: resolve a hostname via DNS (with /etc/hosts fallback).
     fn cmd_nslookup(&self, args: &[&str]) {
         if args.is_empty() {
             println!("Usage: nslookup <name>");
             return;
         }
         let name = args[0];
-        let results = crate::net::resolver::resolve_all(name);
-        if results.is_empty() {
-            println!("** server can't find {}: NXDOMAIN", name);
+
+        // Show resolver configuration for diagnostics.
+        let resolvers = crate::net::dns::read_resolvers();
+        if resolvers.is_empty() {
+            println!("Server:  /etc/hosts (no nameservers configured)");
+            println!("Address: 127.0.0.1#0");
+        } else {
+            println!("Server:  {}", resolvers[0]);
+            println!("Address: {}#{}", resolvers[0], 53);
+        }
+        println!();
+
+        match crate::net::dns::resolve(name) {
+            Some(addr) => {
+                println!("Name:    {}", name);
+                println!("Address: {}", addr);
+            }
+            None => {
+                println!("** server can't find {}: NXDOMAIN", name);
+            }
+        }
+    }
+
+    /// dns-cache: show / flush the DNS cache.
+    ///   dns-cache         : show count
+    ///   dns-cache flush   : drop all entries
+    fn cmd_dns_cache(&self, args: &[&str]) {
+        if args.first() == Some(&"flush") {
+            crate::net::dns::flush_cache();
+            println!("DNS cache flushed");
             return;
         }
-        println!("Server:  /etc/hosts");
-        println!("Address: 127.0.0.1#0");
-        println!();
-        for (addr, canonical) in results {
-            println!("Name:    {}", canonical);
-            println!("Address: {}", addr);
-        }
+        println!("DNS cache: {} entries", crate::net::dns::cache_size());
     }
 
     /// getent <database> <key>: query system databases.  Supported: hosts,
@@ -3781,6 +3807,101 @@ impl Shell {
         }
     }
 
+    /// ulimit: list/get/set resource limits.
+    ///   ulimit          : list all
+    ///   ulimit -a       : same
+    ///   ulimit -n       : show RLIMIT_NOFILE soft
+    ///   ulimit -n 2048  : set RLIMIT_NOFILE soft+hard to 2048
+    fn cmd_ulimit(&self, args: &[&str]) {
+        use crate::rlimit::{fmt_limit, Resource, Rlimit, LIMITS};
+
+        // No args or -a: list everything.
+        if args.is_empty() || args[0] == "-a" {
+            let table = LIMITS.lock();
+            println!("{:<12} {:<14} {:<14}", "resource", "soft", "hard");
+            for (res, lim) in table.iter() {
+                println!("{:<12} {:<14} {:<14}",
+                    res.as_str(), fmt_limit(lim.soft), fmt_limit(lim.hard));
+            }
+            return;
+        }
+
+        // Map -X flag → Resource.
+        let res = match args[0] {
+            "-c" => Resource::Core,
+            "-d" => Resource::Data,
+            "-f" => Resource::Fsize,
+            "-l" => Resource::Memlock,
+            "-m" => Resource::Rss,
+            "-n" => Resource::NoFile,
+            "-s" => Resource::Stack,
+            "-t" => Resource::Cpu,
+            "-u" => Resource::Nproc,
+            "-v" => Resource::As,
+            other => {
+                println!("ulimit: unknown option '{}'", other);
+                return;
+            }
+        };
+
+        // No second arg: print soft.
+        if args.len() < 2 {
+            let lim = LIMITS.lock().get(res);
+            println!("{}", fmt_limit(lim.soft));
+            return;
+        }
+
+        // Second arg: set new value.  "unlimited" maps to RLIM_INFINITY.
+        let new_val: u64 = if args[1] == "unlimited" {
+            crate::rlimit::RLIM_INFINITY
+        } else {
+            match args[1].parse() {
+                Ok(n) => n,
+                Err(_) => { println!("ulimit: invalid value '{}'", args[1]); return; }
+            }
+        };
+        let is_root = crate::users::CURRENT_CREDS.lock().uid == 0;
+        let cur = LIMITS.lock().get(res);
+        let new_hard = new_val.max(cur.hard.min(new_val));
+        let new = Rlimit { soft: new_val, hard: if is_root { new_val } else { cur.hard.min(new_val).max(new_hard) } };
+        match LIMITS.lock().set(res, Rlimit { soft: new_val, hard: if is_root { new_val } else { cur.hard } }, is_root) {
+            Ok(()) => println!("ulimit: {} set to {}", res.as_str(), fmt_limit(new.soft)),
+            Err(e) => println!("ulimit: {}", e),
+        }
+    }
+
+    /// epolltest: stand up an epoll instance, register stdin/stdout, poll once.
+    fn cmd_epolltest(&self) {
+        use crate::syscall::epoll::{
+            epoll_create, epoll_ctl, epoll_wait, ops, flags, EpollEvent,
+        };
+
+        let ep = epoll_create();
+        println!("epoll_create -> {}", ep);
+
+        let stdin_ev = EpollEvent { events: flags::EPOLLIN,  data: 0xA1 };
+        let stdout_ev = EpollEvent { events: flags::EPOLLOUT, data: 0xA2 };
+        println!("epoll_ctl ADD stdin  -> {}", epoll_ctl(ep, ops::EPOLL_CTL_ADD, 0, stdin_ev));
+        println!("epoll_ctl ADD stdout -> {}", epoll_ctl(ep, ops::EPOLL_CTL_ADD, 1, stdout_ev));
+
+        let mut out = [EpollEvent { events: 0, data: 0 }; 8];
+        let n = epoll_wait(ep, &mut out, 0);
+        println!("epoll_wait(timeout=0) -> {} ready", n);
+        for i in 0..(n as usize) {
+            let e = out[i].events;
+            let d = out[i].data;
+            println!("  events=0x{:08X}  data=0x{:X}", e, d);
+        }
+
+        // DEL stdin and recheck
+        println!("epoll_ctl DEL stdin -> {}", epoll_ctl(ep, ops::EPOLL_CTL_DEL, 0, stdin_ev));
+        let n2 = epoll_wait(ep, &mut out, 0);
+        println!("epoll_wait after DEL -> {} ready", n2);
+
+        crate::syscall::epoll::epoll_close(ep);
+        println!("epolltest: done");
+    }
+
     /// ifconfig / ip: list network interfaces.
     fn cmd_ifconfig(&self, args: &[&str]) {
         // Optional: ifconfig lo up | ifconfig lo down
@@ -3838,10 +3959,10 @@ impl Shell {
             return;
         }
         let target = args[0];
-        let addr = match crate::net::resolver::resolve(target) {
+        let addr = match crate::net::dns::resolve(target) {
             Some(a) => {
                 if target != alloc::format!("{}", a) {
-                    println!("PING {} ({}): resolved via /etc/hosts", target, a);
+                    println!("PING {} ({})", target, a);
                 }
                 a
             }
@@ -3900,6 +4021,76 @@ impl Shell {
         println!("--- {} ping statistics ---", addr);
         println!("{} packets transmitted, {} received, {}% packet loss",
             count, received, loss_pct);
+    }
+
+    /// unixtest: end-to-end test of AF_UNIX SOCK_STREAM and SOCK_DGRAM.
+    fn cmd_unixtest(&self, _args: &[&str]) {
+        use crate::net::unix::{
+            accept, bind, close, connect, recv, recvfrom, send, sendto, socket, UnixKind,
+        };
+
+        // ---- SOCK_STREAM ----
+        let server = socket(UnixKind::Stream);
+        if let Err(e) = bind(server, "/tmp/.unix-stream-test") {
+            println!("unixtest: stream bind error: {:?}", e);
+            return;
+        }
+        if let Err(e) = crate::net::unix::listen(server, 4) {
+            println!("unixtest: stream listen error: {:?}", e);
+            return;
+        }
+        let client = socket(UnixKind::Stream);
+        if let Err(e) = connect(client, "/tmp/.unix-stream-test") {
+            println!("unixtest: stream connect error: {:?}", e);
+            return;
+        }
+        let server_side = match accept(server) {
+            Ok(h) => h,
+            Err(e) => { println!("unixtest: stream accept error: {:?}", e); return; }
+        };
+        let payload = b"unix-stream-payload";
+        let _ = send(client, payload);
+        let mut buf = [0u8; 64];
+        match recv(server_side, &mut buf) {
+            Ok(n) => {
+                println!("unixtest: stream server got {} bytes: '{}'",
+                    n, core::str::from_utf8(&buf[..n]).unwrap_or("<binary>"));
+                if &buf[..n] == payload {
+                    println!("unixtest: stream payload matches");
+                }
+            }
+            Err(e) => println!("unixtest: stream recv error: {:?}", e),
+        }
+        let _ = send(server_side, b"stream-ack");
+        let mut buf2 = [0u8; 64];
+        if let Ok(n) = recv(client, &mut buf2) {
+            println!("unixtest: stream client got reply: '{}'",
+                core::str::from_utf8(&buf2[..n]).unwrap_or("<binary>"));
+        }
+        close(client);
+        close(server_side);
+        close(server);
+
+        // ---- SOCK_DGRAM ----
+        let dg_srv = socket(UnixKind::Datagram);
+        let _ = bind(dg_srv, "/tmp/.unix-dgram-test");
+        let dg_cli = socket(UnixKind::Datagram);
+        let _ = bind(dg_cli, "/tmp/.unix-dgram-client");
+        match sendto(dg_cli, "/tmp/.unix-dgram-test", b"hello-dgram") {
+            Ok(n) => println!("unixtest: dgram client sent {} bytes", n),
+            Err(e) => println!("unixtest: dgram send error: {:?}", e),
+        }
+        let mut buf3 = [0u8; 64];
+        match recvfrom(dg_srv, &mut buf3) {
+            Ok((n, from)) => {
+                println!("unixtest: dgram server got {} bytes from '{}': '{}'",
+                    n, from, core::str::from_utf8(&buf3[..n]).unwrap_or("<binary>"));
+            }
+            Err(e) => println!("unixtest: dgram recv error: {:?}", e),
+        }
+        close(dg_cli);
+        close(dg_srv);
+        println!("unixtest: done");
     }
 
     /// httptest: spin up the demo httpd, issue a GET via the kernel TCP

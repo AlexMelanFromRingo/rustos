@@ -95,6 +95,9 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     klog_info!("Slab allocator initialized: {} caches",
         rustos::slab::SLAB_REGISTRY.snapshot().len());
 
+    // Initialise resource limits with sensible defaults.
+    rustos::rlimit::init();
+
     // Bring the network stack up: registers the loopback interface.
     rustos::net::init();
     klog_info!("Network stack initialized: lo @ 127.0.0.1");

@@ -9,6 +9,7 @@ pub mod handler;
 pub mod filedesc;
 pub mod pipe;
 pub mod poll;
+pub mod epoll;
 
 /// System call numbers
 /// Based on Linux syscall ABI for x86_64
@@ -49,6 +50,11 @@ pub enum SyscallNumber {
     ClockGetTime = 228,
     Poll = 7,
     Select = 23,
+    EpollCreate = 213,
+    EpollCtl = 233,
+    EpollWait = 232,
+    GetRlimit = 97,
+    SetRlimit = 160,
 }
 
 impl SyscallNumber {
@@ -88,6 +94,11 @@ impl SyscallNumber {
             228 => Some(SyscallNumber::ClockGetTime),
             7 => Some(SyscallNumber::Poll),
             23 => Some(SyscallNumber::Select),
+            213 => Some(SyscallNumber::EpollCreate),
+            232 => Some(SyscallNumber::EpollWait),
+            233 => Some(SyscallNumber::EpollCtl),
+            97 => Some(SyscallNumber::GetRlimit),
+            160 => Some(SyscallNumber::SetRlimit),
             _ => None,
         }
     }
@@ -183,5 +194,10 @@ pub fn syscall_dispatcher(
         SyscallNumber::ClockGetTime => handler::sys_clock_gettime(arg1, arg2),
         SyscallNumber::Poll => handler::sys_poll(arg1, arg2, arg3 as i32),
         SyscallNumber::Select => handler::sys_select(arg1, arg2, arg3, arg4, arg5),
+        SyscallNumber::EpollCreate => handler::sys_epoll_create(),
+        SyscallNumber::EpollCtl => handler::sys_epoll_ctl(arg1 as i32, arg2 as i32, arg3 as i32, arg4),
+        SyscallNumber::EpollWait => handler::sys_epoll_wait(arg1 as i32, arg2, arg3, arg4 as i32),
+        SyscallNumber::GetRlimit => handler::sys_getrlimit(arg1 as u32, arg2),
+        SyscallNumber::SetRlimit => handler::sys_setrlimit(arg1 as u32, arg2),
     }
 }

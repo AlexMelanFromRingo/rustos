@@ -23,6 +23,8 @@ pub mod tcp;
 pub mod loopback;
 pub mod socket;
 pub mod resolver;
+pub mod unix;
+pub mod dns;
 
 use alloc::string::String;
 use alloc::vec::Vec;

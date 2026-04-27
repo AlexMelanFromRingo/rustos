@@ -1132,6 +1132,62 @@ pub fn sys_ioctl(fd: usize, request: usize, _arg: usize) -> isize {
     }
 }
 
+/// getrlimit(resource, *rlimit) — read soft+hard.
+pub fn sys_getrlimit(resource: u32, rlim_ptr: usize) -> isize {
+    let res = match crate::rlimit::Resource::from_u32(resource) {
+        Some(r) => r,
+        None => return SyscallError::InvalidArgument.as_isize(),
+    };
+    if rlim_ptr == 0 {
+        return SyscallError::InvalidArgument.as_isize();
+    }
+    let lim = crate::rlimit::LIMITS.lock().get(res);
+    unsafe { core::ptr::write(rlim_ptr as *mut crate::rlimit::Rlimit, lim) };
+    0
+}
+
+/// setrlimit(resource, *rlimit) — update soft+hard.
+pub fn sys_setrlimit(resource: u32, rlim_ptr: usize) -> isize {
+    let res = match crate::rlimit::Resource::from_u32(resource) {
+        Some(r) => r,
+        None => return SyscallError::InvalidArgument.as_isize(),
+    };
+    if rlim_ptr == 0 {
+        return SyscallError::InvalidArgument.as_isize();
+    }
+    let new = unsafe { core::ptr::read(rlim_ptr as *const crate::rlimit::Rlimit) };
+    let is_root = crate::users::CURRENT_CREDS.lock().uid == 0;
+    match crate::rlimit::LIMITS.lock().set(res, new, is_root) {
+        Ok(()) => 0,
+        Err(_) => SyscallError::PermissionDenied.as_isize(),
+    }
+}
+
+/// epoll_create1: create a new epoll instance, returning a non-negative epfd.
+pub fn sys_epoll_create() -> isize {
+    crate::syscall::epoll::epoll_create() as isize
+}
+
+/// epoll_ctl(epfd, op, fd, *event)
+pub fn sys_epoll_ctl(epfd: i32, op: i32, fd: i32, event_ptr: usize) -> isize {
+    if event_ptr == 0 {
+        return SyscallError::InvalidArgument.as_isize();
+    }
+    let ev = unsafe { core::ptr::read(event_ptr as *const crate::syscall::epoll::EpollEvent) };
+    crate::syscall::epoll::epoll_ctl(epfd, op, fd, ev) as isize
+}
+
+/// epoll_wait(epfd, *events, maxevents, timeout_ms)
+pub fn sys_epoll_wait(epfd: i32, events_ptr: usize, maxevents: usize, timeout_ms: i32) -> isize {
+    if events_ptr == 0 || maxevents == 0 {
+        return SyscallError::InvalidArgument.as_isize();
+    }
+    let out: &mut [crate::syscall::epoll::EpollEvent] = unsafe {
+        core::slice::from_raw_parts_mut(events_ptr as *mut _, maxevents)
+    };
+    crate::syscall::epoll::epoll_wait(epfd, out, timeout_ms)
+}
+
 /// poll(struct pollfd *fds, nfds_t nfds, int timeout)
 ///
 /// Performs the readiness check synchronously.  In our single-address-space
