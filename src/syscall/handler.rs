@@ -406,21 +406,24 @@ pub fn sys_getpid() -> isize {
 
 /// sys_getcwd - get current working directory
 pub fn sys_getcwd(buf: usize, size: usize) -> isize {
-    // TODO: Implement per-process working directory
-    // For now, return root "/"
     if buf == 0 || size < 2 {
         return SyscallError::InvalidArgument.as_isize();
     }
 
-    let cwd = b"/\0";
-    let to_copy = cwd.len().min(size);
-
-    unsafe {
-        let dest = core::slice::from_raw_parts_mut(buf as *mut u8, to_copy);
-        dest.copy_from_slice(&cwd[..to_copy]);
+    let cwd = crate::process::current_cwd();
+    let bytes = cwd.as_bytes();
+    let needed = bytes.len() + 1; // +1 for NUL
+    if needed > size {
+        return SyscallError::InvalidArgument.as_isize();
     }
 
-    to_copy as isize
+    unsafe {
+        let dest = core::slice::from_raw_parts_mut(buf as *mut u8, needed);
+        dest[..bytes.len()].copy_from_slice(bytes);
+        dest[bytes.len()] = 0;
+    }
+
+    needed as isize
 }
 
 /// sys_lseek - reposition file offset
@@ -886,7 +889,7 @@ pub fn sys_chdir(path_ptr: usize) -> isize {
         return SyscallError::FileNotFound.as_isize();
     }
 
-    // Accept the syscall (per-process cwd tracking is handled by shell's current_dir)
+    crate::process::set_current_cwd(&path);
     0
 }
 

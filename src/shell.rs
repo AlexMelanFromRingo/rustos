@@ -661,6 +661,7 @@ impl Shell {
             "runlevel" => self.cmd_runlevel(),
             "init" | "telinit" => self.cmd_init(args),
             "slabinfo" => self.cmd_slabinfo(),
+            "vmalloc-test" | "vmstat" => self.cmd_vmstat(args),
             "login" => self.cmd_login(args),
             "logout" | "exit" => self.cmd_logout(),
             "motd" => self.cmd_motd(),
@@ -1851,12 +1852,28 @@ impl Shell {
     }
 
     fn cmd_mount(&self, args: &[&str]) {
+        // No args: list current mounts (Linux behaviour).
         if args.is_empty() {
-            println!("Usage: mount <filesystem>");
-            println!("Supported filesystems: fat32");
+            for m in crate::fs::vfs::list_mounts() {
+                println!("{} on {} type {} ({})",
+                    m.source, m.mount_point, m.fs_type, m.options);
+            }
             return;
         }
 
+        // mount -t TYPE SOURCE TARGET
+        if args[0] == "-t" && args.len() >= 4 {
+            let fs_type = args[1];
+            let source = args[2];
+            let target = args[3];
+            crate::fs::vfs::register_mount(crate::fs::vfs::Mount::new(
+                source, target, fs_type, "rw",
+            ));
+            println!("mount: {} mounted on {} ({})", source, target, fs_type);
+            return;
+        }
+
+        // Legacy: `mount fat32`
         match args[0] {
             "fat32" => {
                 use crate::fs::fat32;
@@ -1865,6 +1882,9 @@ impl Shell {
                 match fat32::init() {
                     Ok(_) => {
                         println!("FAT32 filesystem mounted successfully!");
+                        crate::fs::vfs::register_mount(crate::fs::vfs::Mount::new(
+                            "fat32:/dev/sda1", "/mnt", "fat32", "rw",
+                        ));
                         println!("Use 'ls' to list files from the disk.");
                     }
                     Err(e) => {
@@ -1875,17 +1895,33 @@ impl Shell {
             }
             _ => {
                 println!("Unknown filesystem: '{}'", args[0]);
-                println!("Supported filesystems: fat32");
+                println!("Supported filesystems: fat32, or `mount -t TYPE SRC TARGET`");
             }
         }
     }
 
-    fn cmd_umount(&self, _args: &[&str]) {
-        use crate::fs::fat32::FAT32;
+    fn cmd_umount(&self, args: &[&str]) {
+        if !args.is_empty() {
+            // Specific mount-point unmount.
+            let target = args[0];
+            if crate::fs::vfs::unregister_mount(target) {
+                if target == "/mnt" {
+                    use crate::fs::fat32::FAT32;
+                    *FAT32.lock() = None;
+                }
+                println!("Unmounted {}", target);
+            } else {
+                println!("umount: {}: not mounted", target);
+            }
+            return;
+        }
 
+        // Default: unmount FAT32 (legacy behaviour).
+        use crate::fs::fat32::FAT32;
         let mut fat32 = FAT32.lock();
         if fat32.is_some() {
             *fat32 = None;
+            crate::fs::vfs::unregister_mount("/mnt");
             println!("FAT32 filesystem unmounted");
         } else {
             println!("No FAT32 filesystem is mounted");
@@ -2459,6 +2495,7 @@ impl Shell {
         if args.is_empty() {
             // cd without arguments goes to root
             self.current_dir = String::from("/");
+            crate::process::set_current_cwd("/");
             return;
         }
 
@@ -2467,6 +2504,7 @@ impl Shell {
         // Handle special cases
         if target == "/" {
             self.current_dir = String::from("/");
+            crate::process::set_current_cwd("/");
             return;
         }
 
@@ -2485,6 +2523,7 @@ impl Shell {
                     self.current_dir.truncate(pos);
                 }
             }
+            crate::process::set_current_cwd(&self.current_dir);
             return;
         }
 
@@ -2499,7 +2538,8 @@ impl Shell {
 
         // Check if directory exists
         if VfsContext::is_directory(&new_path) {
-            self.current_dir = new_path;
+            self.current_dir = new_path.clone();
+            crate::process::set_current_cwd(&new_path);
         } else if VfsContext::exists(&new_path) {
             println!("cd: {}: Not a directory", target);
         } else {
@@ -4263,6 +4303,38 @@ impl Shell {
                 }
             } else {
                 x86_64::instructions::interrupts::enable_and_hlt();
+            }
+        }
+    }
+
+    /// vmstat / vmalloc-test: report vmalloc region usage and exercise it.
+    fn cmd_vmstat(&self, args: &[&str]) {
+        let (total, used, allocs) = crate::vmalloc::stats();
+        println!("vmalloc region: {} KiB total, {} KiB used, {} allocations",
+            total / 1024, used / 1024, allocs);
+
+        if args.first() == Some(&"test") {
+            let bytes: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(64 * 1024);
+            match crate::vmalloc::vmalloc(bytes) {
+                Ok(p) => {
+                    // Touch first / last byte to confirm it's mapped writable.
+                    unsafe {
+                        p.write(0xAB);
+                        p.add(bytes - 1).write(0xCD);
+                        let a = p.read();
+                        let b = p.add(bytes - 1).read();
+                        println!("vmalloc({}) = {:p}, first=0x{:02X}, last=0x{:02X}",
+                            bytes, p, a, b);
+                    }
+                    let (_, used_after, allocs_after) = crate::vmalloc::stats();
+                    println!("after alloc: used={} KiB, allocations={}",
+                        used_after / 1024, allocs_after);
+                    let _ = crate::vmalloc::vfree(p);
+                    let (_, used_final, allocs_final) = crate::vmalloc::stats();
+                    println!("after free:  used={} KiB, allocations={}",
+                        used_final / 1024, allocs_final);
+                }
+                Err(e) => println!("vmalloc({}) failed: {:?}", bytes, e),
             }
         }
     }

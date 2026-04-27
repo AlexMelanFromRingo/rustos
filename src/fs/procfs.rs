@@ -24,6 +24,7 @@ pub fn read_proc(path: &str) -> Option<Vec<u8>> {
             content.push_str("loadavg\n");
             content.push_str("stat\n");
             content.push_str("slabinfo\n");
+            content.push_str("mounts\n");
 
             // Add per-process directories
             let pm = crate::process::PROCESS_MANAGER.lock();
@@ -143,6 +144,16 @@ pub fn read_proc(path: &str) -> Option<Vec<u8>> {
                     name, st.obj_size, st.objs_per_slab, st.total_objs, st.used_objs,
                     st.free_objs, st.total_slabs, st.allocs, st.frees, st.grew,
                 ));
+            }
+            Some(s.into_bytes())
+        }
+
+        "mounts" => {
+            let mut s = String::new();
+            for m in crate::fs::vfs::list_mounts() {
+                // Linux /proc/mounts format: src target type opts 0 0
+                s.push_str(&format!("{} {} {} {} 0 0\n",
+                    m.source, m.mount_point, m.fs_type, m.options));
             }
             Some(s.into_bytes())
         }

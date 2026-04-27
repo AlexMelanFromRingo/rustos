@@ -145,6 +145,11 @@ Type 'help' to list available shell commands.\n\
     }
     klog_info!("Filesystem populated (/etc, /root, /home)");
 
+    // Populate the system mount table.  Done after FAT32 mount attempt.
+    rustos::fs::vfs::install_default_mounts();
+    klog_info!("Mount table populated: {} entries",
+        rustos::fs::vfs::list_mounts().len());
+
     // Initialise the SysV-style init system and bring the system up to multi-user.
     rustos::init::install_default_services();
     {

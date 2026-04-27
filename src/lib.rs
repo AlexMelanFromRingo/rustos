@@ -37,6 +37,7 @@ pub mod net;
 pub mod syslog;
 pub mod cron;
 pub mod httpd;
+pub mod vmalloc;
 
 pub fn init() {
     gdt::init();

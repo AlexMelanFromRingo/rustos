@@ -12,14 +12,14 @@ Reference architecture: Linux/Unix-like.
 - [x] Implement proper `FrameAllocator` with bitmap (O(1) alloc/dealloc) ✅
 - [x] Add frame deallocation support ✅
 - [x] Implement slab allocator for kernel objects (Bonwick-style object cache, kmalloc sizes 16..4096, /proc/slabinfo) ✅
-- [ ] Add kernel virtual memory allocator (vmalloc equivalent)
+- [x] Add kernel virtual memory allocator (vmalloc/vfree, 64 MiB region, bitmap free list, /vmalloc-test) ✅
 - [x] Guard pages for kernel stack overflow detection ✅
 - [ ] Per-process address spaces (separate page tables per process)
 
 ### 1.2 Process Management
 - [ ] Per-process page tables (full address space isolation)
 - [x] Per-process file descriptor tables (FdTableAccess with process/kernel dispatch) ✅
-- [ ] Per-process working directory (current: shell-level only)
+- [x] Per-process working directory (Process.cwd, sys_chdir/sys_getcwd, SHELL_CWD fallback) ✅
 - [ ] Proper `fork()` with COW (Copy-On-Write) pages
 - [ ] `waitpid()` with blocking (current: non-blocking poll)
 - [x] Signal delivery (SIGTERM, SIGKILL, SIGINT, SIGCHLD, etc.) ✅
@@ -81,7 +81,7 @@ Reference architecture: Linux/Unix-like.
 ### 3.1 VFS Enhancement
 - [ ] Proper inode abstraction
 - [ ] Dentry cache (directory entry cache)
-- [ ] Mount table with multiple mount points
+- [x] Mount table with multiple mount points (MOUNT_TABLE, /proc/mounts, mount/-t/umount) ✅
 - [x] Path resolution with symlinks ✅
 - [ ] File locking (flock, fcntl)
 - [x] File permissions (rwxrwxrwx, uid/gid) ✅

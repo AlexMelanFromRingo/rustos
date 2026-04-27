@@ -4,8 +4,9 @@
 /// to work with different filesystem implementations (RAM disk, FAT32, etc.)
 
 use alloc::vec::Vec;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::format;
+use spin::Mutex;
 use crate::fs::fat32::FAT32;
 use crate::fs::ramdisk::RAMDISK;
 
@@ -634,5 +635,86 @@ impl VfsContext {
         } else {
             "RAMDISK"
         }
+    }
+}
+
+/// One row of the system mount table — analogous to a single line of
+/// /proc/mounts.
+#[derive(Debug, Clone)]
+pub struct Mount {
+    /// Source / device (informational; e.g. "ramdisk0", "fat32:/dev/sda1").
+    pub source: String,
+    /// Where the filesystem is rooted in the global namespace.
+    pub mount_point: String,
+    /// Filesystem type label (ramdisk, fat32, tmpfs, devfs, procfs, sysfs).
+    pub fs_type: String,
+    /// Mount options (rw, ro, noexec, nosuid, ...).
+    pub options: String,
+}
+
+impl Mount {
+    pub fn new(source: &str, mount_point: &str, fs_type: &str, options: &str) -> Self {
+        Mount {
+            source: source.to_string(),
+            mount_point: mount_point.to_string(),
+            fs_type: fs_type.to_string(),
+            options: options.to_string(),
+        }
+    }
+}
+
+/// Global mount table.  Read by `mount`/`mountpoint` shell commands and
+/// /proc/mounts.  Populated at boot from each filesystem's init.
+pub static MOUNT_TABLE: Mutex<Vec<Mount>> = Mutex::new(Vec::new());
+
+/// Register a mount.  Idempotent on (mount_point, fs_type).
+pub fn register_mount(m: Mount) {
+    let mut table = MOUNT_TABLE.lock();
+    if table.iter().any(|e| e.mount_point == m.mount_point && e.fs_type == m.fs_type) {
+        return;
+    }
+    table.push(m);
+}
+
+/// Remove the entry for the given mount point.  Returns true if removed.
+pub fn unregister_mount(mount_point: &str) -> bool {
+    let mut table = MOUNT_TABLE.lock();
+    let before = table.len();
+    table.retain(|e| e.mount_point != mount_point);
+    table.len() != before
+}
+
+/// Snapshot of the mount table for read-only consumers.
+pub fn list_mounts() -> Vec<Mount> {
+    MOUNT_TABLE.lock().clone()
+}
+
+/// Find the mount whose mount_point is the longest prefix of `path`.
+pub fn resolve_mount(path: &str) -> Option<Mount> {
+    let table = MOUNT_TABLE.lock();
+    let mut best: Option<&Mount> = None;
+    for m in table.iter() {
+        if path.starts_with(&m.mount_point) {
+            let len = m.mount_point.len();
+            let beats = match best {
+                Some(b) => len > b.mount_point.len(),
+                None => true,
+            };
+            if beats { best = Some(m); }
+        }
+    }
+    best.cloned()
+}
+
+/// Install the standard set of mounts at boot (after each filesystem has
+/// initialised).  Called from main after FS init.
+pub fn install_default_mounts() {
+    register_mount(Mount::new("ramdisk", "/",     "ramdisk", "rw"));
+    register_mount(Mount::new("proc",    "/proc", "procfs",  "rw,nosuid,nodev,noexec"));
+    register_mount(Mount::new("sys",     "/sys",  "sysfs",   "rw,nosuid,nodev,noexec"));
+    register_mount(Mount::new("dev",     "/dev",  "devfs",   "rw,nosuid"));
+    register_mount(Mount::new("tmpfs",   "/tmp",  "tmpfs",   "rw,nosuid,nodev"));
+    if FAT32.lock().is_some() {
+        register_mount(Mount::new("fat32:/dev/sda1", "/mnt", "fat32", "rw"));
     }
 }

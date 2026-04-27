@@ -2,6 +2,7 @@
 pub mod context;
 pub mod scheduler;
 
+use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
 use crate::process::context::{Context, TrapFrame};
@@ -69,6 +70,9 @@ pub struct Process {
 
     /// Page table physical address (CR3 value) — 0 means use kernel page table
     pub cr3: u64,
+
+    /// Current working directory (per-process, used by chdir/getcwd).
+    pub cwd: String,
 }
 
 impl Process {
@@ -98,6 +102,7 @@ impl Process {
             kernel_stack_slot: None,
             kernel_stack_top: 0,
             cr3: 0,
+            cwd: String::from("/"),
         }
     }
 
@@ -135,6 +140,7 @@ impl Process {
             kernel_stack_slot: Some(kstack_slot),
             kernel_stack_top: kstack_top,
             cr3: 0, // 0 = use kernel page table (shared address space for now)
+            cwd: String::from("/"),
         }
     }
 
@@ -167,6 +173,7 @@ impl Process {
             kernel_stack_slot: kstack_slot,
             kernel_stack_top: kstack_top,
             cr3: 0, // TODO: clone page table for fork
+            cwd: self.cwd.clone(),
         }
     }
 }
@@ -520,3 +527,37 @@ impl ProcessManager {
 
 /// Global process manager
 pub static PROCESS_MANAGER: Mutex<ProcessManager> = Mutex::new(ProcessManager::new());
+
+/// Fallback cwd used by `chdir`/`getcwd` when no user process is running
+/// (e.g. when called from the shell, which is currently a kernel task).
+pub static SHELL_CWD: Mutex<String> = Mutex::new(String::new());
+
+/// Resolve the current working directory: prefer the running process'
+/// `cwd`, fall back to `SHELL_CWD`, default to "/".
+pub fn current_cwd() -> String {
+    let pm = PROCESS_MANAGER.lock();
+    if let Some(p) = pm.current_process() {
+        if !p.cwd.is_empty() {
+            return p.cwd.clone();
+        }
+    }
+    drop(pm);
+    let shell = SHELL_CWD.lock();
+    if !shell.is_empty() {
+        shell.clone()
+    } else {
+        String::from("/")
+    }
+}
+
+/// Set the current working directory.  Updates the running process if any,
+/// otherwise the shell-fallback slot.
+pub fn set_current_cwd(path: &str) {
+    let mut pm = PROCESS_MANAGER.lock();
+    if let Some(p) = pm.current_process_mut() {
+        p.cwd = String::from(path);
+        return;
+    }
+    drop(pm);
+    *SHELL_CWD.lock() = String::from(path);
+}
