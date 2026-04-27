@@ -98,6 +98,13 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // Initialise resource limits with sensible defaults.
     rustos::rlimit::init();
 
+    // Capabilities table: root gets all, others get none.
+    rustos::capability::init();
+
+    // Calibrate the TSC against the PIT for nanosecond-precision time reads.
+    rustos::tsc::calibrate();
+    klog_info!("TSC calibrated at {} Hz", rustos::tsc::freq_hz());
+
     // Bring the network stack up: registers the loopback interface.
     rustos::net::init();
     klog_info!("Network stack initialized: lo @ 127.0.0.1");

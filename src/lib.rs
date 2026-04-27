@@ -40,6 +40,9 @@ pub mod httpd;
 pub mod vmalloc;
 pub mod rlimit;
 pub mod flock;
+pub mod tsc;
+pub mod seccomp;
+pub mod capability;
 
 pub fn init() {
     gdt::init();

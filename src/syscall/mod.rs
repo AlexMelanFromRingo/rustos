@@ -166,6 +166,31 @@ pub fn syscall_dispatcher(
     arg5: usize,
     arg6: usize,
 ) -> isize {
+    // Seccomp gate: if the current process has a filter installed, consult
+    // it before dispatching.  Errno → return -EPERM; Kill → terminate.
+    {
+        let pid = crate::process::PROCESS_MANAGER.lock().current_pid.unwrap_or(0);
+        match crate::seccomp::check(pid, syscall_num) {
+            crate::seccomp::Action::Allow => {}
+            crate::seccomp::Action::Log => {
+                crate::syslog::log(
+                    crate::syslog::Facility::Authpriv,
+                    crate::syslog::Severity::Notice,
+                    "seccomp",
+                    alloc::format!("pid={} sc={}", pid, syscall_num),
+                );
+            }
+            crate::seccomp::Action::Errno => {
+                return SyscallError::PermissionDenied.as_isize();
+            }
+            crate::seccomp::Action::Kill => {
+                let mut pm = crate::process::PROCESS_MANAGER.lock();
+                pm.exit(pid, 137);
+                return SyscallError::PermissionDenied.as_isize();
+            }
+        }
+    }
+
     let syscall = match SyscallNumber::from_usize(syscall_num) {
         Some(sc) => sc,
         None => return SyscallError::NotImplemented.as_isize(),

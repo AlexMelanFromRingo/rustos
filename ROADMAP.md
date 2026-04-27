@@ -130,7 +130,7 @@ Reference architecture: Linux/Unix-like.
 - [x] ICMP echo (ping over loopback works end-to-end) ✅
 - [ ] UDP
 - [ ] TCP (connection management, flow control, congestion control)
-- [ ] DHCP client
+- [x] DHCP client (DISCOVER/OFFER/REQUEST/ACK build+parse, dhclient shell command, RFC 2131 wire format) ✅
 - [x] DNS resolver (RFC 1035 A-record query/response, /etc/resolv.conf, TTL-bounded cache, /etc/hosts fallback) ✅
 - [ ] Network socket API
 - [ ] `ping` command
@@ -144,9 +144,9 @@ Reference architecture: Linux/Unix-like.
 
 ### 4.4 Timer & Clock
 - [ ] HPET (High Precision Event Timer)
-- [ ] TSC (Time Stamp Counter) calibration
+- [x] TSC (Time Stamp Counter) calibration via PIT channel 2, ns-precision monotonic ✅
 - [x] RTC (Real-Time Clock) — CMOS MC146818, BCD/binary auto-detect ✅
-- [ ] `clock_gettime` with nanosecond precision (currently second-level from RTC)
+- [x] `clock_gettime` with nanosecond precision (CLOCK_MONOTONIC backed by TSC) ✅
 
 ---
 
@@ -160,9 +160,9 @@ Reference architecture: Linux/Unix-like.
 
 ### 5.2 Shell Improvements
 - [x] Job control (background processes with &, fg, bg, jobs) ✅
-- [ ] Shell scripting (if/then/else, for, while loops)
-- [x] Environment variable expansion ($VAR) ✅
-- [ ] Command substitution ($(cmd))
+- [x] Shell scripting (if/then/elif/else/fi, while/do/done, for/in/do/done) ✅
+- [x] Environment variable expansion ($VAR, $?) ✅
+- [x] Command substitution ($(cmd)) ✅
 - [ ] Here documents (<<EOF)
 - [x] Glob expansion (*.txt, /dev/n*) ✅
 
@@ -226,9 +226,9 @@ Start with **Option A** (upgrade to bootloader v0.11+) for UEFI support, then ev
 
 - [ ] ASLR (Address Space Layout Randomization)
 - [ ] Stack canaries
-- [ ] NX bit enforcement (W^X policy)
-- [ ] Capability-based security model
-- [ ] Seccomp-like syscall filtering
+- [x] NX bit enforcement on vmalloc data pages (W^X) ✅
+- [x] Capability-based security model (20 Linux caps, getcap/setcap, current_has/check API) ✅
+- [x] Seccomp-like syscall filtering (per-PID filter, Allow/Errno/Kill/Log actions, dispatch hook) ✅
 - [ ] Kernel hardening (SMEP, SMAP, KASLR)
 
 ---

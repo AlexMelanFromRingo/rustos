@@ -25,6 +25,7 @@ pub mod socket;
 pub mod resolver;
 pub mod unix;
 pub mod dns;
+pub mod dhcp;
 
 use alloc::string::String;
 use alloc::vec::Vec;

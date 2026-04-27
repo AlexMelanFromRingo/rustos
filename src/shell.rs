@@ -77,6 +77,7 @@ pub struct Shell {
     env_vars: Vec<(String, String)>,  // Environment variables
     jobs: Vec<Job>,  // Background jobs
     next_job_id: usize,  // Next job ID to assign
+    last_exit: i32,   // $? — exit status of the most recently completed command
 }
 
 impl Shell {
@@ -94,6 +95,7 @@ impl Shell {
             env_vars: Vec::new(),
             jobs: Vec::new(),
             next_job_id: 1,
+            last_exit: 0,
         };
 
         // Set default environment variables
@@ -523,11 +525,26 @@ impl Shell {
 
         // Expand environment variables ($VAR) — but skip for `for` loops
         // (for loop handles its own variable substitution)
-        let command = if command.starts_with("for ") {
+        let command = if command.starts_with("for ") || command.starts_with("if ") || command.starts_with("while ") {
             command
         } else {
             self.expand_env_vars(&command)
         };
+
+        // Expand $(...) command substitution before any further parsing.
+        let command = self.expand_command_subst(&command);
+
+        // if/then/elif/else/fi
+        if command.starts_with("if ") {
+            self.execute_if(&command);
+            return;
+        }
+
+        // while ... ; do ... ; done
+        if command.starts_with("while ") {
+            self.execute_while(&command);
+            return;
+        }
 
         // Check for semicolon-separated commands
         if command.contains(';') {
@@ -672,7 +689,12 @@ impl Shell {
             "ulimit" => self.cmd_ulimit(args),
             "flock" => self.cmd_flock(args),
             "mknod" => self.cmd_mknod(args),
+            "tsc" => self.cmd_tsc(),
+            "seccomp" => self.cmd_seccomp(args),
+            "getcap" => self.cmd_getcap(args),
+            "setcap" => self.cmd_setcap(args),
             "ifconfig" | "ip" => self.cmd_ifconfig(args),
+            "dhclient" => self.cmd_dhclient(args),
             "netstat" | "ss" => self.cmd_netstat(args),
             "ping" => self.cmd_ping(args),
             "udptest" => self.cmd_udptest(args),
@@ -712,6 +734,7 @@ impl Shell {
                         env_vars: self.env_vars.clone(),
                         jobs: self.jobs.clone(),
                         next_job_id: self.next_job_id,
+                        last_exit: self.last_exit,
                     };
                     temp_shell.execute();
                     // Update history from temp shell
@@ -2055,6 +2078,12 @@ impl Shell {
         let mut i = 0;
         while i < bytes.len() {
             if bytes[i] == b'$' && i + 1 < bytes.len() {
+                // $? — exit status of the most recent command
+                if bytes[i + 1] == b'?' {
+                    result.push_str(&format!("{}", self.last_exit));
+                    i += 2;
+                    continue;
+                }
                 i += 1;
                 // Collect variable name (alphanumeric + underscore)
                 let start = i;
@@ -2076,6 +2105,182 @@ impl Shell {
             }
         }
         result
+    }
+
+    /// Expand `$(cmd)` substitutions by capturing each inner command's output.
+    /// Trailing newlines are stripped (like POSIX shells).
+    fn expand_command_subst(&mut self, input: &str) -> String {
+        let bytes = input.as_bytes();
+        let mut out = String::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            if i + 1 < bytes.len() && bytes[i] == b'$' && bytes[i + 1] == b'(' {
+                // Find the matching close paren (no nested support).
+                let mut depth = 1;
+                let start = i + 2;
+                let mut j = start;
+                while j < bytes.len() && depth > 0 {
+                    match bytes[j] {
+                        b'(' => depth += 1,
+                        b')' => depth -= 1,
+                        _ => {}
+                    }
+                    if depth == 0 { break; }
+                    j += 1;
+                }
+                if depth != 0 {
+                    out.push_str(&input[i..]);
+                    return out;
+                }
+                let inner = &input[start..j];
+                let captured = self.capture_inner_command(inner);
+                let trimmed = captured.trim_end_matches('\n').trim_end_matches('\r');
+                out.push_str(trimmed);
+                i = j + 1;
+            } else {
+                out.push(input[i..].chars().next().unwrap());
+                i += input[i..].chars().next().unwrap().len_utf8();
+            }
+        }
+        out
+    }
+
+    /// Run `cmd` capturing its VGA output and returning the captured text.
+    /// Used for command substitution.
+    fn capture_inner_command(&mut self, cmd: &str) -> String {
+        crate::vga_buffer::start_capture();
+        // Save and restore the buffer/cursor so re-entrant execute() doesn't
+        // clobber the outer command line.
+        let saved_buf = core::mem::take(&mut self.buffer);
+        let saved_cursor = self.cursor_pos;
+        self.buffer = cmd.to_string();
+        self.cursor_pos = self.buffer.len();
+        self.execute();
+        self.buffer = saved_buf;
+        self.cursor_pos = saved_cursor;
+        crate::vga_buffer::stop_capture()
+    }
+
+    /// `if COND ; then BODY ; [elif COND ; then BODY ;]* [else BODY ;] fi`
+    /// Conditions and bodies are full shell commands; the condition's
+    /// last_exit (0 == true) selects the branch.
+    fn execute_if(&mut self, command: &str) {
+        let rest = command["if ".len()..].trim();
+        let parts: Vec<String> = rest.split(';').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+        self.execute_if_continued(&parts, 0, false);
+    }
+
+    fn execute_if_continued(&mut self, parts: &[String], start: usize, mut executed: bool) {
+        // A "branch boundary" token is one of: "fi", "else"[+body], "elif "+cond.
+        let is_boundary = |s: &str| {
+            s == "fi" || s == "else" || s.starts_with("else ")
+                || s.starts_with("elif ") || s.starts_with("else\t")
+        };
+
+        let mut idx = start;
+        while idx < parts.len() {
+            let cond = parts[idx].clone();
+            idx += 1;
+            if idx >= parts.len() { return; }
+            // The next part should start with "then".
+            let p = &parts[idx];
+            let first_body = if p == "then" {
+                String::new()
+            } else if let Some(rest) = p.strip_prefix("then ") {
+                rest.trim().to_string()
+            } else if let Some(rest) = p.strip_prefix("then\t") {
+                rest.trim().to_string()
+            } else {
+                println!("if: expected 'then' got '{}'", p);
+                return;
+            };
+            let mut body: Vec<String> = Vec::new();
+            if !first_body.is_empty() { body.push(first_body); }
+            idx += 1;
+            while idx < parts.len() && !is_boundary(&parts[idx]) {
+                body.push(parts[idx].clone());
+                idx += 1;
+            }
+
+            if !executed {
+                self.run_subcommand(&cond);
+                if self.last_exit == 0 {
+                    for b in &body { self.run_subcommand(b); }
+                    executed = true;
+                }
+            }
+            if idx >= parts.len() { return; }
+
+            let p = parts[idx].clone();
+            if p == "fi" { return; }
+            if p == "else" || p.starts_with("else ") || p.starts_with("else\t") {
+                let mut else_body: Vec<String> = Vec::new();
+                if let Some(rest) = p.strip_prefix("else ").or_else(|| p.strip_prefix("else\t")) {
+                    let r = rest.trim();
+                    if !r.is_empty() { else_body.push(r.to_string()); }
+                }
+                idx += 1;
+                while idx < parts.len() && parts[idx].as_str() != "fi" {
+                    else_body.push(parts[idx].clone());
+                    idx += 1;
+                }
+                if !executed {
+                    for b in &else_body { self.run_subcommand(b); }
+                }
+                return;
+            }
+            if p.starts_with("elif ") {
+                let trimmed = p["elif ".len()..].trim().to_string();
+                let mut new_parts: Vec<String> = parts[..idx].to_vec();
+                new_parts.push(trimmed);
+                new_parts.extend_from_slice(&parts[idx + 1..]);
+                return self.execute_if_continued(&new_parts, idx, executed);
+            }
+            return;
+        }
+    }
+
+    /// `while COND ; do BODY ; done` with a 1000-iteration safety cap.
+    fn execute_while(&mut self, command: &str) {
+        let rest = command["while ".len()..].trim();
+        let parts: Vec<String> = rest.split(';').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+        if parts.is_empty() {
+            println!("while: missing condition");
+            return;
+        }
+        let cond = parts[0].clone();
+        let mut idx = 1;
+        if idx >= parts.len() || !parts[idx].starts_with("do") {
+            println!("while: missing 'do'");
+            return;
+        }
+        let first_body = parts[idx]["do".len()..].trim().to_string();
+        let mut body = Vec::new();
+        if !first_body.is_empty() { body.push(first_body); }
+        idx += 1;
+        while idx < parts.len() && parts[idx].as_str() != "done" {
+            body.push(parts[idx].clone());
+            idx += 1;
+        }
+
+        for _ in 0..1000 {
+            self.run_subcommand(&cond);
+            if self.last_exit != 0 { break; }
+            for b in &body { self.run_subcommand(b); }
+        }
+    }
+
+    /// Re-enter the dispatcher with a freshly assembled command line.  Used
+    /// by the if/while/sudo paths to run a sub-command without disturbing
+    /// the outer caller's buffer/cursor too much.
+    fn run_subcommand(&mut self, cmd: &str) {
+        let saved_buf = core::mem::take(&mut self.buffer);
+        let saved_cursor = self.cursor_pos;
+        self.buffer = cmd.to_string();
+        self.cursor_pos = self.buffer.len();
+        self.execute();
+        self.buffer = saved_buf;
+        self.cursor_pos = saved_cursor;
     }
 
     /// Expand glob patterns (*, ?) in arguments
@@ -3155,8 +3360,8 @@ impl Shell {
         }
     }
 
-    /// test - evaluate conditional expressions
-    fn cmd_test(&self, args: &[&str]) {
+    /// test - evaluate conditional expressions (sets $? = 0 on true, 1 on false)
+    fn cmd_test(&mut self, args: &[&str]) {
         use crate::fs::vfs::VfsContext;
 
         // Strip trailing "]" if invoked as "["
@@ -3184,12 +3389,7 @@ impl Shell {
             }
         };
 
-        if result {
-            // true — print nothing (exit 0 in real shells)
-        } else {
-            // false — in our shell we just print for now
-            // Real shells use exit codes
-        }
+        self.last_exit = if result { 0 } else { 1 };
     }
 
     fn cmd_exec(&mut self, args: &[&str]) {
@@ -3914,6 +4114,151 @@ impl Shell {
         }
     }
 
+    /// getcap: print the capabilities granted to a uid.
+    ///   getcap [UID]
+    fn cmd_getcap(&self, args: &[&str]) {
+        let uid: u32 = args.first().and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| crate::users::CURRENT_CREDS.lock().euid);
+        let caps = crate::capability::CAPS.lock().for_uid(uid);
+        // Decode bits using the known set.
+        let all = [
+            crate::capability::Capability::Chown,
+            crate::capability::Capability::DacOverride,
+            crate::capability::Capability::DacReadSearch,
+            crate::capability::Capability::Fowner,
+            crate::capability::Capability::Fsetid,
+            crate::capability::Capability::Kill,
+            crate::capability::Capability::Setgid,
+            crate::capability::Capability::Setuid,
+            crate::capability::Capability::Setpcap,
+            crate::capability::Capability::NetBindService,
+            crate::capability::Capability::NetRaw,
+            crate::capability::Capability::NetAdmin,
+            crate::capability::Capability::SysModule,
+            crate::capability::Capability::SysAdmin,
+            crate::capability::Capability::SysBoot,
+            crate::capability::Capability::SysNice,
+            crate::capability::Capability::SysResource,
+            crate::capability::Capability::SysTime,
+            crate::capability::Capability::Mknod,
+            crate::capability::Capability::Audit,
+        ];
+        println!("uid={} caps=0x{:016x}", uid, caps.raw());
+        for c in all {
+            if caps.has(c) {
+                println!("  + {}", c.name());
+            }
+        }
+    }
+
+    /// setcap: grant or drop a capability for a uid (root only).
+    ///   setcap UID +CAP   # grant
+    ///   setcap UID -CAP   # drop
+    fn cmd_setcap(&self, args: &[&str]) {
+        if !crate::capability::check(crate::capability::Capability::Setpcap) {
+            println!("setcap: requires CAP_SETPCAP");
+            return;
+        }
+        if args.len() < 2 {
+            println!("Usage: setcap UID +CAP|-CAP");
+            return;
+        }
+        let uid: u32 = match args[0].parse() {
+            Ok(n) => n,
+            Err(_) => { println!("setcap: bad uid"); return; }
+        };
+        let arg = args[1];
+        let (grant, name) = if let Some(s) = arg.strip_prefix('+') {
+            (true, s)
+        } else if let Some(s) = arg.strip_prefix('-') {
+            (false, s)
+        } else {
+            println!("setcap: must prefix capability with + or -");
+            return;
+        };
+        let cap = match crate::capability::Capability::parse(name) {
+            Some(c) => c,
+            None => { println!("setcap: unknown capability '{}'", name); return; }
+        };
+        if grant {
+            crate::capability::CAPS.lock().grant(uid, cap);
+            println!("setcap: granted {} to uid {}", cap.name(), uid);
+        } else {
+            crate::capability::CAPS.lock().revoke(uid, cap);
+            println!("setcap: revoked {} from uid {}", cap.name(), uid);
+        }
+    }
+
+    /// seccomp: install / inspect a per-process syscall filter.
+    ///   seccomp                                : show count of installed filters
+    ///   seccomp install PID DEFAULT_ACTION     : install filter for PID with default
+    ///   seccomp set PID SYSCALL ACTION         : per-syscall override
+    ///   seccomp remove PID                     : drop the filter
+    /// Actions: allow, errno, kill, log
+    fn cmd_seccomp(&self, args: &[&str]) {
+        use crate::seccomp::{Action, Filter, FILTERS};
+        let parse_action = |s: &str| -> Option<Action> {
+            match s {
+                "allow" => Some(Action::Allow),
+                "errno" => Some(Action::Errno),
+                "kill"  => Some(Action::Kill),
+                "log"   => Some(Action::Log),
+                _ => None,
+            }
+        };
+
+        if args.is_empty() {
+            let n = FILTERS.lock().count();
+            println!("seccomp: {} filter(s) installed", n);
+            return;
+        }
+        match args[0] {
+            "install" if args.len() >= 3 => {
+                let pid: usize = match args[1].parse() { Ok(n) => n, Err(_) => { println!("seccomp: bad pid"); return; }};
+                let act = match parse_action(args[2]) { Some(a) => a, None => { println!("seccomp: bad action"); return; }};
+                let f = Filter::new(act);
+                if FILTERS.lock().install(pid, f) {
+                    println!("seccomp: filter installed for pid {} (default {:?})", pid, act);
+                } else {
+                    println!("seccomp: filter table full");
+                }
+            }
+            "set" if args.len() >= 4 => {
+                let pid: usize = match args[1].parse() { Ok(n) => n, Err(_) => { println!("seccomp: bad pid"); return; }};
+                let sc: usize = match args[2].parse() { Ok(n) => n, Err(_) => { println!("seccomp: bad syscall"); return; }};
+                let act = match parse_action(args[3]) { Some(a) => a, None => { println!("seccomp: bad action"); return; }};
+                let mut t = FILTERS.lock();
+                if let Some(mut f) = t.for_pid(pid) {
+                    f.set(sc, act);
+                    t.install(pid, f);
+                    println!("seccomp: pid {} sc {} -> {:?}", pid, sc, act);
+                } else {
+                    println!("seccomp: no filter for pid {}", pid);
+                }
+            }
+            "remove" if args.len() >= 2 => {
+                let pid: usize = match args[1].parse() { Ok(n) => n, Err(_) => { println!("seccomp: bad pid"); return; }};
+                FILTERS.lock().remove(pid);
+                println!("seccomp: removed filter for pid {}", pid);
+            }
+            _ => println!("Usage: seccomp [install PID ACTION | set PID SYSCALL ACTION | remove PID]"),
+        }
+    }
+
+    /// tsc: report TSC frequency and current monotonic time in ns.
+    fn cmd_tsc(&self) {
+        let freq = crate::tsc::freq_hz();
+        let ns = crate::tsc::ns_since_boot();
+        if freq == 0 {
+            println!("tsc: not calibrated");
+            return;
+        }
+        let mhz = freq / 1_000_000;
+        println!("TSC frequency: {} Hz (~{} MHz)", freq, mhz);
+        println!("Monotonic since boot: {}.{:09} s", ns / 1_000_000_000, ns % 1_000_000_000);
+        println!("rdtsc: {}", crate::tsc::read_tsc());
+    }
+
     /// mknod: register a new device node.
     ///   mknod NAME {c|b} MAJOR MINOR
     fn cmd_mknod(&self, args: &[&str]) {
@@ -4074,6 +4419,46 @@ impl Shell {
 
         crate::syscall::epoll::epoll_close(ep);
         println!("epolltest: done");
+    }
+
+    /// dhclient: drive a DHCP DISCOVER → OFFER → REQUEST → ACK round-trip.
+    /// In this build there's no real DHCP server reachable, so the offer
+    /// and ack are forged locally to exercise the parse/serialise paths.
+    fn cmd_dhclient(&self, _args: &[&str]) {
+        use crate::net::dhcp::*;
+        use crate::net::Ipv4Addr;
+
+        let mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
+        let xid: u32 = (crate::task::timer::current_ticks() as u32) ^ 0xDEADBEEF;
+        let server = Ipv4Addr([10, 0, 2, 2]);
+        let assigned = Ipv4Addr([10, 0, 2, 15]);
+
+        let discover = build_discover(mac, xid);
+        println!("dhclient: DISCOVER xid=0x{:08x} ({} bytes)", xid, discover.len());
+
+        let offer = fake_offer_for(&discover, assigned, server);
+        let parsed_offer = DhcpMessage::parse(&offer).expect("offer parse");
+        println!("dhclient: OFFER yiaddr={} server={} type={:?} lease={}s",
+            parsed_offer.yiaddr, server,
+            parsed_offer.message_type(),
+            parsed_offer.lease_seconds().unwrap_or(0));
+
+        let request = build_request(mac, xid, parsed_offer.yiaddr, server);
+        println!("dhclient: REQUEST xid=0x{:08x} ({} bytes)", xid, request.len());
+
+        let ack = fake_ack_for(&request, parsed_offer.yiaddr, server);
+        let parsed_ack = DhcpMessage::parse(&ack).expect("ack parse");
+        println!("dhclient: ACK yiaddr={} type={:?} lease={}s",
+            parsed_ack.yiaddr,
+            parsed_ack.message_type(),
+            parsed_ack.lease_seconds().unwrap_or(0));
+
+        crate::syslog::log(
+            crate::syslog::Facility::Daemon,
+            crate::syslog::Severity::Info,
+            "dhclient",
+            alloc::format!("bound: {} from {}", parsed_ack.yiaddr, server),
+        );
     }
 
     /// ifconfig / ip: list network interfaces.

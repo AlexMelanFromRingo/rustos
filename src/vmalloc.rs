@@ -141,7 +141,11 @@ pub fn vfree(ptr: *mut u8) -> Result<(), VmallocError> {
 
 fn map_one_page(vaddr: usize) -> Result<(), VmallocError> {
     let page = Page::<Size4KiB>::containing_address(VirtAddr::new(vaddr as u64));
-    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+    // W^X: vmalloc allocations are data, not code.  Set NO_EXECUTE so the
+    // CPU faults on any attempt to fetch instructions from this region.
+    let flags = PageTableFlags::PRESENT
+        | PageTableFlags::WRITABLE
+        | PageTableFlags::NO_EXECUTE;
 
     let result = crate::memory::with_frame_allocator(|fa| {
         let frame = fa.allocate_frame().ok_or(VmallocError::OutOfPhysicalFrames)?;

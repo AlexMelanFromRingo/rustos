@@ -653,16 +653,23 @@ pub fn sys_clock_gettime(clock_id: usize, timespec_ptr: usize) -> isize {
             0
         }
         1 => {
-            // CLOCK_MONOTONIC - uptime in ticks converted to seconds
-            let ticks = crate::task::timer::current_ticks();
-            let seconds = ticks / 18; // ~18.2 Hz PIT
-            let remainder_ticks = ticks % 18;
-            let nsec = (remainder_ticks * 1_000_000_000) / 18;
+            // CLOCK_MONOTONIC - prefer the calibrated TSC for nanosecond
+            // precision; fall back to PIT-derived seconds if uncalibrated.
+            let (sec, nsec) = if crate::tsc::is_calibrated() {
+                let ns = crate::tsc::ns_since_boot();
+                ((ns / 1_000_000_000) as i64, (ns % 1_000_000_000) as i64)
+            } else {
+                let ticks = crate::task::timer::current_ticks();
+                let seconds = ticks / 18;
+                let remainder_ticks = ticks % 18;
+                let nsec = (remainder_ticks * 1_000_000_000) / 18;
+                (seconds as i64, nsec as i64)
+            };
 
             unsafe {
                 let ts = timespec_ptr as *mut [i64; 2];
-                (*ts)[0] = seconds as i64;
-                (*ts)[1] = nsec as i64;
+                (*ts)[0] = sec;
+                (*ts)[1] = nsec;
             }
             0
         }
