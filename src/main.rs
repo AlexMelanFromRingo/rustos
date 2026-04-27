@@ -130,6 +130,15 @@ Type 'help' to list available shell commands.\n\
             b"RustOS 0.1.0 \\n \\l\n".to_vec());
         let _ = VfsContext::mkdir("/var");
         let _ = VfsContext::mkdir("/var/log");
+        let _ = VfsContext::write("/etc/hosts",
+            b"# Static name resolution\n\
+              127.0.0.1   localhost rustos\n\
+              127.0.1.1   rustos.localdomain\n\
+              ::1         ip6-localhost ip6-loopback\n\
+              255.255.255.255  broadcasthost\n".to_vec());
+        let _ = VfsContext::write("/etc/resolv.conf",
+            b"# DNS not yet implemented; uses /etc/hosts\n\
+              nameserver 127.0.0.1\n".to_vec());
     }
     klog_info!("Filesystem populated (/etc, /root, /home)");
 

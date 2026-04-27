@@ -21,6 +21,7 @@ pub mod udp;
 pub mod icmp;
 pub mod loopback;
 pub mod socket;
+pub mod resolver;
 
 use alloc::string::String;
 use alloc::vec::Vec;

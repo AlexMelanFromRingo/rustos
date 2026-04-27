@@ -336,7 +336,8 @@ impl Shell {
                 "passwd", "su", "service", "systemctl", "runlevel", "init",
                 "telinit", "slabinfo", "login", "logout", "exit", "motd",
                 "polltest", "ifconfig", "ip", "netstat", "ss", "ping",
-                "udptest", "logger", "syslog", "crontab",
+                "udptest", "logger", "syslog", "crontab", "nslookup",
+                "host", "getent",
             ];
 
             let matches: Vec<&str> = commands
@@ -671,6 +672,8 @@ impl Shell {
             "logger" => self.cmd_logger(args),
             "syslog" => self.cmd_syslog(args),
             "crontab" => self.cmd_crontab(args),
+            "nslookup" | "host" => self.cmd_nslookup(args),
+            "getent" => self.cmd_getent(args),
             "test" | "[" => self.cmd_test(args),
             "true" => {},
             "false" => println!("false"),
@@ -3556,6 +3559,73 @@ impl Shell {
         println!("({})", level.as_str());
     }
 
+    /// nslookup / host <name>: resolve a hostname via /etc/hosts.
+    fn cmd_nslookup(&self, args: &[&str]) {
+        if args.is_empty() {
+            println!("Usage: nslookup <name>");
+            return;
+        }
+        let name = args[0];
+        let results = crate::net::resolver::resolve_all(name);
+        if results.is_empty() {
+            println!("** server can't find {}: NXDOMAIN", name);
+            return;
+        }
+        println!("Server:  /etc/hosts");
+        println!("Address: 127.0.0.1#0");
+        println!();
+        for (addr, canonical) in results {
+            println!("Name:    {}", canonical);
+            println!("Address: {}", addr);
+        }
+    }
+
+    /// getent <database> <key>: query system databases.  Supported: hosts,
+    /// passwd, group.
+    fn cmd_getent(&self, args: &[&str]) {
+        if args.len() < 1 {
+            println!("Usage: getent <database> [key]");
+            println!("  databases: hosts, passwd, group");
+            return;
+        }
+        match args[0] {
+            "hosts" => {
+                if args.len() >= 2 {
+                    let results = crate::net::resolver::resolve_all(args[1]);
+                    if results.is_empty() {
+                        // exit 2 in real getent; we just print nothing
+                        return;
+                    }
+                    for (addr, canonical) in results {
+                        println!("{:<15} {}", alloc::format!("{}", addr), canonical);
+                    }
+                } else if let Ok(data) = crate::fs::vfs::VfsContext::read("/etc/hosts") {
+                    if let Ok(s) = core::str::from_utf8(&data) {
+                        print!("{}", s);
+                    }
+                }
+            }
+            "passwd" => {
+                let db = crate::users::USER_DB.lock();
+                let text = db.to_passwd_string();
+                if args.len() >= 2 {
+                    for line in text.lines() {
+                        if line.starts_with(args[1]) && line.as_bytes().get(args[1].len()) == Some(&b':') {
+                            println!("{}", line);
+                        }
+                    }
+                } else {
+                    print!("{}", text);
+                }
+            }
+            "group" => {
+                let db = crate::users::USER_DB.lock();
+                print!("{}", db.to_group_string());
+            }
+            other => println!("getent: unknown database '{}'", other),
+        }
+    }
+
     /// crontab: list, add, or remove cron jobs.
     ///   crontab -l           : list
     ///   crontab -a <secs> <command>
@@ -3718,13 +3788,19 @@ impl Shell {
     /// ping: real ICMP echo. Loopback only in this build (no NIC driver yet).
     fn cmd_ping(&self, args: &[&str]) {
         if args.is_empty() {
-            println!("Usage: ping <ip> [count]");
+            println!("Usage: ping <host-or-ip> [count]");
             return;
         }
-        let addr = match crate::net::Ipv4Addr::parse(args[0]) {
-            Some(a) => a,
+        let target = args[0];
+        let addr = match crate::net::resolver::resolve(target) {
+            Some(a) => {
+                if target != alloc::format!("{}", a) {
+                    println!("PING {} ({}): resolved via /etc/hosts", target, a);
+                }
+                a
+            }
             None => {
-                println!("ping: invalid address '{}'", args[0]);
+                println!("ping: cannot resolve '{}'", target);
                 return;
             }
         };
