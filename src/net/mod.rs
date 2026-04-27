@@ -19,6 +19,7 @@
 pub mod ip;
 pub mod udp;
 pub mod icmp;
+pub mod tcp;
 pub mod loopback;
 pub mod socket;
 pub mod resolver;

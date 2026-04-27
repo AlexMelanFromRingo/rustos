@@ -336,8 +336,8 @@ impl Shell {
                 "passwd", "su", "service", "systemctl", "runlevel", "init",
                 "telinit", "slabinfo", "login", "logout", "exit", "motd",
                 "polltest", "ifconfig", "ip", "netstat", "ss", "ping",
-                "udptest", "logger", "syslog", "crontab", "nslookup",
-                "host", "getent",
+                "udptest", "tcptest", "logger", "syslog", "crontab",
+                "nslookup", "host", "getent",
             ];
 
             let matches: Vec<&str> = commands
@@ -669,6 +669,7 @@ impl Shell {
             "netstat" | "ss" => self.cmd_netstat(args),
             "ping" => self.cmd_ping(args),
             "udptest" => self.cmd_udptest(args),
+            "tcptest" => self.cmd_tcptest(args),
             "logger" => self.cmd_logger(args),
             "syslog" => self.cmd_syslog(args),
             "crontab" => self.cmd_crontab(args),
@@ -3763,17 +3764,13 @@ impl Shell {
         }
     }
 
-    /// netstat / ss: list bound sockets.
+    /// netstat / ss: list bound UDP sockets and TCP endpoints.
     fn cmd_netstat(&self, _args: &[&str]) {
         use crate::net::socket::SOCKETS;
-        let table = SOCKETS.lock();
-        let entries = table.enumerate();
-        if entries.is_empty() {
-            println!("netstat: no sockets");
-            return;
-        }
-        println!("Proto Local Address           Recv-Q  Handle");
-        for (h, proto, bound, qlen) in entries {
+        println!("Proto Local Address           Foreign Address          State        Recv-Q  H");
+        // UDP sockets
+        let udp = SOCKETS.lock().enumerate();
+        for (h, proto, bound, qlen) in udp {
             let addr = match bound {
                 Some(a) => alloc::format!("{}", a),
                 None => alloc::string::String::from("*:*"),
@@ -3781,7 +3778,15 @@ impl Shell {
             let p = match proto {
                 crate::net::socket::SocketProto::Udp => "udp",
             };
-            println!("{:<5} {:<24} {:>6}  {}", p, addr, qlen, h);
+            println!("{:<5} {:<24} {:<24} {:<12} {:>6}  {}",
+                p, addr, "*:*", "-", qlen, h);
+        }
+        // TCP endpoints
+        for (h, state, local, remote, rxlen) in crate::net::tcp::enumerate() {
+            let remote_str = if remote.port == 0 { alloc::string::String::from("*:*") }
+                             else { alloc::format!("{}", remote) };
+            println!("{:<5} {:<24} {:<24} {:<12} {:>6}  {}",
+                "tcp", alloc::format!("{}", local), remote_str, state.as_str(), rxlen, h);
         }
     }
 
@@ -3854,6 +3859,83 @@ impl Shell {
         println!("--- {} ping statistics ---", addr);
         println!("{} packets transmitted, {} received, {}% packet loss",
             count, received, loss_pct);
+    }
+
+    /// tcptest: end-to-end TCP loopback handshake + send/recv + close.
+    fn cmd_tcptest(&self, args: &[&str]) {
+        use crate::net::tcp::{accept, close, connect, listen, recv, send};
+        use crate::net::{Ipv4Addr, SocketAddrV4};
+
+        let port: u16 = args.first().and_then(|s| s.parse().ok()).unwrap_or(8080);
+        let payload: &[u8] = args.get(1).map(|s| s.as_bytes()).unwrap_or(b"hello-tcp");
+
+        // Server: listen
+        let server_addr = SocketAddrV4 { ip: Ipv4Addr::LOCALHOST, port };
+        let server = match listen(server_addr, 4) {
+            Ok(h) => h,
+            Err(e) => { println!("tcptest: listen error: {:?}", e); return; }
+        };
+        println!("tcptest: listening on {}", server_addr);
+
+        // Client: connect
+        let client = match connect(server_addr) {
+            Ok(h) => h,
+            Err(e) => {
+                println!("tcptest: connect error: {:?}", e);
+                let _ = close(server);
+                return;
+            }
+        };
+        println!("tcptest: client connected (handle {})", client);
+
+        // Server: accept
+        let accepted = match accept(server) {
+            Ok(h) => h,
+            Err(e) => {
+                println!("tcptest: accept error: {:?}", e);
+                let _ = close(server);
+                let _ = close(client);
+                return;
+            }
+        };
+        println!("tcptest: server accepted (handle {})", accepted);
+
+        // Client: send
+        match send(client, payload) {
+            Ok(n) => println!("tcptest: client sent {} bytes", n),
+            Err(e) => println!("tcptest: send error: {:?}", e),
+        }
+
+        // Server: recv
+        let mut buf = [0u8; 256];
+        match recv(accepted, &mut buf) {
+            Ok(n) => {
+                let s = core::str::from_utf8(&buf[..n]).unwrap_or("<binary>");
+                println!("tcptest: server received {} bytes: '{}'", n, s);
+                if &buf[..n] == payload {
+                    println!("tcptest: payload matches");
+                } else {
+                    println!("tcptest: payload MISMATCH");
+                }
+            }
+            Err(e) => println!("tcptest: recv error: {:?}", e),
+        }
+
+        // Server sends a reply
+        let _ = send(accepted, b"server-ack");
+        let mut buf2 = [0u8; 64];
+        match recv(client, &mut buf2) {
+            Ok(n) => {
+                let s = core::str::from_utf8(&buf2[..n]).unwrap_or("<binary>");
+                println!("tcptest: client received reply: '{}'", s);
+            }
+            Err(e) => println!("tcptest: client recv error: {:?}", e),
+        }
+
+        let _ = close(client);
+        let _ = close(accepted);
+        let _ = close(server);
+        println!("tcptest: closed all endpoints");
     }
 
     /// udptest: send-recv loopback round-trip with payload validation.

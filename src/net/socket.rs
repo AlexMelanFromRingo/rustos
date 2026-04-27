@@ -5,7 +5,7 @@
 //! receive queue.  Outbound datagrams go through the protocol layer
 //! ([`udp`](super::udp)) and onto the routed interface.
 
-use super::ip::{Ipv4Header, IPV4_HEADER_LEN, PROTO_ICMP, PROTO_UDP};
+use super::ip::{Ipv4Header, IPV4_HEADER_LEN, PROTO_ICMP, PROTO_TCP, PROTO_UDP};
 use super::udp::{UdpHeader, UDP_HEADER_LEN, build_datagram};
 use super::{Ipv4Addr, SocketAddrV4};
 use alloc::collections::VecDeque;
@@ -238,6 +238,7 @@ pub fn ipv4_input(packet: &[u8]) {
     match hdr.protocol {
         PROTO_UDP => udp_input(&hdr, &packet[IPV4_HEADER_LEN..hdr.total_length as usize]),
         PROTO_ICMP => super::icmp::icmp_input(&hdr, &packet[IPV4_HEADER_LEN..hdr.total_length as usize]),
+        PROTO_TCP => super::tcp::tcp_input(&hdr, &packet[IPV4_HEADER_LEN..hdr.total_length as usize]),
         _ => {} // unknown protocol — silently drop
     }
 }
