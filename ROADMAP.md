@@ -24,7 +24,7 @@ Reference architecture: Linux/Unix-like.
 - [ ] `waitpid()` with blocking (current: non-blocking poll)
 - [x] Signal delivery (SIGTERM, SIGKILL, SIGINT, SIGCHLD, etc.) ✅
 - [x] TTY device abstraction (line discipline, raw/cooked mode) ✅
-- [ ] Process groups and sessions
+- [x] Process groups and sessions (pgid/sid on Process, syscalls 109/121/124/112, ps -o PGID/SID) ✅
 - [x] Environment variables (shell-level: export/unset/$VAR expansion) ✅
 - [x] Resource limits (15 RLIMIT_* resources, getrlimit/setrlimit syscalls 97/160, ulimit shell command) ✅
 
@@ -66,7 +66,7 @@ Reference architecture: Linux/Unix-like.
 
 ### 2.2 Signal System
 - [x] `kill` — send signal (syscall #62) ✅
-- [ ] `signal` / `sigaction` — custom signal handlers
+- [x] `signal` / `sigaction` — per-process sigactions array, syscalls 13/48 ✅
 - [x] `sigprocmask` — signal blocking (per-process blocked mask) ✅
 - [x] Signal delivery during scheduler tick ✅
 
@@ -84,7 +84,8 @@ Reference architecture: Linux/Unix-like.
 - [ ] Dentry cache (directory entry cache)
 - [x] Mount table with multiple mount points (MOUNT_TABLE, /proc/mounts, mount/-t/umount) ✅
 - [x] Path resolution with symlinks ✅
-- [ ] File locking (flock, fcntl)
+- [x] File locking (flock — LOCK_SH/EX/NB/UN, advisory lock table) ✅
+- [ ] File locking (fcntl byte-range)
 - [x] File permissions (rwxrwxrwx, uid/gid) ✅
 - [x] Timestamps (atime, mtime, ctime) ✅
 
@@ -107,7 +108,7 @@ Reference architecture: Linux/Unix-like.
 - [x] `/sys` — sysfs (kernel info, device tree: serial, keyboard, timer, rtc, vga) ✅
 - [x] `/dev` — device nodes (null, zero, random, urandom, console, tty, kmsg, mem) ✅
 - [x] `/tmp` — tmpfs (RAM-backed, 128 files, 512 KiB/file) ✅
-- [ ] devtmpfs for automatic device node creation
+- [x] devtmpfs for automatic device node creation (DEV_NODES registry, DevKind, mknod shell command, ls -l shows c/b types) ✅
 
 ---
 
@@ -173,7 +174,7 @@ Reference architecture: Linux/Unix-like.
 - [x] `su` — switch user with password prompt ✅
 - [x] `passwd` — change own password ✅
 - [x] `useradd` — add new user (root only) ✅
-- [ ] `sudo` — fine-grained privilege escalation
+- [x] `sudo` — fine-grained privilege escalation (parses /etc/sudoers, NOPASSWD support, syslog logging) ✅
 - [x] `top` — process monitor (one-shot) ✅
 - [x] `mount` / `umount` — filesystem mounting (FAT32) ✅
 - [x] `dmesg` — kernel log (ring buffer, 512 entries, log levels) ✅

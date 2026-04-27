@@ -9,6 +9,25 @@ use crate::net::tcp;
 use crate::net::{Ipv4Addr, SocketAddrV4};
 use alloc::format;
 use alloc::string::String;
+use core::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
+
+/// Global listener handle, set by the httpd task.  Lets sync code (e.g. the
+/// `wget` shell command) drive serve_once when the async task can't run.
+static LISTENER: AtomicUsize = AtomicUsize::new(usize::MAX);
+static LISTENER_VALID: AtomicBool = AtomicBool::new(false);
+
+pub fn set_global_listener(handle: usize) {
+    LISTENER.store(handle, Ordering::Relaxed);
+    LISTENER_VALID.store(true, Ordering::Relaxed);
+}
+
+pub fn global_listener() -> Option<usize> {
+    if LISTENER_VALID.load(Ordering::Relaxed) {
+        Some(LISTENER.load(Ordering::Relaxed))
+    } else {
+        None
+    }
+}
 
 /// Default document root.
 pub const DOCUMENT_ROOT: &str = "/var/www";

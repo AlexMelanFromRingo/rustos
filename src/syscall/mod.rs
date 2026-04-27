@@ -55,6 +55,12 @@ pub enum SyscallNumber {
     EpollWait = 232,
     GetRlimit = 97,
     SetRlimit = 160,
+    SetPgid = 109,
+    GetPgid = 121,
+    GetSid = 124,
+    SetSid = 112,
+    RtSigaction = 13,
+    Signal = 48, // not the linux number but close enough; treated as compat alias
 }
 
 impl SyscallNumber {
@@ -99,6 +105,12 @@ impl SyscallNumber {
             233 => Some(SyscallNumber::EpollCtl),
             97 => Some(SyscallNumber::GetRlimit),
             160 => Some(SyscallNumber::SetRlimit),
+            109 => Some(SyscallNumber::SetPgid),
+            121 => Some(SyscallNumber::GetPgid),
+            124 => Some(SyscallNumber::GetSid),
+            112 => Some(SyscallNumber::SetSid),
+            13 => Some(SyscallNumber::RtSigaction),
+            48 => Some(SyscallNumber::Signal),
             _ => None,
         }
     }
@@ -199,5 +211,11 @@ pub fn syscall_dispatcher(
         SyscallNumber::EpollWait => handler::sys_epoll_wait(arg1 as i32, arg2, arg3, arg4 as i32),
         SyscallNumber::GetRlimit => handler::sys_getrlimit(arg1 as u32, arg2),
         SyscallNumber::SetRlimit => handler::sys_setrlimit(arg1 as u32, arg2),
+        SyscallNumber::SetPgid => handler::sys_setpgid(arg1, arg2),
+        SyscallNumber::GetPgid => handler::sys_getpgid(arg1),
+        SyscallNumber::GetSid => handler::sys_getsid(arg1),
+        SyscallNumber::SetSid => handler::sys_setsid(),
+        SyscallNumber::RtSigaction => handler::sys_rt_sigaction(arg1 as u32, arg2, arg3),
+        SyscallNumber::Signal => handler::sys_signal(arg1 as u32, arg2 as u64),
     }
 }

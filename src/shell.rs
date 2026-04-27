@@ -627,6 +627,7 @@ impl Shell {
             "su" => self.cmd_su(args),
             "passwd" => self.cmd_passwd(args),
             "useradd" => self.cmd_useradd(args),
+            "sudo" => self.cmd_sudo(args),
             "uname" => self.cmd_uname(args),
             "free" => self.cmd_free(args),
             "top" => self.cmd_top(),
@@ -669,6 +670,8 @@ impl Shell {
             "polltest" => self.cmd_polltest(),
             "epolltest" => self.cmd_epolltest(),
             "ulimit" => self.cmd_ulimit(args),
+            "flock" => self.cmd_flock(args),
+            "mknod" => self.cmd_mknod(args),
             "ifconfig" | "ip" => self.cmd_ifconfig(args),
             "netstat" | "ss" => self.cmd_netstat(args),
             "ping" => self.cmd_ping(args),
@@ -676,6 +679,7 @@ impl Shell {
             "tcptest" => self.cmd_tcptest(args),
             "httptest" => self.cmd_httptest(args),
             "unixtest" => self.cmd_unixtest(args),
+            "wget" | "curl" => self.cmd_wget(args),
             "logger" => self.cmd_logger(args),
             "syslog" => self.cmd_syslog(args),
             "crontab" => self.cmd_crontab(args),
@@ -1343,12 +1347,14 @@ impl Shell {
         let pm = PROCESS_MANAGER.lock();
         let processes = pm.all_processes();
 
-        println!("  PID  NI  STATE       STACK");
-        println!("  ---  --  -----       -----");
+        println!("  PID  PGID   SID  NI  STATE       STACK");
+        println!("  ---  ----  ----  --  -----       -----");
 
         for process in processes {
-            println!("{:5}  {:3}  {:<11} {} bytes",
+            println!("{:5}  {:4}  {:4}  {:3}  {:<11} {} bytes",
                 process.pid,
+                process.pgid,
+                process.sid,
                 process.nice,
                 process.state.as_str(),
                 process.stack.len()
@@ -3239,6 +3245,107 @@ impl Shell {
         );
     }
 
+    /// sudo: run a command as another user.
+    /// Reads /etc/sudoers; format: `USER ALL=(ALL) [NOPASSWD]`
+    /// Becomes target user, dispatches the command, then restores.
+    fn cmd_sudo(&mut self, args: &[&str]) {
+        if args.is_empty() {
+            println!("Usage: sudo [-u USER] <command> [args...]");
+            return;
+        }
+        let mut target_user = String::from("root");
+        let mut cmd_start = 0usize;
+        if args[0] == "-u" {
+            if args.len() < 3 { println!("sudo: -u needs USER and CMD"); return; }
+            target_user = String::from(args[1]);
+            cmd_start = 2;
+        }
+        let cmd = args[cmd_start];
+        let cmd_args = &args[cmd_start + 1..];
+
+        // Sudoers check.
+        let sudoers = match crate::fs::vfs::VfsContext::read("/etc/sudoers") {
+            Ok(d) => d,
+            Err(_) => { println!("sudo: /etc/sudoers missing"); return; }
+        };
+        let sudoers = core::str::from_utf8(&sudoers).unwrap_or("");
+        let caller = crate::users::CURRENT_CREDS.lock().username.clone();
+        let mut matched_no_passwd = false;
+        let mut matched = false;
+        for raw in sudoers.lines() {
+            let line = match raw.find('#') { Some(i) => &raw[..i], None => raw };
+            let line = line.trim();
+            if line.is_empty() { continue; }
+            let mut parts = line.split_whitespace();
+            let user = match parts.next() { Some(u) => u, None => continue };
+            // `user ALL=(ALL) [NOPASSWD]`
+            if user != caller && user != "ALL" { continue; }
+            matched = true;
+            if line.contains("NOPASSWD") { matched_no_passwd = true; }
+        }
+        if !matched {
+            println!("sudo: {} is not in the sudoers file. This incident will be reported.", caller);
+            crate::syslog::log(
+                crate::syslog::Facility::Authpriv,
+                crate::syslog::Severity::Warning,
+                "sudo",
+                alloc::format!("denied: {} not in sudoers", caller),
+            );
+            return;
+        }
+        if !matched_no_passwd {
+            print!("[sudo] password for {}: ", caller);
+            let pw = self.read_password();
+            let db = crate::users::USER_DB.lock();
+            if !db.check_password(&caller, &pw) {
+                println!("\nSorry, try again.");
+                return;
+            }
+        }
+
+        // Switch creds.
+        let target = {
+            let db = crate::users::USER_DB.lock();
+            match db.get_user(&target_user) {
+                Some(u) => u.clone(),
+                None => { println!("sudo: unknown user '{}'", target_user); return; }
+            }
+        };
+        let prev = {
+            let creds = crate::users::CURRENT_CREDS.lock();
+            (creds.uid, creds.gid, creds.euid, creds.egid, creds.username.clone())
+        };
+        {
+            let mut creds = crate::users::CURRENT_CREDS.lock();
+            creds.uid = target.uid;
+            creds.gid = target.gid;
+            creds.euid = target.uid;
+            creds.egid = target.gid;
+            creds.username = target.name.clone();
+        }
+        crate::syslog::log(
+            crate::syslog::Facility::Authpriv,
+            crate::syslog::Severity::Notice,
+            "sudo",
+            alloc::format!("{} -> {} : {} {}", caller, target.name, cmd, cmd_args.join(" ")),
+        );
+
+        // Reconstruct the command line and re-enter the dispatcher.
+        let mut full = String::from(cmd);
+        for a in cmd_args { full.push(' '); full.push_str(a); }
+        self.buffer = full;
+        self.cursor_pos = self.buffer.len();
+        self.execute();
+
+        // Restore previous credentials.
+        let mut creds = crate::users::CURRENT_CREDS.lock();
+        creds.uid = prev.0;
+        creds.gid = prev.1;
+        creds.euid = prev.2;
+        creds.egid = prev.3;
+        creds.username = prev.4;
+    }
+
     /// Switch user (su)
     fn cmd_su(&mut self, args: &[&str]) {
         let target = if args.is_empty() { "root" } else { args[0] };
@@ -3807,6 +3914,73 @@ impl Shell {
         }
     }
 
+    /// mknod: register a new device node.
+    ///   mknod NAME {c|b} MAJOR MINOR
+    fn cmd_mknod(&self, args: &[&str]) {
+        if args.len() < 4 {
+            println!("Usage: mknod NAME {{c|b}} MAJOR MINOR");
+            return;
+        }
+        let name = args[0];
+        let kind = match args[1] {
+            "c" => crate::fs::devfs::DevKind::Char,
+            "b" => crate::fs::devfs::DevKind::Block,
+            other => { println!("mknod: unknown type '{}'", other); return; }
+        };
+        let major: u32 = match args[2].parse() {
+            Ok(n) => n,
+            Err(_) => { println!("mknod: invalid major"); return; }
+        };
+        let minor: u32 = match args[3].parse() {
+            Ok(n) => n,
+            Err(_) => { println!("mknod: invalid minor"); return; }
+        };
+        crate::fs::devfs::register(name, kind, major, minor);
+        println!("mknod: /dev/{} ({} {}, {})", name, args[1], major, minor);
+    }
+
+    /// flock: acquire/release advisory file locks.
+    ///   flock list                : show all locks
+    ///   flock -s OWNER PATH       : take a shared lock as OWNER
+    ///   flock -x OWNER PATH       : take an exclusive lock
+    ///   flock -u OWNER PATH       : release
+    fn cmd_flock(&self, args: &[&str]) {
+        if args.is_empty() || args[0] == "list" {
+            for (path, holders) in crate::flock::LOCKS.lock().snapshot() {
+                print!("{}: ", path);
+                for h in holders {
+                    let k = match h.kind {
+                        crate::flock::LockKind::Shared => "SH",
+                        crate::flock::LockKind::Exclusive => "EX",
+                    };
+                    print!("[owner={} {}] ", h.owner, k);
+                }
+                println!();
+            }
+            return;
+        }
+
+        if args.len() < 3 {
+            println!("Usage: flock {{-s|-x|-u}} OWNER PATH");
+            return;
+        }
+        let op = match args[0] {
+            "-s" => crate::flock::LOCK_SH,
+            "-x" => crate::flock::LOCK_EX,
+            "-u" => crate::flock::LOCK_UN,
+            other => { println!("flock: unknown flag '{}'", other); return; }
+        };
+        let owner: usize = match args[1].parse() {
+            Ok(n) => n,
+            Err(_) => { println!("flock: invalid owner '{}'", args[1]); return; }
+        };
+        let path = args[2];
+        match crate::flock::flock(path, owner, op | crate::flock::LOCK_NB) {
+            Ok(()) => println!("flock: {} {}", path, args[0]),
+            Err(e) => println!("flock: {}: {}", path, e),
+        }
+    }
+
     /// ulimit: list/get/set resource limits.
     ///   ulimit          : list all
     ///   ulimit -a       : same
@@ -4021,6 +4195,143 @@ impl Shell {
         println!("--- {} ping statistics ---", addr);
         println!("{} packets transmitted, {} received, {}% packet loss",
             count, received, loss_pct);
+    }
+
+    /// wget / curl: fetch an HTTP URL over TCP.  Usage:
+    ///   wget http://host[:port]/path        -> writes to ./<basename>
+    ///   wget -O FILE http://host[:port]/path
+    ///   wget -- http://host[:port]/path     -> stdout (curl-style print)
+    fn cmd_wget(&self, args: &[&str]) {
+        if args.is_empty() {
+            println!("Usage: wget [-O FILE] <url>");
+            return;
+        }
+
+        let mut output_file: Option<&str> = None;
+        let mut print_to_stdout = false;
+        let mut url: Option<&str> = None;
+
+        let mut i = 0;
+        while i < args.len() {
+            match args[i] {
+                "-O" if i + 1 < args.len() => {
+                    output_file = Some(args[i + 1]);
+                    i += 2;
+                }
+                "--" => { print_to_stdout = true; i += 1; }
+                u if u.starts_with("http://") || u.starts_with("https://") => {
+                    url = Some(u);
+                    i += 1;
+                }
+                u => { url = Some(u); i += 1; }
+            }
+        }
+
+        let url = match url { Some(u) => u, None => { println!("wget: no URL"); return; } };
+
+        // Strip optional scheme.
+        let stripped = url.strip_prefix("http://").unwrap_or(url);
+        let stripped = stripped.strip_prefix("https://").unwrap_or(stripped);
+
+        // Split into host[:port] and path.
+        let (authority, path) = match stripped.find('/') {
+            Some(p) => (&stripped[..p], &stripped[p..]),
+            None => (stripped, "/"),
+        };
+        let (host, port) = match authority.rfind(':') {
+            Some(p) => {
+                let port: u16 = authority[p + 1..].parse().unwrap_or(80);
+                (&authority[..p], port)
+            }
+            None => (authority, 80u16),
+        };
+
+        // Resolve the host.
+        let addr = match crate::net::dns::resolve(host) {
+            Some(a) => a,
+            None => {
+                println!("wget: cannot resolve {}", host);
+                return;
+            }
+        };
+
+        // Connect.
+        use crate::net::tcp::{close, connect, recv, send};
+        use crate::net::SocketAddrV4;
+        let server_addr = SocketAddrV4 { ip: addr, port };
+        let conn = match connect(server_addr) {
+            Ok(h) => h,
+            Err(e) => { println!("wget: connect to {} failed: {:?}", server_addr, e); return; }
+        };
+
+        // Send a tiny HTTP/1.0 GET.
+        let req = alloc::format!(
+            "GET {} HTTP/1.0\r\nHost: {}\r\nUser-Agent: rustos-wget/0.1\r\nConnection: close\r\n\r\n",
+            path, host
+        );
+        if let Err(e) = send(conn, req.as_bytes()) {
+            println!("wget: send failed: {:?}", e);
+            let _ = close(conn);
+            return;
+        }
+
+        // If the destination is our local httpd, drive a single
+        // accept→serve→close round on the kernel-resident listener so the
+        // response is queued by the time we recv() below.  When we acquire
+        // a real TCP scheduler this becomes unnecessary.
+        if addr.is_loopback() && port == 80 {
+            if let Some(server_listener) = crate::httpd::global_listener() {
+                let _ = crate::httpd::serve_once(server_listener);
+            }
+        }
+
+        // Read the response.  In our loopback stack the whole reply arrives
+        // in the recv queue immediately after the synchronous handshake.
+        let mut buf = [0u8; 8192];
+        let n = match recv(conn, &mut buf) {
+            Ok(n) => n,
+            Err(e) => { println!("wget: recv failed: {:?}", e); let _ = close(conn); return; }
+        };
+        let _ = close(conn);
+
+        let resp = &buf[..n];
+        // Split status line and body
+        let mut header_end = 0usize;
+        let mut found = false;
+        while header_end + 3 < resp.len() {
+            if &resp[header_end..header_end + 4] == b"\r\n\r\n" {
+                found = true;
+                break;
+            }
+            header_end += 1;
+        }
+        let body_start = if found { header_end + 4 } else { resp.len() };
+        let header_text = core::str::from_utf8(&resp[..header_end]).unwrap_or("");
+        let status_line = header_text.lines().next().unwrap_or("");
+        println!("{}", status_line);
+
+        let body = &resp[body_start..];
+        if print_to_stdout {
+            if let Ok(s) = core::str::from_utf8(body) {
+                println!("{}", s);
+            } else {
+                println!("[binary, {} bytes]", body.len());
+            }
+            return;
+        }
+
+        let target = match output_file {
+            Some(f) => f.to_string(),
+            None => {
+                // Default name: trailing path component, or "index.html"
+                let name = path.rsplit('/').next().unwrap_or("");
+                if name.is_empty() { String::from("index.html") } else { String::from(name) }
+            }
+        };
+        match crate::fs::vfs::VfsContext::write(&target, body.to_vec()) {
+            Ok(_) => println!("Saved {} bytes to {}", body.len(), target),
+            Err(e) => println!("wget: write {}: {:?}", target, e),
+        }
     }
 
     /// unixtest: end-to-end test of AF_UNIX SOCK_STREAM and SOCK_DGRAM.

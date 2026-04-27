@@ -145,6 +145,10 @@ Type 'help' to list available shell commands.\n\
         let _ = VfsContext::write("/etc/resolv.conf",
             b"# DNS not yet implemented; uses /etc/hosts\n\
               nameserver 127.0.0.1\n".to_vec());
+        let _ = VfsContext::write("/etc/sudoers",
+            b"# /etc/sudoers - minimal syntax: USER ALL=(ALL) [NOPASSWD]\n\
+              root  ALL=(ALL) NOPASSWD\n\
+              wheel ALL=(ALL)\n".to_vec());
     }
     klog_info!("Filesystem populated (/etc, /root, /home)");
 
@@ -152,6 +156,11 @@ Type 'help' to list available shell commands.\n\
     rustos::fs::vfs::install_default_mounts();
     klog_info!("Mount table populated: {} entries",
         rustos::fs::vfs::list_mounts().len());
+
+    // devtmpfs: register the standard set of /dev nodes.
+    rustos::fs::devfs::install_default_nodes();
+    klog_info!("devtmpfs populated: {} nodes",
+        rustos::fs::devfs::list_nodes().len());
 
     // Initialise the SysV-style init system and bring the system up to multi-user.
     rustos::init::install_default_services();
@@ -185,7 +194,38 @@ Type 'help' to list available shell commands.\n\
     executor.spawn(rustos::task::Task::new(status_task()));
     executor.spawn(rustos::task::Task::new(syslogd_task()));
     executor.spawn(rustos::task::Task::new(crond_task()));
+    executor.spawn(rustos::task::Task::new(httpd_task()));
     executor.run();
+}
+
+/// HTTP daemon: listens on 127.0.0.1:80, serves /var/www on every request.
+async fn httpd_task() {
+    use rustos::net::tcp::listen;
+    use rustos::net::{Ipv4Addr, SocketAddrV4};
+    use rustos::task::timer::Timer;
+
+    let addr = SocketAddrV4 { ip: Ipv4Addr::LOCALHOST, port: 80 };
+    let listener = match listen(addr, 16) {
+        Ok(l) => l,
+        Err(_) => return,
+    };
+    rustos::httpd::set_global_listener(listener);
+    rustos::syslog::log(
+        rustos::syslog::Facility::Daemon,
+        rustos::syslog::Severity::Notice,
+        "httpd",
+        "HTTP server listening on 127.0.0.1:80".into(),
+    );
+
+    loop {
+        // serve_once internally accepts, services, and closes a single
+        // connection.  When there's nothing pending it returns Err — yield
+        // briefly so we don't hot-spin.
+        match rustos::httpd::serve_once(listener) {
+            Ok(_) => {}
+            Err(_) => { Timer::new(2).await; }
+        }
+    }
 }
 
 /// Periodic crond: every ~5 seconds checks all crontab entries.

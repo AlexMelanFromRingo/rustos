@@ -1132,6 +1132,114 @@ pub fn sys_ioctl(fd: usize, request: usize, _arg: usize) -> isize {
     }
 }
 
+/// rt_sigaction(sig, *act, *oldact)
+///
+/// Linux ABI: act is { sa_handler: u64, sa_flags: u32, sa_restorer: u64,
+/// sa_mask: u64 }.  We only honour the handler pointer; mask/flags are
+/// stored but otherwise ignored.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct SigAction {
+    pub sa_handler: u64,
+    pub sa_flags:   u32,
+    pub _padding:   u32,
+    pub sa_restorer: u64,
+    pub sa_mask:    u64,
+}
+
+pub fn sys_rt_sigaction(sig: u32, act_ptr: usize, oldact_ptr: usize) -> isize {
+    if sig == 0 || sig > 31 {
+        return SyscallError::InvalidArgument.as_isize();
+    }
+    let mut pm = crate::process::PROCESS_MANAGER.lock();
+    let pid = pm.current_pid.unwrap_or(0);
+    let proc_ = match pm.get_process_mut(pid) {
+        Some(p) => p,
+        None => return SyscallError::FileNotFound.as_isize(),
+    };
+
+    if oldact_ptr != 0 {
+        let old = SigAction {
+            sa_handler: proc_.sigactions[sig as usize],
+            sa_flags: 0,
+            _padding: 0,
+            sa_restorer: 0,
+            sa_mask: 0,
+        };
+        unsafe { core::ptr::write(oldact_ptr as *mut SigAction, old); }
+    }
+    if act_ptr != 0 {
+        let new = unsafe { core::ptr::read(act_ptr as *const SigAction) };
+        proc_.sigactions[sig as usize] = new.sa_handler;
+    }
+    0
+}
+
+/// signal(sig, handler) — convenience: drop directly into the handler slot.
+pub fn sys_signal(sig: u32, handler: u64) -> isize {
+    if sig == 0 || sig > 31 {
+        return SyscallError::InvalidArgument.as_isize();
+    }
+    let mut pm = crate::process::PROCESS_MANAGER.lock();
+    let pid = pm.current_pid.unwrap_or(0);
+    let proc_ = match pm.get_process_mut(pid) {
+        Some(p) => p,
+        None => return SyscallError::FileNotFound.as_isize(),
+    };
+    let prev = proc_.sigactions[sig as usize];
+    proc_.sigactions[sig as usize] = handler;
+    prev as isize
+}
+
+/// setpgid(pid, pgid) — change a process' group ID.  pid=0 means caller.
+pub fn sys_setpgid(pid: usize, pgid: usize) -> isize {
+    let mut pm = crate::process::PROCESS_MANAGER.lock();
+    let target_pid = if pid == 0 {
+        pm.current_pid.unwrap_or(0)
+    } else {
+        pid
+    };
+    let new_pgid = if pgid == 0 { target_pid } else { pgid };
+    match pm.get_process_mut(target_pid) {
+        Some(p) => { p.pgid = new_pgid; 0 }
+        None => SyscallError::FileNotFound.as_isize(),
+    }
+}
+
+/// getpgid(pid) — read pgid of `pid` (or caller when pid=0).
+pub fn sys_getpgid(pid: usize) -> isize {
+    let pm = crate::process::PROCESS_MANAGER.lock();
+    let target_pid = if pid == 0 { pm.current_pid.unwrap_or(0) } else { pid };
+    match pm.get_process(target_pid) {
+        Some(p) => p.pgid as isize,
+        None => SyscallError::FileNotFound.as_isize(),
+    }
+}
+
+/// getsid(pid) — read sid of `pid` (or caller when pid=0).
+pub fn sys_getsid(pid: usize) -> isize {
+    let pm = crate::process::PROCESS_MANAGER.lock();
+    let target_pid = if pid == 0 { pm.current_pid.unwrap_or(0) } else { pid };
+    match pm.get_process(target_pid) {
+        Some(p) => p.sid as isize,
+        None => SyscallError::FileNotFound.as_isize(),
+    }
+}
+
+/// setsid() — create a new session: caller's sid and pgid both become its pid.
+pub fn sys_setsid() -> isize {
+    let mut pm = crate::process::PROCESS_MANAGER.lock();
+    let pid = match pm.current_pid {
+        Some(p) => p,
+        None => return SyscallError::FileNotFound.as_isize(),
+    };
+    if let Some(p) = pm.get_process_mut(pid) {
+        p.sid = pid;
+        p.pgid = pid;
+    }
+    pid as isize
+}
+
 /// getrlimit(resource, *rlimit) — read soft+hard.
 pub fn sys_getrlimit(resource: u32, rlim_ptr: usize) -> isize {
     let res = match crate::rlimit::Resource::from_u32(resource) {

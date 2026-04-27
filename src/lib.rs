@@ -39,6 +39,7 @@ pub mod cron;
 pub mod httpd;
 pub mod vmalloc;
 pub mod rlimit;
+pub mod flock;
 
 pub fn init() {
     gdt::init();

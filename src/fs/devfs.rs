@@ -1,11 +1,60 @@
-/// /dev virtual filesystem
+/// /dev virtual filesystem (devtmpfs-style auto-population).
 ///
-/// Provides device nodes as virtual files.
-/// Supports: null, zero, random, urandom, console, tty
+/// Subsystems register device nodes at boot; the table is read by VFS
+/// listing/exists/read paths.  Each entry carries a kind (Char/Block) and
+/// major/minor numbers so `ls -l /dev` can display Linux-style metadata.
 
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use spin::Mutex;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DevKind {
+    Char,
+    Block,
+}
+
+#[derive(Debug, Clone)]
+pub struct DevNode {
+    pub name: String,
+    pub kind: DevKind,
+    pub major: u32,
+    pub minor: u32,
+}
+
+static DEV_NODES: Mutex<Vec<DevNode>> = Mutex::new(Vec::new());
+
+/// Register a device node.  Idempotent on `name`.
+pub fn register(name: &str, kind: DevKind, major: u32, minor: u32) {
+    let mut t = DEV_NODES.lock();
+    if t.iter().any(|n| n.name == name) { return; }
+    t.push(DevNode { name: name.to_string(), kind, major, minor });
+}
+
+/// Look up a node by name.
+pub fn lookup(name: &str) -> Option<DevNode> {
+    DEV_NODES.lock().iter().find(|n| n.name == name).cloned()
+}
+
+/// Snapshot the registry.
+pub fn list_nodes() -> Vec<DevNode> {
+    DEV_NODES.lock().clone()
+}
+
+/// Bring up the standard /dev population at boot — Linux-style major/minor.
+pub fn install_default_nodes() {
+    register("null",    DevKind::Char, 1, 3);
+    register("zero",    DevKind::Char, 1, 5);
+    register("random",  DevKind::Char, 1, 8);
+    register("urandom", DevKind::Char, 1, 9);
+    register("kmsg",    DevKind::Char, 1, 11);
+    register("mem",     DevKind::Char, 1, 1);
+    register("console", DevKind::Char, 5, 1);
+    register("tty",     DevKind::Char, 5, 0);
+    register("tty0",    DevKind::Char, 4, 0);
+    register("ptmx",    DevKind::Char, 5, 2);
+}
 
 /// Read a /dev virtual file. Returns content as bytes, or None if not found.
 pub fn read_dev(path: &str) -> Option<Vec<u8>> {
@@ -14,16 +63,12 @@ pub fn read_dev(path: &str) -> Option<Vec<u8>> {
 
     match path {
         "" | "." => {
-            // List /dev directory
+            // List /dev directory from the device registry.
             let mut content = String::new();
-            content.push_str("null\n");
-            content.push_str("zero\n");
-            content.push_str("random\n");
-            content.push_str("urandom\n");
-            content.push_str("console\n");
-            content.push_str("tty\n");
-            content.push_str("kmsg\n");
-            content.push_str("mem\n");
+            for n in list_nodes() {
+                content.push_str(&n.name);
+                content.push('\n');
+            }
             Some(content.into_bytes())
         }
 
@@ -130,11 +175,8 @@ pub fn is_dev_path(path: &str) -> bool {
 pub fn exists(path: &str) -> bool {
     let path = path.trim_start_matches("/dev");
     let path = path.trim_start_matches('/');
-
-    matches!(path,
-        "" | "." | "null" | "zero" | "random" | "urandom" |
-        "console" | "tty" | "tty0" | "kmsg" | "mem" | "ptmx"
-    )
+    if path.is_empty() || path == "." { return true; }
+    DEV_NODES.lock().iter().any(|n| n.name == path)
 }
 
 /// Check if a /dev path is a directory
@@ -144,21 +186,18 @@ pub fn is_directory(path: &str) -> bool {
     path.is_empty() || path == "."
 }
 
-/// List /dev entries
+/// List /dev entries (returns FileInfos with the right file_type set so
+/// `ls -l` shows `c` / `b`).
 pub fn list_dev() -> Vec<crate::fs::vfs::FileInfo> {
-    use crate::fs::vfs::FileInfo;
-    use alloc::string::ToString;
+    use crate::fs::vfs::{FileInfo, VfsFileType};
 
-    alloc::vec![
-        FileInfo::new("null".to_string(), 0),
-        FileInfo::new("zero".to_string(), 0),
-        FileInfo::new("random".to_string(), 0),
-        FileInfo::new("urandom".to_string(), 0),
-        FileInfo::new("console".to_string(), 0),
-        FileInfo::new("tty".to_string(), 0),
-        FileInfo::new("kmsg".to_string(), 0),
-        FileInfo::new("mem".to_string(), 0),
-        FileInfo::new("tty0".to_string(), 0),
-        FileInfo::new("ptmx".to_string(), 0),
-    ]
+    list_nodes().into_iter().map(|n| {
+        let mut info = FileInfo::new(n.name, 0);
+        info.file_type = match n.kind {
+            DevKind::Char  => VfsFileType::CharDevice,
+            DevKind::Block => VfsFileType::BlockDevice,
+        };
+        info.mode = 0o660;
+        info
+    }).collect()
 }

@@ -73,6 +73,16 @@ pub struct Process {
 
     /// Current working directory (per-process, used by chdir/getcwd).
     pub cwd: String,
+
+    /// Process group ID (defaults to pid).  Changed by setpgid/setpgrp.
+    pub pgid: Pid,
+    /// Session ID (defaults to pid).  Changed by setsid (and only there).
+    pub sid: Pid,
+
+    /// Custom signal handlers, indexed by signal number 1..=31.
+    /// Entry == 0 (SIG_DFL) means default action; 1 (SIG_IGN) means ignore;
+    /// any other value is the user-mode handler entry point.
+    pub sigactions: [u64; 32],
 }
 
 impl Process {
@@ -103,6 +113,9 @@ impl Process {
             kernel_stack_top: 0,
             cr3: 0,
             cwd: String::from("/"),
+            pgid: pid,
+            sid: pid,
+            sigactions: [0u64; 32],
         }
     }
 
@@ -141,6 +154,9 @@ impl Process {
             kernel_stack_top: kstack_top,
             cr3: 0, // 0 = use kernel page table (shared address space for now)
             cwd: String::from("/"),
+            pgid: pid,
+            sid: pid,
+            sigactions: [0u64; 32],
         }
     }
 
@@ -174,6 +190,9 @@ impl Process {
             kernel_stack_top: kstack_top,
             cr3: 0, // TODO: clone page table for fork
             cwd: self.cwd.clone(),
+            pgid: self.pgid, // child inherits parent's group
+            sid: self.sid,   // and session
+            sigactions: self.sigactions, // and signal handlers
         }
     }
 }

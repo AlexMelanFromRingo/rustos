@@ -14,7 +14,9 @@ use x86_64::{
 
 /// User space memory region
 /// We allocate 32 MB starting at 0x00400000 (4 MB offset to avoid BIOS/VGA regions)
-pub const USER_SPACE_START: u64 = 0x0040_0000;  // 4 MB
+// 16 MB — leave the first 16 MB of virtual address space for the kernel
+// image (now well over 4 MB after net/syslog/cron/httpd/etc. additions).
+pub const USER_SPACE_START: u64 = 0x0100_0000;  // 16 MB
 pub const USER_SPACE_SIZE: u64 = 0x0200_0000;   // 32 MB
 pub const USER_SPACE_END: u64 = USER_SPACE_START + USER_SPACE_SIZE;
 
