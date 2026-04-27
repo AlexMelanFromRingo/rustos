@@ -55,8 +55,9 @@ Reference architecture: Linux/Unix-like.
 - [x] `pipe` — inter-process communication (4 KiB kernel buffer) ✅
 - [x] `select` / `poll` — I/O multiplexing (do_poll, do_select, fd_readiness, pollfd ABI struct, FD_SETSIZE=1024) ✅
 - [ ] `epoll` — scalable I/O multiplexing
-- [ ] `socket` / `bind` / `listen` / `accept` / `connect` — networking
-- [ ] `sendto` / `recvfrom` — network I/O
+- [x] `socket` / `bind` — kernel-side AF_INET/SOCK_DGRAM (UDP) ✅
+- [ ] `listen` / `accept` / `connect` — TCP (needs TCP layer)
+- [x] `sendto` / `recvfrom` — UDP datagram I/O over loopback ✅
 - [x] `clock_gettime` — time (REALTIME from RTC, MONOTONIC from PIT) ✅
 - [x] `getuid` / `getgid` / `geteuid` / `getegid` — user management ✅
 - [x] `mkdir` / `rmdir` / `unlink` / `rename` ✅

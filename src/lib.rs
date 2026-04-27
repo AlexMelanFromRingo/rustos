@@ -33,6 +33,7 @@ pub mod users;
 pub mod init;
 pub mod slab;
 pub mod slab_caches;
+pub mod net;
 
 pub fn init() {
     gdt::init();

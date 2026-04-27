@@ -335,7 +335,8 @@ impl Shell {
                 "usermode", "version", "wc", "which", "whoami", "write",
                 "passwd", "su", "service", "systemctl", "runlevel", "init",
                 "telinit", "slabinfo", "login", "logout", "exit", "motd",
-                "polltest",
+                "polltest", "ifconfig", "ip", "netstat", "ss", "ping",
+                "udptest",
             ];
 
             let matches: Vec<&str> = commands
@@ -663,6 +664,10 @@ impl Shell {
             "logout" | "exit" => self.cmd_logout(),
             "motd" => self.cmd_motd(),
             "polltest" => self.cmd_polltest(),
+            "ifconfig" | "ip" => self.cmd_ifconfig(args),
+            "netstat" | "ss" => self.cmd_netstat(args),
+            "ping" => self.cmd_ping(args),
+            "udptest" => self.cmd_udptest(args),
             "test" | "[" => self.cmd_test(args),
             "true" => {},
             "false" => println!("false"),
@@ -3546,6 +3551,161 @@ impl Shell {
         let level = crate::init::INIT.lock().runlevel();
         println!("N {}", level as u8);
         println!("({})", level.as_str());
+    }
+
+    /// ifconfig / ip: list network interfaces.
+    fn cmd_ifconfig(&self, args: &[&str]) {
+        // Optional: ifconfig lo up | ifconfig lo down
+        if args.len() >= 2 {
+            let name = args[0];
+            let action = args[1];
+            let mut stack = crate::net::NET_STACK.lock();
+            if let Some(e) = stack.find_by_name(name) {
+                match action {
+                    "up" => { e.iface.set_up(true); println!("{} up", name); }
+                    "down" => { e.iface.set_up(false); println!("{} down", name); }
+                    _ => println!("ifconfig: unknown action '{}'", action),
+                }
+            } else {
+                println!("ifconfig: interface '{}' not found", name);
+            }
+            return;
+        }
+        for line in crate::net::ifconfig_lines() {
+            println!("{}", line);
+            println!();
+        }
+    }
+
+    /// netstat / ss: list bound sockets.
+    fn cmd_netstat(&self, _args: &[&str]) {
+        use crate::net::socket::SOCKETS;
+        let table = SOCKETS.lock();
+        let entries = table.enumerate();
+        if entries.is_empty() {
+            println!("netstat: no sockets");
+            return;
+        }
+        println!("Proto Local Address           Recv-Q  Handle");
+        for (h, proto, bound, qlen) in entries {
+            let addr = match bound {
+                Some(a) => alloc::format!("{}", a),
+                None => alloc::string::String::from("*:*"),
+            };
+            let p = match proto {
+                crate::net::socket::SocketProto::Udp => "udp",
+            };
+            println!("{:<5} {:<24} {:>6}  {}", p, addr, qlen, h);
+        }
+    }
+
+    /// ping: only loopback supported. Sends N UDP probes to addr:7 (echo).
+    /// Note: there's no real ICMP — this is a UDP-based reachability test.
+    fn cmd_ping(&self, args: &[&str]) {
+        if args.is_empty() {
+            println!("Usage: ping <ip> [count]");
+            return;
+        }
+        let addr = match crate::net::Ipv4Addr::parse(args[0]) {
+            Some(a) => a,
+            None => {
+                println!("ping: invalid address '{}'", args[0]);
+                return;
+            }
+        };
+        if !addr.is_loopback() {
+            println!("ping: only loopback addresses are reachable in this build");
+            return;
+        }
+        let count: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(3);
+
+        use crate::net::socket::{bind, recvfrom, sendto, socket, SocketDomain, SocketProto, SocketType};
+        use crate::net::SocketAddrV4;
+
+        // Bind a UDP echo server on 127.0.0.1:7
+        let server = socket(SocketDomain::AF_INET, SocketType::Datagram, SocketProto::Udp);
+        let server_addr = SocketAddrV4 { ip: addr, port: 7 };
+        if bind(server, server_addr).is_err() {
+            // Maybe already bound from a previous run; reuse.
+        }
+
+        // Client socket
+        let client = socket(SocketDomain::AF_INET, SocketType::Datagram, SocketProto::Udp);
+
+        for seq in 0..count {
+            let payload = alloc::format!("PING seq={} time=now", seq);
+            match sendto(client, payload.as_bytes(), server_addr) {
+                Ok(_) => {
+                    // The packet was queued onto lo's RX in transmit_ipv4
+                    // and immediately dispatched, so we should be able to recv now.
+                    let mut buf = [0u8; 128];
+                    match recvfrom(server, &mut buf) {
+                        Ok((n, from)) => {
+                            let s = core::str::from_utf8(&buf[..n]).unwrap_or("<binary>");
+                            println!("{} bytes from {}: {}", n, from, s);
+                        }
+                        Err(e) => {
+                            println!("ping: recv error: {:?}", e);
+                            break;
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("ping: send error: {:?}", e);
+                    break;
+                }
+            }
+        }
+
+        crate::net::socket::close(client);
+        crate::net::socket::close(server);
+    }
+
+    /// udptest: send-recv loopback round-trip with payload validation.
+    fn cmd_udptest(&self, args: &[&str]) {
+        use crate::net::socket::{bind, recvfrom, sendto, socket, SocketDomain, SocketProto, SocketType};
+        use crate::net::{Ipv4Addr, SocketAddrV4};
+
+        let payload: &[u8] = if args.is_empty() {
+            b"hello, loopback world"
+        } else {
+            args[0].as_bytes()
+        };
+
+        let port: u16 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(12345);
+        let server = socket(SocketDomain::AF_INET, SocketType::Datagram, SocketProto::Udp);
+        let server_addr = SocketAddrV4 { ip: Ipv4Addr::LOCALHOST, port };
+        if let Err(e) = bind(server, server_addr) {
+            println!("udptest: bind error: {:?}", e);
+            return;
+        }
+
+        let client = socket(SocketDomain::AF_INET, SocketType::Datagram, SocketProto::Udp);
+        match sendto(client, payload, server_addr) {
+            Ok(n) => println!("udptest: sent {} bytes to {}", n, server_addr),
+            Err(e) => {
+                println!("udptest: send error: {:?}", e);
+                crate::net::socket::close(client);
+                crate::net::socket::close(server);
+                return;
+            }
+        }
+
+        let mut buf = [0u8; 1500];
+        match recvfrom(server, &mut buf) {
+            Ok((n, from)) => {
+                println!("udptest: received {} bytes from {}", n, from);
+                if &buf[..n] == payload {
+                    println!("udptest: payload matches ({} bytes)", n);
+                } else {
+                    println!("udptest: payload MISMATCH");
+                }
+            }
+            Err(e) => println!("udptest: recv error: {:?}", e),
+        }
+
+        crate::net::socket::close(client);
+        crate::net::socket::close(server);
     }
 
     /// polltest: exercise the poll syscall against a pipe and report results.
