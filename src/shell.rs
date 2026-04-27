@@ -149,8 +149,14 @@ impl Shell {
     }
 
     pub fn print_prompt(&self) {
-        // Print current directory and prompt
-        print!("{}{}", self.current_dir, self.prompt);
+        // PS1-style prompt: user@host:cwd$  (root gets `#`)
+        let creds = crate::users::CURRENT_CREDS.lock();
+        let user = creds.username.clone();
+        let is_root = creds.uid == 0;
+        drop(creds);
+        let cwd: &str = if self.current_dir.is_empty() { "/" } else { &self.current_dir };
+        let mark = if is_root { '#' } else { '$' };
+        print!("{}@{}:{}{} ", user, self.hostname, cwd, mark);
     }
 
     pub fn add_char(&mut self, c: char) {
@@ -225,9 +231,14 @@ impl Shell {
         self.cursor_pos = self.buffer.len();
     }
 
-    /// Get the display length of the prompt (current_dir + "> ")
+    /// Get the display length of the prompt (`user@host:cwd$ `)
     pub fn prompt_len(&self) -> usize {
-        self.current_dir.len() + self.prompt.len()
+        let creds = crate::users::CURRENT_CREDS.lock();
+        let username_len = creds.username.len();
+        drop(creds);
+        let cwd_len = if self.current_dir.is_empty() { 1 } else { self.current_dir.len() };
+        // user + '@' + host + ':' + cwd + '$' or '#' + ' '
+        username_len + 1 + self.hostname.len() + 1 + cwd_len + 1 + 1
     }
 
     pub fn get_cursor_pos(&self) -> usize {
@@ -323,7 +334,7 @@ impl Shell {
                 "umount", "uname", "unalias", "unset", "uptime", "useradd",
                 "usermode", "version", "wc", "which", "whoami", "write",
                 "passwd", "su", "service", "systemctl", "runlevel", "init",
-                "telinit", "slabinfo",
+                "telinit", "slabinfo", "login", "logout", "exit", "motd",
             ];
 
             let matches: Vec<&str> = commands
@@ -647,6 +658,9 @@ impl Shell {
             "runlevel" => self.cmd_runlevel(),
             "init" | "telinit" => self.cmd_init(args),
             "slabinfo" => self.cmd_slabinfo(),
+            "login" => self.cmd_login(args),
+            "logout" | "exit" => self.cmd_logout(),
+            "motd" => self.cmd_motd(),
             "test" | "[" => self.cmd_test(args),
             "true" => {},
             "false" => println!("false"),
@@ -3530,6 +3544,171 @@ impl Shell {
         let level = crate::init::INIT.lock().runlevel();
         println!("N {}", level as u8);
         println!("({})", level.as_str());
+    }
+
+    /// motd: display the message of the day from /etc/motd
+    fn cmd_motd(&self) {
+        match crate::fs::vfs::VfsContext::read("/etc/motd") {
+            Ok(data) => {
+                if let Ok(s) = core::str::from_utf8(&data) {
+                    print!("{}", s);
+                } else {
+                    println!("/etc/motd: not valid UTF-8");
+                }
+            }
+            Err(_) => println!("/etc/motd not found"),
+        }
+    }
+
+    /// login: prompt for username/password and switch credentials
+    fn cmd_login(&mut self, args: &[&str]) {
+        // Print /etc/issue header if present
+        if let Ok(data) = crate::fs::vfs::VfsContext::read("/etc/issue") {
+            if let Ok(s) = core::str::from_utf8(&data) {
+                let kernel = "rustos x86_64";
+                let host = self.hostname.clone();
+                print!("{}", s.replace("\\n", &host).replace("\\l", kernel));
+            }
+        }
+
+        let user = if !args.is_empty() {
+            String::from(args[0])
+        } else {
+            print!("login: ");
+            self.read_line_echoed()
+        };
+
+        let entry = {
+            let db = crate::users::USER_DB.lock();
+            db.get_user(&user).cloned()
+        };
+
+        let user_entry = match entry {
+            Some(u) => u,
+            None => {
+                println!("Login incorrect");
+                return;
+            }
+        };
+
+        // Authenticate
+        if !user_entry.password_hash.is_empty()
+            && user_entry.password_hash != "*"
+            && user_entry.password_hash != "!"
+        {
+            print!("Password: ");
+            let pw = self.read_password();
+            let db = crate::users::USER_DB.lock();
+            if !db.check_password(&user, &pw) {
+                println!("Login incorrect");
+                return;
+            }
+        } else if user_entry.password_hash == "*" || user_entry.password_hash == "!" {
+            println!("Account is locked");
+            return;
+        }
+
+        // Switch credentials and home directory
+        {
+            let mut creds = crate::users::CURRENT_CREDS.lock();
+            creds.uid = user_entry.uid;
+            creds.gid = user_entry.gid;
+            creds.euid = user_entry.uid;
+            creds.egid = user_entry.gid;
+            creds.username = user_entry.name.clone();
+        }
+
+        if !user_entry.home.is_empty() {
+            self.current_dir = user_entry.home.clone();
+        }
+
+        // Update USER env var
+        for entry in self.env_vars.iter_mut() {
+            if entry.0 == "USER" {
+                entry.1 = user_entry.name.clone();
+            } else if entry.0 == "HOME" {
+                entry.1 = user_entry.home.clone();
+            }
+        }
+
+        // Show MOTD on successful login
+        self.cmd_motd();
+        println!("Last login: just now on tty0");
+    }
+
+    /// logout / exit: drop privileges and re-show login prompt
+    fn cmd_logout(&mut self) {
+        println!("logout");
+        // Drop to "guest" credentials so the next prompt shows the change.
+        // Re-login is required to do anything privileged.
+        {
+            let mut creds = crate::users::CURRENT_CREDS.lock();
+            creds.uid = 65534;
+            creds.gid = 65534;
+            creds.euid = 65534;
+            creds.egid = 65534;
+            creds.username = alloc::string::String::from("guest");
+        }
+        self.current_dir = String::from("/");
+    }
+
+    /// Read a visible line from input (used for username prompt)
+    fn read_line_echoed(&mut self) -> String {
+        use crate::task::keyboard::{SCANCODE_QUEUE, SERIAL_QUEUE};
+        use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
+
+        let mut keyboard = Keyboard::new(
+            ScancodeSet1::new(),
+            layouts::Us104Key,
+            HandleControl::MapLettersToUnicode,
+        );
+
+        let mut buf = String::new();
+        loop {
+            let mut got_char: Option<char> = None;
+
+            if let Ok(q) = SERIAL_QUEUE.try_get() {
+                if let Some(byte) = q.pop() {
+                    got_char = match byte {
+                        b'\r' | b'\n' => Some('\n'),
+                        0x7F | 0x08 => Some('\u{0008}'),
+                        b if (0x20..=0x7E).contains(&b) => Some(b as char),
+                        _ => None,
+                    };
+                }
+            }
+
+            if got_char.is_none() {
+                if let Ok(q) = SCANCODE_QUEUE.try_get() {
+                    if let Some(scancode) = q.pop() {
+                        if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
+                            if let Some(key) = keyboard.process_keyevent(key_event) {
+                                if let DecodedKey::Unicode(c) = key {
+                                    got_char = Some(c);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some(c) = got_char {
+                if c == '\n' || c == '\r' {
+                    println!();
+                    return buf;
+                } else if c == '\u{0008}' || c == '\u{007F}' {
+                    if !buf.is_empty() {
+                        buf.pop();
+                        print!("\x08 \x08");
+                    }
+                } else if c.is_ascii() && !c.is_control() {
+                    buf.push(c);
+                    print!("{}", c);
+                }
+            } else {
+                x86_64::instructions::interrupts::enable_and_hlt();
+            }
+        }
     }
 
     /// slabinfo: print kernel slab allocator stats (Linux-style /proc/slabinfo)

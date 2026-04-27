@@ -112,6 +112,20 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         let _ = VfsContext::write("/etc/hostname", b"rustos\n".to_vec());
         let _ = VfsContext::write("/etc/os-release",
             b"NAME=\"RustOS\"\nID=rustos\nVERSION=\"0.1.0\"\nPRETTY_NAME=\"RustOS 0.1.0\"\n".to_vec());
+        let motd = "\n\
+Welcome to RustOS 0.1.0  (kernel x86_64-rustos)\n\
+\n\
+ * Documentation:  https://os.phil-opp.com/\n\
+ * Source code:    https://github.com/AlexMelanFromRingo/rustos\n\
+\n\
+This is an experimental, in-development OS written from scratch in Rust.\n\
+Type 'help' to list available shell commands.\n\
+\n";
+        let _ = VfsContext::write("/etc/motd", motd.as_bytes().to_vec());
+        let _ = VfsContext::write("/etc/issue",
+            b"RustOS 0.1.0 \\n \\l\n".to_vec());
+        let _ = VfsContext::mkdir("/var");
+        let _ = VfsContext::mkdir("/var/log");
     }
     klog_info!("Filesystem populated (/etc, /root, /home)");
 
@@ -208,6 +222,13 @@ async fn keyboard_task() {
     );
 
     let mut shell = Shell::new();
+
+    // Display the message of the day at boot (Ubuntu Server style).
+    if let Ok(motd) = rustos::fs::vfs::VfsContext::read("/etc/motd") {
+        if let Ok(s) = core::str::from_utf8(&motd) {
+            print!("{}", s);
+        }
+    }
     shell.print_prompt();
 
     while let Some(event) = input_stream.next().await {
