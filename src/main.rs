@@ -90,6 +90,11 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     rustos::init_syscall();
     klog_info!("SYSCALL/SYSRET support initialized");
 
+    // Register kernel slab caches and exercise them once for sanity.
+    rustos::slab_caches::init();
+    klog_info!("Slab allocator initialized: {} caches",
+        rustos::slab::SLAB_REGISTRY.snapshot().len());
+
     // Initialize user database
     rustos::users::init();
     rustos::users::init_creds();

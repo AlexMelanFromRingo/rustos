@@ -11,7 +11,7 @@ Reference architecture: Linux/Unix-like.
 - [x] Increase heap from 100 KiB to 16 MiB ✅
 - [x] Implement proper `FrameAllocator` with bitmap (O(1) alloc/dealloc) ✅
 - [x] Add frame deallocation support ✅
-- [ ] Implement slab allocator for kernel objects (replace fixed-size block allocator)
+- [x] Implement slab allocator for kernel objects (Bonwick-style object cache, kmalloc sizes 16..4096, /proc/slabinfo) ✅
 - [ ] Add kernel virtual memory allocator (vmalloc equivalent)
 - [x] Guard pages for kernel stack overflow detection ✅
 - [ ] Per-process address spaces (separate page tables per process)

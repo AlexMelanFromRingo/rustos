@@ -31,6 +31,8 @@ pub mod klog;
 pub mod tty;
 pub mod users;
 pub mod init;
+pub mod slab;
+pub mod slab_caches;
 
 pub fn init() {
     gdt::init();

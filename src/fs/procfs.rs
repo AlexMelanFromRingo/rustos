@@ -23,6 +23,7 @@ pub fn read_proc(path: &str) -> Option<Vec<u8>> {
             content.push_str("kmsg\n");
             content.push_str("loadavg\n");
             content.push_str("stat\n");
+            content.push_str("slabinfo\n");
 
             // Add per-process directories
             let pm = crate::process::PROCESS_MANAGER.lock();
@@ -130,6 +131,19 @@ pub fn read_proc(path: &str) -> Option<Vec<u8>> {
                 .count();
             s.push_str(&format!("procs_blocked {}\n", blocked));
 
+            Some(s.into_bytes())
+        }
+
+        "slabinfo" => {
+            let mut s = String::new();
+            s.push_str("# name             size  per_slab  total_objs  used_objs  free_objs  slabs  allocs  frees  grew\n");
+            for (name, st) in crate::slab::SLAB_REGISTRY.snapshot() {
+                s.push_str(&format!(
+                    "{:<16} {:>6}  {:>8}  {:>10}  {:>9}  {:>9}  {:>5}  {:>6}  {:>5}  {:>4}\n",
+                    name, st.obj_size, st.objs_per_slab, st.total_objs, st.used_objs,
+                    st.free_objs, st.total_slabs, st.allocs, st.frees, st.grew,
+                ));
+            }
             Some(s.into_bytes())
         }
 
@@ -255,6 +269,7 @@ pub fn list_proc() -> Vec<crate::fs::vfs::FileInfo> {
     entries.push(FileInfo::new("kmsg".to_string(), 0));
     entries.push(FileInfo::new("loadavg".to_string(), 0));
     entries.push(FileInfo::new("stat".to_string(), 0));
+    entries.push(FileInfo::new("slabinfo".to_string(), 0));
 
     // Per-process directories
     let pm = crate::process::PROCESS_MANAGER.lock();

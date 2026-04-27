@@ -323,7 +323,7 @@ impl Shell {
                 "umount", "uname", "unalias", "unset", "uptime", "useradd",
                 "usermode", "version", "wc", "which", "whoami", "write",
                 "passwd", "su", "service", "systemctl", "runlevel", "init",
-                "telinit",
+                "telinit", "slabinfo",
             ];
 
             let matches: Vec<&str> = commands
@@ -646,6 +646,7 @@ impl Shell {
             "service" | "systemctl" => self.cmd_service(args),
             "runlevel" => self.cmd_runlevel(),
             "init" | "telinit" => self.cmd_init(args),
+            "slabinfo" => self.cmd_slabinfo(),
             "test" | "[" => self.cmd_test(args),
             "true" => {},
             "false" => println!("false"),
@@ -3529,6 +3530,27 @@ impl Shell {
         let level = crate::init::INIT.lock().runlevel();
         println!("N {}", level as u8);
         println!("({})", level.as_str());
+    }
+
+    /// slabinfo: print kernel slab allocator stats (Linux-style /proc/slabinfo)
+    fn cmd_slabinfo(&self) {
+        let snapshot = crate::slab::SLAB_REGISTRY.snapshot();
+        if snapshot.is_empty() {
+            println!("slabinfo: no slab caches registered");
+            return;
+        }
+        println!(
+            "{:<16} {:>6} {:>8} {:>10} {:>9} {:>9} {:>5} {:>6} {:>5} {:>4}",
+            "name", "size", "per_slab", "total_objs", "used_objs", "free_objs",
+            "slabs", "allocs", "frees", "grew",
+        );
+        for (name, st) in snapshot {
+            println!(
+                "{:<16} {:>6} {:>8} {:>10} {:>9} {:>9} {:>5} {:>6} {:>5} {:>4}",
+                name, st.obj_size, st.objs_per_slab, st.total_objs, st.used_objs,
+                st.free_objs, st.total_slabs, st.allocs, st.frees, st.grew,
+            );
+        }
     }
 
     /// init / telinit: change the runlevel
