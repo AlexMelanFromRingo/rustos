@@ -322,7 +322,8 @@ impl Shell {
                 "sleep", "spawn", "stat", "tail", "time", "top", "touch", "tree",
                 "umount", "uname", "unalias", "unset", "uptime", "useradd",
                 "usermode", "version", "wc", "which", "whoami", "write",
-                "passwd", "su",
+                "passwd", "su", "service", "systemctl", "runlevel", "init",
+                "telinit",
             ];
 
             let matches: Vec<&str> = commands
@@ -642,6 +643,9 @@ impl Shell {
             "bg" => self.cmd_bg(args),
             "exec" => self.cmd_exec(args),
             "seq" => self.cmd_seq(args),
+            "service" | "systemctl" => self.cmd_service(args),
+            "runlevel" => self.cmd_runlevel(),
+            "init" | "telinit" => self.cmd_init(args),
             "test" | "[" => self.cmd_test(args),
             "true" => {},
             "false" => println!("false"),
@@ -750,6 +754,19 @@ impl Shell {
         println!("  jobs      - List background jobs");
         println!("  fg [%N]   - Bring job N to foreground");
         println!("  bg [%N]   - Continue stopped job in background");
+        println!();
+        println!("Users / authentication:");
+        println!("  whoami    - Print current username");
+        println!("  id        - Print uid/gid/groups");
+        println!("  su [user] - Switch user (default root)");
+        println!("  passwd    - Change user password");
+        println!("  useradd   - Add a new user (root only)");
+        println!();
+        println!("Init / services:");
+        println!("  service <name> <start|stop|restart|status>");
+        println!("  systemctl <verb> <name>      - Same as service");
+        println!("  runlevel  - Show current runlevel");
+        println!("  init <0..6> / telinit <0..6> - Change runlevel");
         println!();
         println!("Aliases:");
         println!("  alias     - Create command alias (usage: alias <name> <command>)");
@@ -3411,6 +3428,151 @@ impl Shell {
         let _ = VfsContext::write("/etc/passwd", db.to_passwd_string().as_bytes().to_vec());
         let _ = VfsContext::write("/etc/group", db.to_group_string().as_bytes().to_vec());
         Ok(())
+    }
+
+    /// service / systemctl: manage init services
+    fn cmd_service(&mut self, args: &[&str]) {
+        // service <name> <start|stop|restart|status>
+        // systemctl <verb> <name>  — accept either ordering
+        if args.is_empty() {
+            self.print_service_list();
+            return;
+        }
+
+        // systemctl verbs come first
+        let verbs = ["start", "stop", "restart", "status", "list", "enable", "disable"];
+        let (verb, name): (&str, Option<&str>) = if verbs.contains(&args[0]) {
+            (args[0], args.get(1).copied())
+        } else if args.len() >= 2 && verbs.contains(&args[1]) {
+            (args[1], Some(args[0]))
+        } else {
+            // Bare name -> status
+            ("status", Some(args[0]))
+        };
+
+        match verb {
+            "list" => self.print_service_list(),
+            "start" => match name {
+                Some(n) => match crate::init::INIT.lock().start(n) {
+                    Ok(_) => println!("Started {}", n),
+                    Err(e) => println!("service: {}: {}", n, e),
+                },
+                None => println!("service: missing service name"),
+            },
+            "stop" => match name {
+                Some(n) => match crate::init::INIT.lock().stop(n) {
+                    Ok(_) => println!("Stopped {}", n),
+                    Err(e) => println!("service: {}: {}", n, e),
+                },
+                None => println!("service: missing service name"),
+            },
+            "restart" => match name {
+                Some(n) => match crate::init::INIT.lock().restart(n) {
+                    Ok(_) => println!("Restarted {}", n),
+                    Err(e) => println!("service: {}: {}", n, e),
+                },
+                None => println!("service: missing service name"),
+            },
+            "status" => match name {
+                Some(n) => self.print_service_status(n),
+                None => self.print_service_list(),
+            },
+            "enable" | "disable" => {
+                println!("service: {}: not yet implemented", verb);
+            }
+            _ => println!("service: unknown verb '{}'", verb),
+        }
+    }
+
+    fn print_service_list(&self) {
+        let init = crate::init::INIT.lock();
+        let tick = crate::task::timer::current_ticks();
+        println!("UNIT          STATE      DESCRIPTION");
+        for svc in init.services() {
+            println!("{}", svc.status_line(tick));
+        }
+        println!("---");
+        println!("{} of {} services running, runlevel {}",
+            init.running_count(), init.total_count(), init.runlevel().as_str());
+    }
+
+    fn print_service_status(&self, name: &str) {
+        let init = crate::init::INIT.lock();
+        let svc = match init.get(name) {
+            Some(s) => s,
+            None => {
+                println!("service: {}: not found", name);
+                return;
+            }
+        };
+        let tick = crate::task::timer::current_ticks();
+        let dur = tick.saturating_sub(svc.state_since_tick) / 100;
+        println!("● {} - {}", svc.name, svc.description);
+        println!("   State: {} (since {}s ago)", svc.state.as_str(), dur);
+        println!("   Exec: {}", svc.exec);
+        if !svc.requires.is_empty() {
+            print!("   Requires:");
+            for d in &svc.requires {
+                print!(" {}", d);
+            }
+            println!();
+        }
+        println!("   Restart: {:?}", svc.restart);
+        println!("   Starts: {}", svc.start_count);
+        if let Some(pid) = svc.pid {
+            println!("   PID: {}", pid);
+        }
+    }
+
+    /// runlevel: print current and previous runlevel
+    fn cmd_runlevel(&self) {
+        let level = crate::init::INIT.lock().runlevel();
+        println!("N {}", level as u8);
+        println!("({})", level.as_str());
+    }
+
+    /// init / telinit: change the runlevel
+    fn cmd_init(&mut self, args: &[&str]) {
+        if args.is_empty() {
+            println!("Usage: init <0..6>");
+            return;
+        }
+        let level = match args[0].parse::<u8>() {
+            Ok(n) => match crate::init::RunLevel::from_u8(n) {
+                Some(l) => l,
+                None => {
+                    println!("init: invalid runlevel '{}'", args[0]);
+                    return;
+                }
+            },
+            Err(_) => {
+                println!("init: invalid runlevel '{}'", args[0]);
+                return;
+            }
+        };
+
+        // Special handling for halt/reboot
+        match level {
+            crate::init::RunLevel::Halt => {
+                println!("System halt requested. Shutting down all services...");
+                let _ = crate::init::INIT.lock().set_runlevel(level);
+                println!("System halted. Press the power button to reboot.");
+                crate::power::shutdown();
+            }
+            crate::init::RunLevel::Reboot => {
+                println!("Reboot requested. Stopping all services...");
+                let _ = crate::init::INIT.lock().set_runlevel(level);
+                println!("Rebooting...");
+                crate::power::reboot();
+            }
+            _ => {
+                let prev = crate::init::INIT.lock().runlevel();
+                match crate::init::INIT.lock().set_runlevel(level) {
+                    Ok(_) => println!("Switched runlevel: {} -> {}", prev.as_str(), level.as_str()),
+                    Err(e) => println!("init: {}", e),
+                }
+            }
+        }
     }
 }
 

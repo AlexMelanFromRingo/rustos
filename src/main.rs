@@ -110,6 +110,17 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     }
     klog_info!("Filesystem populated (/etc, /root, /home)");
 
+    // Initialise the SysV-style init system and bring the system up to multi-user.
+    rustos::init::install_default_services();
+    {
+        let mut init = rustos::init::INIT.lock();
+        init.boot_tick = rustos::task::timer::current_ticks();
+    }
+    let _ = rustos::init::INIT.lock().set_runlevel(rustos::init::RunLevel::MultiUser);
+    let running = rustos::init::INIT.lock().running_count();
+    let total = rustos::init::INIT.lock().total_count();
+    klog_info!("init: runlevel 3, {} of {} services running", running, total);
+
     println!("Kernel initialized successfully!");
     klog_info!("Kernel initialization complete");
     println!();

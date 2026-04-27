@@ -163,10 +163,13 @@ Reference architecture: Linux/Unix-like.
 
 ### 5.3 Core Utilities
 - [ ] Port coreutils (or implement in Rust): ls, cat, cp, mv, rm, mkdir, chmod, chown, etc.
-- [ ] `init` process (PID 1) — proper system initialization
-- [ ] `login` / `getty` — user authentication
-- [ ] `/etc/passwd`, `/etc/shadow` — user database
-- [ ] `su` / `sudo` — privilege escalation
+- [x] `init` / service manager — runlevels, dependencies, restart policies ✅
+- [ ] `login` / `getty` — user authentication (interactive login prompt)
+- [x] `/etc/passwd`, `/etc/group` — user database (User/Group/UserDb) ✅
+- [x] `su` — switch user with password prompt ✅
+- [x] `passwd` — change own password ✅
+- [x] `useradd` — add new user (root only) ✅
+- [ ] `sudo` — fine-grained privilege escalation
 - [x] `top` — process monitor (one-shot) ✅
 - [x] `mount` / `umount` — filesystem mounting (FAT32) ✅
 - [x] `dmesg` — kernel log (ring buffer, 512 entries, log levels) ✅
