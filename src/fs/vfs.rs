@@ -33,6 +33,8 @@ pub struct FileInfo {
     pub ctime: u64,         // Creation time (seconds since boot)
     pub mtime: u64,         // Modification time
     pub atime: u64,         // Access time
+    pub ino: u64,           // Inode number assigned by the backing filesystem
+    pub nlink: u32,         // Number of hard links pointing at this inode
 }
 
 impl FileInfo {
@@ -44,6 +46,7 @@ impl FileInfo {
             mode: 0o644,
             uid: 0, gid: 0,
             ctime: 0, mtime: 0, atime: 0,
+            ino: 0, nlink: 1,
         }
     }
 
@@ -55,6 +58,7 @@ impl FileInfo {
             mode: 0o755,
             uid: 0, gid: 0,
             ctime: 0, mtime: 0, atime: 0,
+            ino: 0, nlink: 2, // . and ..
         }
     }
 
@@ -66,6 +70,7 @@ impl FileInfo {
             mode: 0o777,
             uid: 0, gid: 0,
             ctime: 0, mtime: 0, atime: 0,
+            ino: 0, nlink: 1,
         }
     }
 }
@@ -169,6 +174,19 @@ pub trait FileSystem {
     /// Get free space (in bytes)
     fn free_space(&self) -> usize {
         self.total_space().saturating_sub(self.used_space())
+    }
+
+    /// Filesystem-assigned inode number for `path`.  Each backend
+    /// implements this with its own counter; the same path always returns
+    /// the same number for the lifetime of the mount.  Default returns 0
+    /// (unknown) — VfsContext::ino() falls back to the dentry-cache
+    /// allocator in that case.
+    fn ino(&self, _path: &str) -> u64 { 0 }
+
+    /// Hard-link count for `path`.  Default 1 for files, 2 for dirs
+    /// (`.` and `..`).
+    fn nlink(&self, path: &str) -> u32 {
+        if self.is_directory(path) { 2 } else { 1 }
     }
 }
 
@@ -628,6 +646,48 @@ impl VfsContext {
         FAT32.lock().is_some()
     }
 
+    /// Inode number for `path`, asking the backend that owns it.
+    pub fn ino(path: &str) -> u64 {
+        // Virtual filesystems get fixed major-numbered ino spaces so paths
+        // that look the same can't collide with real disk inodes.
+        if super::procfs::is_proc_path(path) {
+            return 0xfff0_0000_0000_0000 | (path_hash(path) & 0x0000_ffff_ffff_ffff);
+        }
+        if super::sysfs::is_sys_path(path) {
+            return 0xfff1_0000_0000_0000 | (path_hash(path) & 0x0000_ffff_ffff_ffff);
+        }
+        if super::devfs::is_dev_path(path) {
+            return 0xfff2_0000_0000_0000 | (path_hash(path) & 0x0000_ffff_ffff_ffff);
+        }
+        if super::tmpfs::is_tmp_path(path) {
+            return 0xfff3_0000_0000_0000 | (path_hash(path) & 0x0000_ffff_ffff_ffff);
+        }
+        // FAT32 first, RAMDISK fallback.
+        let fat32 = FAT32.lock();
+        if let Some(ref fs) = *fat32 {
+            let n = fs.ino(path);
+            if n != 0 { return n; }
+        }
+        drop(fat32);
+        RAMDISK.lock().ino(path)
+    }
+
+    /// Hard-link count for `path`.
+    pub fn nlink(path: &str) -> u32 {
+        if super::procfs::is_proc_path(path)
+            || super::sysfs::is_sys_path(path)
+            || super::devfs::is_dev_path(path)
+            || super::tmpfs::is_tmp_path(path) {
+            return if Self::is_directory(path) { 2 } else { 1 };
+        }
+        let fat32 = FAT32.lock();
+        if let Some(ref fs) = *fat32 {
+            return fs.nlink(path);
+        }
+        drop(fat32);
+        RAMDISK.lock().nlink(path)
+    }
+
     /// Get the name of the active filesystem
     pub fn filesystem_name() -> &'static str {
         if Self::is_fat32_mounted() {
@@ -661,6 +721,18 @@ impl Mount {
             options: options.to_string(),
         }
     }
+}
+
+/// FNV-1a 64-bit hash, used to derive deterministic inode numbers for the
+/// virtual filesystems (procfs/sysfs/devfs/tmpfs) that don't have a
+/// natural backing inode space.
+fn path_hash(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in s.as_bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
 }
 
 /// Global mount table.  Read by `mount`/`mountpoint` shell commands and

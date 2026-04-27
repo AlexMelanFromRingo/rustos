@@ -125,6 +125,8 @@ impl File {
             FileType::Directory => VfsFileType::Directory,
             FileType::Symlink => VfsFileType::Symlink,
         };
+        let ino = ramdisk_ino(&self.name);
+        let nlink = if self.is_directory() { 2 } else { 1 };
         FileInfo {
             name: String::from(display_name),
             size: self.size(),
@@ -136,8 +138,20 @@ impl File {
             ctime: self.ctime,
             mtime: self.mtime,
             atime: self.atime,
+            ino,
+            nlink,
         }
     }
+}
+
+/// FNV-1a 64-bit hash, in the RAMDISK ino space (top byte = 0x10).
+pub(crate) fn ramdisk_ino(path: &str) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in path.as_bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    0x1000_0000_0000_0000 | (h & 0x0fff_ffff_ffff_ffff)
 }
 
 /// Normalize a path: strip trailing slashes, ensure no double slashes
@@ -489,12 +503,34 @@ impl FileSystem for RamDisk {
 
     fn stat(&self, path: &str) -> VfsResult<FileInfo> {
         if path == "/" {
-            return Ok(FileInfo::directory(String::from("/")));
+            let mut info = FileInfo::directory(String::from("/"));
+            info.ino = ramdisk_ino("/");
+            return Ok(info);
         }
         let normalized = normalize_path(path);
         let file = self.files.iter().find(|f| f.name == normalized)
             .ok_or(VfsError::FileNotFound)?;
         Ok(file.to_info(&file.name.clone()))
+    }
+
+    fn ino(&self, path: &str) -> u64 {
+        if path == "/" { return ramdisk_ino("/"); }
+        let normalized = normalize_path(path);
+        if self.files.iter().any(|f| f.name == normalized) {
+            ramdisk_ino(&normalized)
+        } else {
+            0
+        }
+    }
+
+    fn nlink(&self, path: &str) -> u32 {
+        if path == "/" { return 2; }
+        let normalized = normalize_path(path);
+        match self.files.iter().find(|f| f.name == normalized) {
+            Some(f) if f.is_directory() => 2,
+            Some(_) => 1,
+            None => 0,
+        }
     }
 }
 

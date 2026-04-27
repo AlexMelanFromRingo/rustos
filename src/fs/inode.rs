@@ -14,7 +14,6 @@ use crate::fs::vfs::{VfsContext, VfsFileType};
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
 /// Per-inode metadata.  Mirrors a subset of `FileInfo` plus stable identity.
@@ -31,11 +30,9 @@ pub struct Inode {
     pub last_seen:  u64,  // tick when we last refreshed from VFS
 }
 
-static NEXT_INO: AtomicU64 = AtomicU64::new(1);
-
-fn fresh_ino() -> u64 { NEXT_INO.fetch_add(1, Ordering::Relaxed) }
-
-/// path → Inode map.  Acts as the dentry cache.
+/// path → Inode map.  Acts as the dentry cache.  The inode number on each
+/// entry comes from the backing filesystem (`VfsContext::ino()`), so two
+/// paths that resolve to the same inode share its number.
 pub struct DentryCache {
     entries: BTreeMap<String, Inode>,
 }
@@ -43,52 +40,38 @@ pub struct DentryCache {
 impl DentryCache {
     pub const fn new() -> Self { DentryCache { entries: BTreeMap::new() } }
 
-    /// Look up `path`, refreshing from VFS if not cached.  Returns a clone.
+    fn build_from_vfs(path: &str) -> Option<Inode> {
+        let info = VfsContext::stat(path).ok()?;
+        let ino = if info.ino != 0 {
+            info.ino
+        } else {
+            VfsContext::ino(path)
+        };
+        let nlink = if info.nlink != 0 { info.nlink } else { VfsContext::nlink(path) };
+        Some(Inode {
+            ino,
+            path: path.to_string(),
+            file_type: info.file_type,
+            mode: info.mode,
+            uid: info.uid,
+            gid: info.gid,
+            size: info.size,
+            nlink,
+            last_seen: crate::task::timer::current_ticks(),
+        })
+    }
+
     pub fn lookup(&mut self, path: &str) -> Option<Inode> {
         if let Some(existing) = self.entries.get(path).cloned() {
             return Some(existing);
         }
-        let info = VfsContext::stat(path).ok()?;
-        let inode = Inode {
-            ino: fresh_ino(),
-            path: path.to_string(),
-            file_type: info.file_type,
-            mode: info.mode,
-            uid: info.uid,
-            gid: info.gid,
-            size: info.size,
-            nlink: 1, // we don't track real link counts
-            last_seen: crate::task::timer::current_ticks(),
-        };
+        let inode = Self::build_from_vfs(path)?;
         self.entries.insert(path.to_string(), inode.clone());
         Some(inode)
     }
 
-    /// Force a refresh of `path` from VFS; stale entries get the fresh data
-    /// while keeping their ino number.
     pub fn refresh(&mut self, path: &str) -> Option<Inode> {
-        let info = VfsContext::stat(path).ok()?;
-        let now = crate::task::timer::current_ticks();
-        if let Some(existing) = self.entries.get_mut(path) {
-            existing.file_type = info.file_type;
-            existing.mode = info.mode;
-            existing.uid = info.uid;
-            existing.gid = info.gid;
-            existing.size = info.size;
-            existing.last_seen = now;
-            return Some(existing.clone());
-        }
-        let inode = Inode {
-            ino: fresh_ino(),
-            path: path.to_string(),
-            file_type: info.file_type,
-            mode: info.mode,
-            uid: info.uid,
-            gid: info.gid,
-            size: info.size,
-            nlink: 1,
-            last_seen: now,
-        };
+        let inode = Self::build_from_vfs(path)?;
         self.entries.insert(path.to_string(), inode.clone());
         Some(inode)
     }

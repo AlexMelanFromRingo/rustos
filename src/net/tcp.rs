@@ -111,6 +111,19 @@ impl TcpState {
     }
 }
 
+/// One unacknowledged segment held on the retransmit queue.
+#[derive(Debug, Clone)]
+pub struct RetxSegment {
+    pub seq:        u32,
+    pub flags:      u8,
+    pub data:       alloc::vec::Vec<u8>,
+    pub send_tick:  u64,
+    pub retries:    u8,
+}
+
+/// Maximum segment size for the loopback link.  Conservative.
+pub const MSS: u32 = 1460;
+
 /// One TCP connection (or a listening passive socket).
 pub struct TcpEndpoint {
     pub state: TcpState,
@@ -120,6 +133,25 @@ pub struct TcpEndpoint {
     pub snd_una: u32,           // oldest unacknowledged sequence
     pub rcv_nxt: u32,           // next byte we expect from peer
     pub rcv_buf: VecDeque<u8>,  // bytes received, awaiting recv()
+
+    // ---- congestion control (slow start / AIMD) ----
+    /// Congestion window in bytes.  Starts at MSS, doubles each ACK during
+    /// slow start, then grows by MSS/cwnd per ACK after ssthresh, halved on
+    /// loss (AIMD).
+    pub cwnd:       u32,
+    /// Slow-start threshold.  Initially "infinity" (set high).
+    pub ssthresh:   u32,
+    /// Smoothed RTT estimator (in ticks) — RFC 6298 with α=1/8.  Starts 0.
+    pub srtt:       u32,
+    pub rttvar:     u32,
+    /// Retransmit timeout (ticks).  Default 2 ticks (~110 ms) before any
+    /// RTT samples; recomputed as srtt + 4*rttvar after the first ACK.
+    pub rto:        u32,
+    /// Pending segments awaiting ACK.
+    pub retx:       VecDeque<RetxSegment>,
+    /// Number of consecutive RTO firings (for exponential backoff).
+    pub rto_backoff: u8,
+
     /// For listeners: queue of (handle, remote-addr) pairs ready for accept.
     pub accept_queue: VecDeque<usize>,
     /// For listeners: outstanding child endpoints created by SYNs.
@@ -136,13 +168,19 @@ impl TcpEndpoint {
             snd_una: 0,
             rcv_nxt: 0,
             rcv_buf: VecDeque::new(),
+            cwnd: MSS,
+            ssthresh: u32::MAX,
+            srtt: 0,
+            rttvar: 0,
+            rto: 2,
+            retx: VecDeque::new(),
+            rto_backoff: 0,
             accept_queue: VecDeque::new(),
             backlog,
         }
     }
 
     fn new_child_for_syn(local: SocketAddrV4, remote: SocketAddrV4, peer_seq: u32) -> Self {
-        // Choose our initial sequence number deterministically from the timer.
         let iss: u32 = (crate::task::timer::current_ticks() as u32) ^ 0x12345678;
         TcpEndpoint {
             state: TcpState::SynRcvd,
@@ -152,6 +190,9 @@ impl TcpEndpoint {
             snd_una: iss,
             rcv_nxt: peer_seq.wrapping_add(1),
             rcv_buf: VecDeque::new(),
+            cwnd: MSS, ssthresh: u32::MAX,
+            srtt: 0, rttvar: 0, rto: 2,
+            retx: VecDeque::new(), rto_backoff: 0,
             accept_queue: VecDeque::new(),
             backlog: 0,
         }
@@ -167,10 +208,81 @@ impl TcpEndpoint {
             snd_una: iss,
             rcv_nxt: 0,
             rcv_buf: VecDeque::new(),
+            cwnd: MSS, ssthresh: u32::MAX,
+            srtt: 0, rttvar: 0, rto: 2,
+            retx: VecDeque::new(), rto_backoff: 0,
             accept_queue: VecDeque::new(),
             backlog: 0,
         }
     }
+
+    /// Process an ACK (covering snd_una..ack).  Removes acknowledged
+    /// segments from the retransmit queue, samples RTT for one of them,
+    /// and advances cwnd per congestion-control rules.
+    pub fn process_ack(&mut self, ack: u32) {
+        // Walk the retx queue from the front, dropping fully-ACKed segs.
+        let now = crate::task::timer::current_ticks();
+        let mut acked_bytes: u32 = 0;
+        let mut newest_acked_send_tick: Option<u64> = None;
+        while let Some(seg) = self.retx.front() {
+            let end = seg.seq.wrapping_add(seg.data.len() as u32);
+            // ack covers entirely past `end` (mod-32 comparison).
+            if seq_le(end, ack) {
+                acked_bytes = acked_bytes.saturating_add(seg.data.len() as u32);
+                if seg.retries == 0 {
+                    // Karn's algorithm: only sample RTT from non-retransmitted segs.
+                    newest_acked_send_tick = Some(seg.send_tick);
+                }
+                self.retx.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        if acked_bytes > 0 {
+            self.snd_una = ack;
+            self.rto_backoff = 0;
+            // RTT update — RFC 6298 with α=1/8, β=1/4.
+            if let Some(st) = newest_acked_send_tick {
+                let rtt = now.saturating_sub(st) as u32;
+                if self.srtt == 0 {
+                    self.srtt = rtt;
+                    self.rttvar = rtt / 2;
+                } else {
+                    let abs_diff = if self.srtt > rtt { self.srtt - rtt } else { rtt - self.srtt };
+                    self.rttvar = self.rttvar - (self.rttvar / 4) + (abs_diff / 4);
+                    self.srtt = self.srtt - (self.srtt / 8) + (rtt / 8);
+                }
+                // RTO = SRTT + 4·RTTVAR, floor at 2 ticks (~110 ms).
+                self.rto = (self.srtt + 4 * self.rttvar).max(2);
+            }
+            // Congestion control: slow start while cwnd < ssthresh, then
+            // congestion avoidance (cwnd += MSS / cwnd) — implemented as
+            // cwnd += MSS·MSS / cwnd to keep the math integer.
+            if self.cwnd < self.ssthresh {
+                self.cwnd = self.cwnd.saturating_add(acked_bytes.min(MSS));
+            } else {
+                let inc = MSS.saturating_mul(MSS) / self.cwnd.max(1);
+                self.cwnd = self.cwnd.saturating_add(inc.max(1));
+            }
+        }
+    }
+
+    /// Mark a retransmit-timeout event: shrink ssthresh, reset cwnd to
+    /// MSS, double RTO, increment backoff.  RFC 6298 §5.
+    pub fn on_rto(&mut self) {
+        self.ssthresh = (self.cwnd / 2).max(2 * MSS);
+        self.cwnd = MSS;
+        self.rto = self.rto.saturating_mul(2).min(60); // cap RTO at ~3.3s
+        self.rto_backoff = self.rto_backoff.saturating_add(1);
+    }
+}
+
+/// Modular sequence-number comparison: a <= b in 32-bit serial space.
+#[inline]
+fn seq_le(a: u32, b: u32) -> bool {
+    // a is "less or equal" to b if (b - a) < 2^31.
+    b.wrapping_sub(a) < 0x8000_0000
 }
 
 /// Endpoint table.  Handles are stable indices.
@@ -345,7 +457,9 @@ pub fn connect(remote: SocketAddrV4) -> Result<usize, TcpError> {
     else { Ok(h) }
 }
 
-/// Send `data` on an established connection.
+/// Send `data` on an established connection.  Records the segment on the
+/// per-endpoint retransmit queue so it can be replayed if the peer doesn't
+/// ACK within RTO.
 pub fn send(h: usize, data: &[u8]) -> Result<usize, TcpError> {
     let (local, remote, seq, ack) = {
         let mut table = TCP.lock();
@@ -357,11 +471,59 @@ pub fn send(h: usize, data: &[u8]) -> Result<usize, TcpError> {
         let seq = ep.snd_nxt;
         let ack = ep.rcv_nxt;
         ep.snd_nxt = ep.snd_nxt.wrapping_add(data.len() as u32);
+
+        // Record on the retransmit queue.
+        ep.retx.push_back(RetxSegment {
+            seq,
+            flags: flags::ACK | flags::PSH,
+            data: data.to_vec(),
+            send_tick: crate::task::timer::current_ticks(),
+            retries: 0,
+        });
+
         (ep.local, ep.remote, seq, ack)
     };
     emit(local, remote, seq, ack, flags::ACK | flags::PSH, data)
         .map_err(|_| TcpError::Closed)?;
     Ok(data.len())
+}
+
+/// Periodic tick called by a kernel task: walk every endpoint's retx
+/// queue, retransmit segments past their RTO, halve cwnd on each RTO fire.
+/// Returns the number of segments retransmitted this tick.
+pub fn retransmit_tick() -> usize {
+    let now = crate::task::timer::current_ticks();
+    let mut to_retx: Vec<(SocketAddrV4, SocketAddrV4, u32, u32, u8, alloc::vec::Vec<u8>)> = Vec::new();
+    {
+        let mut table = TCP.lock();
+        for slot in table.endpoints.iter_mut() {
+            if let Some(ep) = slot {
+                if ep.retx.is_empty() { continue; }
+                // RTO fires on the oldest queued segment.
+                let oldest = ep.retx.front().unwrap();
+                let elapsed = now.saturating_sub(oldest.send_tick) as u32;
+                if elapsed < ep.rto { continue; }
+
+                ep.on_rto();
+                let ack = ep.rcv_nxt;
+
+                // Move the oldest seg to the back, bump retries, mark resend.
+                if let Some(mut seg) = ep.retx.pop_front() {
+                    seg.retries = seg.retries.saturating_add(1);
+                    seg.send_tick = now;
+                    let local = ep.local;
+                    let remote = ep.remote;
+                    to_retx.push((local, remote, seg.seq, ack, seg.flags, seg.data.clone()));
+                    ep.retx.push_back(seg);
+                }
+            }
+        }
+    }
+    let n = to_retx.len();
+    for (local, remote, seq, ack, fl, data) in to_retx {
+        let _ = emit(local, remote, seq, ack, fl, &data);
+    }
+    n
 }
 
 /// Receive up to `buf.len()` bytes from the connection.  Non-blocking.
@@ -517,7 +679,7 @@ fn process_segment_for(
                 send_ack = Some((ep.snd_nxt, ep.rcv_nxt, flags::ACK));
             }
             if th.flags & flags::ACK != 0 {
-                ep.snd_una = th.ack;
+                ep.process_ack(th.ack);
             }
             if th.flags & flags::FIN != 0 {
                 ep.rcv_nxt = ep.rcv_nxt.wrapping_add(1);
@@ -573,5 +735,48 @@ pub fn enumerate() -> Vec<(usize, TcpState, SocketAddrV4, SocketAddrV4, usize)> 
     let table = TCP.lock();
     table.endpoints.iter().enumerate().filter_map(|(i, slot)| {
         slot.as_ref().map(|ep| (i, ep.state, ep.local, ep.remote, ep.rcv_buf.len()))
+    }).collect()
+}
+
+/// Detailed view used by `tcpinfo` for diagnostics.
+#[derive(Debug, Clone)]
+pub struct EndpointInfo {
+    pub handle: usize,
+    pub state: TcpState,
+    pub local: SocketAddrV4,
+    pub remote: SocketAddrV4,
+    pub snd_nxt: u32,
+    pub snd_una: u32,
+    pub rcv_nxt: u32,
+    pub cwnd: u32,
+    pub ssthresh: u32,
+    pub srtt: u32,
+    pub rttvar: u32,
+    pub rto: u32,
+    pub retx_len: usize,
+    pub retx_backoff: u8,
+    pub rcv_buf_len: usize,
+}
+
+pub fn enumerate_detailed() -> Vec<EndpointInfo> {
+    let table = TCP.lock();
+    table.endpoints.iter().enumerate().filter_map(|(i, slot)| {
+        slot.as_ref().map(|ep| EndpointInfo {
+            handle: i,
+            state: ep.state,
+            local: ep.local,
+            remote: ep.remote,
+            snd_nxt: ep.snd_nxt,
+            snd_una: ep.snd_una,
+            rcv_nxt: ep.rcv_nxt,
+            cwnd: ep.cwnd,
+            ssthresh: ep.ssthresh,
+            srtt: ep.srtt,
+            rttvar: ep.rttvar,
+            rto: ep.rto,
+            retx_len: ep.retx.len(),
+            retx_backoff: ep.rto_backoff,
+            rcv_buf_len: ep.rcv_buf.len(),
+        })
     }).collect()
 }

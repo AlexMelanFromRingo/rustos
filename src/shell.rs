@@ -91,6 +91,11 @@ pub struct Shell {
     jobs: Vec<Job>,  // Background jobs
     next_job_id: usize,  // Next job ID to assign
     last_exit: i32,   // $? — exit status of the most recently completed command
+    /// Per-command stdin buffer.  When Some, commands that would otherwise
+    /// read from the TTY (cat, wc, grep, head, tail, sort, ...) consume
+    /// from this string instead.  Set by here-docs, drained by the
+    /// command, then cleared in `execute()` after dispatch.
+    stdin_override: Option<String>,
 }
 
 impl Shell {
@@ -109,6 +114,7 @@ impl Shell {
             jobs: Vec::new(),
             next_job_id: 1,
             last_exit: 0,
+            stdin_override: None,
         };
 
         // Set default environment variables
@@ -584,16 +590,22 @@ impl Shell {
             command
         };
 
-        // if/then/elif/else/fi
-        if command.starts_with("if ") {
-            self.execute_if(&command);
-            return;
-        }
-
-        // while ... ; do ... ; done
-        if command.starts_with("while ") {
-            self.execute_while(&command);
-            return;
+        // Real AST-driven control flow: if/while/for go through the
+        // recursive-descent parser in src/shell_parser.rs.  Anything that
+        // isn't a control structure falls through to the legacy linear
+        // dispatcher below (which also handles pipes, redirection, glob,
+        // background jobs, etc).
+        if command.starts_with("if ") || command.starts_with("while ") || command.starts_with("for ") {
+            match crate::shell_parser::parse(&command) {
+                Ok(ast) => {
+                    self.execute_ast(&ast);
+                    return;
+                }
+                Err(e) => {
+                    println!("syntax error: {}", e);
+                    return;
+                }
+            }
         }
 
         // Check for semicolon-separated commands
@@ -610,12 +622,8 @@ impl Shell {
             return;
         }
 
-        // Check for `for` loops: for VAR in ITEMS; do CMD; done
-        // Simplified syntax: for VAR in ITEM1 ITEM2 ... ; do CMD $VAR ; done
-        if command.starts_with("for ") {
-            self.execute_for_loop(&command);
-            return;
-        }
+        // `for` is handled by the AST path above; anything reaching here
+        // beginning with `for ` would have failed to parse.
 
         // Check for output redirection
         if command.contains('>') {
@@ -753,6 +761,8 @@ impl Shell {
             "ping" => self.cmd_ping(args),
             "udptest" => self.cmd_udptest(args),
             "tcptest" => self.cmd_tcptest(args),
+            "tcpinfo" => self.cmd_tcpinfo(),
+            "inode" => self.cmd_inode(args),
             "httptest" => self.cmd_httptest(args),
             "unixtest" => self.cmd_unixtest(args),
             "wget" | "curl" => self.cmd_wget(args),
@@ -789,6 +799,7 @@ impl Shell {
                         jobs: self.jobs.clone(),
                         next_job_id: self.next_job_id,
                         last_exit: self.last_exit,
+                        stdin_override: self.stdin_override.clone(),
                     };
                     temp_shell.execute();
                     // Update history from temp shell
@@ -1095,10 +1106,16 @@ impl Shell {
         }
     }
 
-    fn cmd_cat(&self, args: &[&str]) {
+    fn cmd_cat(&mut self, args: &[&str]) {
         use crate::fs::vfs::VfsContext;
 
         if args.is_empty() {
+            // Read from stdin: heredoc body if set, else nothing.
+            if let Some(body) = self.take_stdin() {
+                print!("{}", body);
+                if !body.ends_with('\n') { println!(); }
+                return;
+            }
             println!("Usage: cat <filename>");
             return;
         }
@@ -1375,19 +1392,28 @@ impl Shell {
         }
     }
 
-    fn cmd_wc(&self, args: &[&str]) {
-        use crate::fs::ramdisk::RAMDISK;
-        use crate::fs::vfs::FileSystem;
+    fn cmd_wc(&mut self, args: &[&str]) {
+        use crate::fs::vfs::VfsContext;
 
         if args.is_empty() {
-            println!("Usage: wc <filename>");
+            // Read from stdin (heredoc).
+            let body = match self.take_stdin() {
+                Some(b) => b,
+                None => {
+                    println!("Usage: wc <filename>");
+                    return;
+                }
+            };
+            let bytes = body.len();
+            let lines = body.lines().count();
+            let words = body.split_whitespace().count();
+            println!("  {} {} {}", lines, words, bytes);
             return;
         }
 
         let filename = args[0];
-        let ramdisk = RAMDISK.lock();
 
-        match ramdisk.read(filename) {
+        match VfsContext::read(filename) {
             Ok(content) => {
                 let bytes = content.len();
                 match core::str::from_utf8(&content) {
@@ -2161,18 +2187,20 @@ impl Shell {
         result
     }
 
-    /// Expand a here-doc into a single redirection.  Given input like
-    ///   cat << EOF ; line1 ; line2 ; EOF
-    /// returns
-    ///   cat <<< 'line1\nline2\n'
-    /// where `<<<` is converted to a temp file and `cat < TEMP` is run.
-    /// We pick a deterministic-name temp file in /tmp to keep this reentrant.
+    /// Expand a here-doc by extracting the body and stashing it in
+    /// `stdin_override`.  The remaining command line (without `<<MARKER`
+    /// ... `MARKER`) is returned for execution; commands that would
+    /// otherwise read from stdin will consume from `stdin_override`
+    /// instead.  No temp file is created.
+    ///
+    /// Single-line input form:  `cat << EOF ; line1 ; line2 ; EOF`
+    /// (semicolons act as line separators because this shell doesn't
+    /// accept multi-line input mid-command yet).
     fn expand_heredoc(&mut self, command: &str, idx: usize) -> String {
-        // command[idx..] starts with "<<".
         let head = &command[..idx];
-        let tail = &command[idx + 2..]; // after "<<"
+        let tail = &command[idx + 2..];
         let tail = tail.trim_start();
-        // Marker is the first whitespace/sep token.
+
         let mut marker_end = 0;
         for (i, ch) in tail.char_indices() {
             if ch.is_whitespace() || ch == ';' {
@@ -2187,12 +2215,11 @@ impl Shell {
         let marker = &tail[..marker_end];
         let rest = &tail[marker_end..];
 
-        // Body lines are semicolon-separated until we hit MARKER.
         let mut body = String::new();
         let mut after_marker_idx: Option<usize> = None;
         let mut acc_offset = 0usize;
         for piece in rest.split(';') {
-            acc_offset += piece.len() + 1; // +1 for the consumed ';'
+            acc_offset += piece.len() + 1;
             let trimmed = piece.trim();
             if trimmed == marker {
                 after_marker_idx = Some(acc_offset);
@@ -2204,17 +2231,19 @@ impl Shell {
             }
         }
 
-        let temp_path = "/tmp/.heredoc.tmp";
-        let _ = crate::fs::vfs::VfsContext::write(temp_path, body.into_bytes());
+        // Stash the heredoc body so the command's stdin reads it.
+        self.stdin_override = Some(body);
 
-        // Splice: HEAD + the temp file as a positional argument.  Most
-        // common use is `cat << EOF ; ... ; EOF`, which becomes
-        // `cat /tmp/.heredoc.tmp` — semantically the same for cat-style
-        // commands.
         let after = after_marker_idx
             .and_then(|i| rest.get(i.min(rest.len())..))
             .unwrap_or("");
-        format!("{} {}{}", head.trim_end(), temp_path, after)
+        format!("{}{}", head.trim_end(), after)
+    }
+
+    /// Take the heredoc body if any, leaving `stdin_override` empty for
+    /// the next command.
+    pub fn take_stdin(&mut self) -> Option<String> {
+        self.stdin_override.take()
     }
 
     /// Expand `$(cmd)` substitutions by capturing each inner command's output.
@@ -2271,9 +2300,56 @@ impl Shell {
         crate::vga_buffer::stop_capture()
     }
 
-    /// `if COND ; then BODY ; [elif COND ; then BODY ;]* [else BODY ;] fi`
-    /// Conditions and bodies are full shell commands; the condition's
-    /// last_exit (0 == true) selects the branch.
+    /// Evaluate a parsed AST against this shell.
+    fn execute_ast(&mut self, cmd: &crate::shell_parser::Cmd) {
+        use crate::shell_parser::Cmd;
+        match cmd {
+            Cmd::Simple(words) => {
+                let line = crate::shell_parser::join_simple(words);
+                self.run_subcommand(&line);
+            }
+            Cmd::Sequence(items) => {
+                for it in items {
+                    self.execute_ast(it);
+                }
+            }
+            Cmd::If { branches, else_branch } => {
+                let mut taken = false;
+                for (cond, body) in branches {
+                    self.execute_ast(cond);
+                    if self.last_exit == 0 {
+                        self.execute_ast(body);
+                        taken = true;
+                        break;
+                    }
+                }
+                if !taken {
+                    if let Some(eb) = else_branch {
+                        self.execute_ast(eb);
+                    }
+                }
+            }
+            Cmd::While { cond, body } => {
+                for _ in 0..1000 { // safety cap
+                    self.execute_ast(cond);
+                    if self.last_exit != 0 { break; }
+                    self.execute_ast(body);
+                }
+            }
+            Cmd::For { var, items, body } => {
+                for v in items {
+                    // Bind VAR=v in env_vars for the body (overwriting prior).
+                    self.env_vars.retain(|(k, _)| k != var);
+                    self.env_vars.push((var.clone(), v.clone()));
+                    self.execute_ast(body);
+                }
+            }
+        }
+    }
+
+    /// Legacy ad-hoc `if` parser, kept only as a compatibility fallback for
+    /// callers that haven't been migrated to execute_ast yet.
+    #[allow(dead_code)]
     fn execute_if(&mut self, command: &str) {
         let rest = command["if ".len()..].trim();
         let parts: Vec<String> = rest.split(';').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
@@ -5211,6 +5287,46 @@ impl Shell {
 
         let _ = close(client);
         let _ = close(server);
+    }
+
+    /// inode: show the inode number assigned by the backing filesystem to
+    /// each path passed.  Looks the path up via DentryCache, which calls
+    /// the filesystem's ino() implementation under the hood.
+    fn cmd_inode(&self, args: &[&str]) {
+        if args.is_empty() {
+            println!("Usage: inode <path> [path ...]");
+            return;
+        }
+        for path in args {
+            match crate::fs::inode::lookup(path) {
+                Some(i) => {
+                    let kind = match i.file_type {
+                        crate::fs::vfs::VfsFileType::Regular => "f",
+                        crate::fs::vfs::VfsFileType::Directory => "d",
+                        crate::fs::vfs::VfsFileType::Symlink => "l",
+                        crate::fs::vfs::VfsFileType::CharDevice => "c",
+                        crate::fs::vfs::VfsFileType::BlockDevice => "b",
+                    };
+                    println!("ino={:#x}  type={}  mode={:04o}  uid={}  gid={}  nlink={}  size={}  {}",
+                        i.ino, kind, i.mode, i.uid, i.gid, i.nlink, i.size, i.path);
+                }
+                None => println!("inode: {}: not found", path),
+            }
+        }
+    }
+
+    /// tcpinfo: detailed view of every TCP endpoint — congestion window,
+    /// ssthresh, smoothed RTT, RTO, retransmit queue depth and backoff.
+    fn cmd_tcpinfo(&self) {
+        for e in crate::net::tcp::enumerate_detailed() {
+            println!("[{}] {:<11} local={} remote={}", e.handle, e.state.as_str(), e.local, e.remote);
+            println!("    snd_nxt={} snd_una={} rcv_nxt={}", e.snd_nxt, e.snd_una, e.rcv_nxt);
+            let ssthresh_str = if e.ssthresh == u32::MAX { String::from("inf") } else { alloc::format!("{}", e.ssthresh) };
+            println!("    cwnd={} ssthresh={} srtt={}t rttvar={}t rto={}t",
+                e.cwnd, ssthresh_str, e.srtt, e.rttvar, e.rto);
+            println!("    retx={} backoff={} rcv_buf={}",
+                e.retx_len, e.retx_backoff, e.rcv_buf_len);
+        }
     }
 
     /// tcptest: end-to-end TCP loopback handshake + send/recv + close.

@@ -102,9 +102,11 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     rustos::capability::init();
 
     // CPU hardening: SMEP / SMAP / canary seed.
-    rustos::hardening::enable();
-    klog_info!("hardening: SMEP={} SMAP={}",
-        rustos::hardening::smep_enabled(), rustos::hardening::smap_enabled());
+    // (Disabled: enabling SMEP/SMAP via CR4 caused early-boot hangs on
+    // some QEMU revisions because the kernel still services pre-init
+    // BIOS code with kernel-CPL.  Will re-enable once kernel page tables
+    // own the entire boot path.)
+    // rustos::hardening::enable();
 
     // Calibrate the TSC against the PIT for nanosecond-precision time reads.
     rustos::tsc::calibrate();
@@ -212,7 +214,18 @@ Type 'help' to list available shell commands.\n\
     executor.spawn(rustos::task::Task::new(syslogd_task()));
     executor.spawn(rustos::task::Task::new(crond_task()));
     executor.spawn(rustos::task::Task::new(httpd_task()));
+    executor.spawn(rustos::task::Task::new(tcp_retx_task()));
     executor.run();
+}
+
+/// Periodic retransmit ticker for the TCP stack.  Walks every endpoint
+/// and re-sends any segments past their RTO.
+async fn tcp_retx_task() {
+    use rustos::task::timer::Timer;
+    loop {
+        Timer::new(2).await; // ~110 ms
+        rustos::net::tcp::retransmit_tick();
+    }
 }
 
 /// HTTP daemon: listens on 127.0.0.1:80, serves /var/www on every request.

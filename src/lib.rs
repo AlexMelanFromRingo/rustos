@@ -20,6 +20,7 @@ pub mod allocator;
 pub mod task;
 pub mod power;
 pub mod shell;
+pub mod shell_parser;
 pub mod fs;
 pub mod process;
 pub mod editor;
