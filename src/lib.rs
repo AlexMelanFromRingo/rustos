@@ -35,6 +35,7 @@ pub mod slab;
 pub mod slab_caches;
 pub mod net;
 pub mod syslog;
+pub mod cron;
 
 pub fn init() {
     gdt::init();

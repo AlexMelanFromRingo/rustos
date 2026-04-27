@@ -155,11 +155,34 @@ Type 'help' to list available shell commands.\n\
     println!("Type 'help' for available commands");
     println!();
 
+    // Install default crontab and load any persisted entries.
+    rustos::cron::install_defaults();
+    rustos::cron::save();
+    rustos::cron::reload();
+
     let mut executor = rustos::task::executor::Executor::new();
     executor.spawn(rustos::task::Task::new(keyboard_task()));
     executor.spawn(rustos::task::Task::new(status_task()));
     executor.spawn(rustos::task::Task::new(syslogd_task()));
+    executor.spawn(rustos::task::Task::new(crond_task()));
     executor.run();
+}
+
+/// Periodic crond: every ~5 seconds checks all crontab entries.
+async fn crond_task() {
+    use rustos::task::timer::Timer;
+
+    rustos::syslog::log(
+        rustos::syslog::Facility::Cron,
+        rustos::syslog::Severity::Notice,
+        "crond",
+        "cron daemon started".into(),
+    );
+
+    loop {
+        Timer::new(91).await;        // ~5 seconds
+        rustos::cron::tick();
+    }
 }
 
 /// Periodic flusher that copies fresh syslog entries to /var/log/messages.

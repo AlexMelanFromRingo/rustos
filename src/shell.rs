@@ -336,7 +336,7 @@ impl Shell {
                 "passwd", "su", "service", "systemctl", "runlevel", "init",
                 "telinit", "slabinfo", "login", "logout", "exit", "motd",
                 "polltest", "ifconfig", "ip", "netstat", "ss", "ping",
-                "udptest", "logger", "syslog",
+                "udptest", "logger", "syslog", "crontab",
             ];
 
             let matches: Vec<&str> = commands
@@ -670,6 +670,7 @@ impl Shell {
             "udptest" => self.cmd_udptest(args),
             "logger" => self.cmd_logger(args),
             "syslog" => self.cmd_syslog(args),
+            "crontab" => self.cmd_crontab(args),
             "test" | "[" => self.cmd_test(args),
             "true" => {},
             "false" => println!("false"),
@@ -3553,6 +3554,61 @@ impl Shell {
         let level = crate::init::INIT.lock().runlevel();
         println!("N {}", level as u8);
         println!("({})", level.as_str());
+    }
+
+    /// crontab: list, add, or remove cron jobs.
+    ///   crontab -l           : list
+    ///   crontab -a <secs> <command>
+    ///   crontab -r <index>   : remove by 1-based index
+    ///   crontab -R           : reload from /etc/crontab
+    fn cmd_crontab(&self, args: &[&str]) {
+        if args.is_empty() || args[0] == "-l" {
+            let table = crate::cron::CRONTAB.lock();
+            if table.list().is_empty() {
+                println!("(empty crontab)");
+                return;
+            }
+            println!("# IDX  INTERVAL_S  RUNS  COMMAND");
+            for (i, job) in table.list().iter().enumerate() {
+                println!("  {:<3}  {:<10}  {:<4}  {}",
+                    i + 1, job.interval_secs, job.run_count, job.command);
+            }
+            return;
+        }
+
+        match args[0] {
+            "-a" if args.len() >= 3 => {
+                let secs: u64 = match args[1].parse() {
+                    Ok(n) => n,
+                    Err(_) => { println!("crontab: invalid interval '{}'", args[1]); return; }
+                };
+                let cmd = args[2..].join(" ");
+                crate::cron::CRONTAB.lock().add(secs, &cmd);
+                crate::cron::save();
+                println!("crontab: added job (every {}s)", secs);
+            }
+            "-r" if args.len() >= 2 => {
+                let idx: usize = match args[1].parse() {
+                    Ok(n) => n,
+                    Err(_) => { println!("crontab: invalid index '{}'", args[1]); return; }
+                };
+                let removed = crate::cron::CRONTAB.lock().remove(idx);
+                if removed {
+                    crate::cron::save();
+                    println!("crontab: removed job {}", idx);
+                } else {
+                    println!("crontab: no job at index {}", idx);
+                }
+            }
+            "-R" => {
+                crate::cron::reload();
+                println!("crontab: reloaded from /etc/crontab");
+            }
+            other => {
+                println!("Usage: crontab [-l|-a SECS CMD|-r IDX|-R]");
+                println!("crontab: unknown option '{}'", other);
+            }
+        }
     }
 
     /// logger: write a syslog entry. Usage: logger [-p facility.severity] [-t tag] message
