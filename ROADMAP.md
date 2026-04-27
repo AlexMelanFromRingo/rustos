@@ -53,7 +53,8 @@ Reference architecture: Linux/Unix-like.
 - [x] `ioctl` — terminal control (TIOCGWINSZ, TCGETS, FIONREAD) ✅
 - [x] `dup` / `dup2` — file descriptor duplication ✅
 - [x] `pipe` — inter-process communication (4 KiB kernel buffer) ✅
-- [ ] `select` / `poll` / `epoll` — I/O multiplexing
+- [x] `select` / `poll` — I/O multiplexing (do_poll, do_select, fd_readiness, pollfd ABI struct, FD_SETSIZE=1024) ✅
+- [ ] `epoll` — scalable I/O multiplexing
 - [ ] `socket` / `bind` / `listen` / `accept` / `connect` — networking
 - [ ] `sendto` / `recvfrom` — network I/O
 - [x] `clock_gettime` — time (REALTIME from RTC, MONOTONIC from PIT) ✅

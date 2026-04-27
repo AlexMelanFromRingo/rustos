@@ -1128,3 +1128,55 @@ pub fn sys_ioctl(fd: usize, request: usize, _arg: usize) -> isize {
         }
     }
 }
+
+/// poll(struct pollfd *fds, nfds_t nfds, int timeout)
+///
+/// Performs the readiness check synchronously.  In our single-address-space
+/// kernel the user pointer is treated as a kernel pointer (the userspace
+/// region is identity-mapped).
+pub fn sys_poll(fds_ptr: usize, nfds: usize, timeout_ms: i32) -> isize {
+    use crate::syscall::poll::{do_poll, PollFd};
+
+    if nfds == 0 {
+        return 0;
+    }
+    if fds_ptr == 0 || nfds > 1024 {
+        return SyscallError::InvalidArgument.as_isize();
+    }
+
+    // Safety: caller is trusted; identity-mapped user memory.
+    let user_slice: &mut [PollFd] = unsafe {
+        core::slice::from_raw_parts_mut(fds_ptr as *mut PollFd, nfds)
+    };
+
+    do_poll(user_slice, timeout_ms)
+}
+
+/// select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
+///        struct timeval *timeout)
+///
+/// `timeout` here is interpreted as a millisecond integer pointer for
+/// simplicity (a real Linux ABI would expect a timeval).  Pass 0 for
+/// non-blocking, and a negative value for "wait forever".
+pub fn sys_select(
+    nfds: usize,
+    readfds: usize,
+    writefds: usize,
+    exceptfds: usize,
+    timeout_ms_ptr: usize,
+) -> isize {
+    use crate::syscall::poll::{do_select, FdSet};
+
+    let mut empty = FdSet::empty();
+    let r: *mut FdSet = if readfds == 0   { &mut empty } else { readfds as *mut FdSet };
+    let w: *mut FdSet = if writefds == 0  { &mut empty } else { writefds as *mut FdSet };
+    let e: *mut FdSet = if exceptfds == 0 { &mut empty } else { exceptfds as *mut FdSet };
+
+    let timeout_ms: i32 = if timeout_ms_ptr == 0 {
+        -1
+    } else {
+        unsafe { *(timeout_ms_ptr as *const i32) }
+    };
+
+    unsafe { do_select(nfds, &mut *r, &mut *w, &mut *e, timeout_ms) }
+}

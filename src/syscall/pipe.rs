@@ -176,6 +176,42 @@ pub fn pipe_write(id: PipeId, data: &[u8]) -> Result<usize, PipeError> {
     Ok(written)
 }
 
+/// Number of bytes currently buffered in the pipe.  Returns 0 if invalid.
+pub fn pipe_bytes_available(id: PipeId) -> usize {
+    let table = PIPE_TABLE.lock();
+    table.pipes.get(id)
+        .and_then(|s| s.as_ref())
+        .map(|p| p.available())
+        .unwrap_or(0)
+}
+
+/// True if the pipe has space for at least one byte of write.
+pub fn pipe_writable(id: PipeId) -> bool {
+    let table = PIPE_TABLE.lock();
+    match table.pipes.get(id).and_then(|s| s.as_ref()) {
+        Some(p) => p.available() < PIPE_BUF_SIZE && !p.read_closed(),
+        None => false,
+    }
+}
+
+/// True if the write end has been closed (read returns 0/EOF).
+pub fn pipe_write_closed(id: PipeId) -> bool {
+    let table = PIPE_TABLE.lock();
+    table.pipes.get(id)
+        .and_then(|s| s.as_ref())
+        .map(|p| p.write_closed())
+        .unwrap_or(true)
+}
+
+/// True if the read end has been closed (writes get EPIPE).
+pub fn pipe_read_closed(id: PipeId) -> bool {
+    let table = PIPE_TABLE.lock();
+    table.pipes.get(id)
+        .and_then(|s| s.as_ref())
+        .map(|p| p.read_closed())
+        .unwrap_or(true)
+}
+
 /// Close the read end of a pipe
 pub fn pipe_close_read(id: PipeId) {
     let mut table = PIPE_TABLE.lock();

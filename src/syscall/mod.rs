@@ -8,6 +8,7 @@ pub mod numbers;
 pub mod handler;
 pub mod filedesc;
 pub mod pipe;
+pub mod poll;
 
 /// System call numbers
 /// Based on Linux syscall ABI for x86_64
@@ -46,6 +47,8 @@ pub enum SyscallNumber {
     Ioctl = 16,
     Nanosleep = 35,
     ClockGetTime = 228,
+    Poll = 7,
+    Select = 23,
 }
 
 impl SyscallNumber {
@@ -83,6 +86,8 @@ impl SyscallNumber {
             107 => Some(SyscallNumber::GetEuid),
             108 => Some(SyscallNumber::GetEgid),
             228 => Some(SyscallNumber::ClockGetTime),
+            7 => Some(SyscallNumber::Poll),
+            23 => Some(SyscallNumber::Select),
             _ => None,
         }
     }
@@ -176,5 +181,7 @@ pub fn syscall_dispatcher(
         SyscallNumber::GetEuid => handler::sys_getuid(),   // Same as getuid (single user)
         SyscallNumber::GetEgid => handler::sys_getgid(),   // Same as getgid (single user)
         SyscallNumber::ClockGetTime => handler::sys_clock_gettime(arg1, arg2),
+        SyscallNumber::Poll => handler::sys_poll(arg1, arg2, arg3 as i32),
+        SyscallNumber::Select => handler::sys_select(arg1, arg2, arg3, arg4, arg5),
     }
 }

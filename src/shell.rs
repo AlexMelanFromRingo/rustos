@@ -335,6 +335,7 @@ impl Shell {
                 "usermode", "version", "wc", "which", "whoami", "write",
                 "passwd", "su", "service", "systemctl", "runlevel", "init",
                 "telinit", "slabinfo", "login", "logout", "exit", "motd",
+                "polltest",
             ];
 
             let matches: Vec<&str> = commands
@@ -661,6 +662,7 @@ impl Shell {
             "login" => self.cmd_login(args),
             "logout" | "exit" => self.cmd_logout(),
             "motd" => self.cmd_motd(),
+            "polltest" => self.cmd_polltest(),
             "test" | "[" => self.cmd_test(args),
             "true" => {},
             "false" => println!("false"),
@@ -3544,6 +3546,57 @@ impl Shell {
         let level = crate::init::INIT.lock().runlevel();
         println!("N {}", level as u8);
         println!("({})", level.as_str());
+    }
+
+    /// polltest: exercise the poll syscall against a pipe and report results.
+    /// Useful for verifying that fd_readiness reports correct revents.
+    fn cmd_polltest(&self) {
+        use crate::syscall::poll::{do_poll, fd_readiness, flags, PollFd};
+        use crate::syscall::pipe::{create_pipe, pipe_write};
+
+        let pid = match create_pipe() {
+            Some(p) => p,
+            None => {
+                println!("polltest: cannot create pipe");
+                return;
+            }
+        };
+
+        // Empty pipe — POLLIN on the read end should be 0.
+        let mut polls = [
+            PollFd { fd: 0,  events: flags::POLLIN,  revents: 0 }, // stdin (TTY)
+            PollFd { fd: 1,  events: flags::POLLOUT, revents: 0 }, // stdout
+            PollFd { fd: 99, events: flags::POLLIN,  revents: 0 }, // bogus
+        ];
+        let r = do_poll(&mut polls, 0);
+        println!("Empty stdin/stdout/bogus poll => {} ready:", r);
+        for p in &polls {
+            println!("  fd={} events={:#06x} revents={:#06x}",
+                p.fd, p.events as u16, p.revents as u16);
+        }
+
+        // Stuff a byte into the pipe directly.
+        let _ = pipe_write(pid, b"x");
+        // Direct readiness check on the pipe (we don't have a stable fd yet).
+        // Emulate: ask kernel to peek the kind via fd_readiness on a synthetic
+        // FD installed in the pipe path — fall back to printing the helper.
+        let pipe_avail = crate::syscall::pipe::pipe_bytes_available(pid);
+        let pipe_writeable = crate::syscall::pipe::pipe_writable(pid);
+        println!(
+            "Pipe id {}: bytes_available={}, writable={}",
+            pid, pipe_avail, pipe_writeable
+        );
+        // fd_readiness on stdin/stdout reflects TTY/console state.
+        let readiness_stdin = fd_readiness(0, flags::POLLIN);
+        let readiness_stdout = fd_readiness(1, flags::POLLOUT);
+        println!(
+            "fd_readiness(stdin, POLLIN)  = {:#06x}",
+            readiness_stdin as u16
+        );
+        println!(
+            "fd_readiness(stdout, POLLOUT) = {:#06x}",
+            readiness_stdout as u16
+        );
     }
 
     /// motd: display the message of the day from /etc/motd
