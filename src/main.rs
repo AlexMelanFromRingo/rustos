@@ -158,7 +158,27 @@ Type 'help' to list available shell commands.\n\
     let mut executor = rustos::task::executor::Executor::new();
     executor.spawn(rustos::task::Task::new(keyboard_task()));
     executor.spawn(rustos::task::Task::new(status_task()));
+    executor.spawn(rustos::task::Task::new(syslogd_task()));
     executor.run();
+}
+
+/// Periodic flusher that copies fresh syslog entries to /var/log/messages.
+async fn syslogd_task() {
+    use rustos::task::timer::Timer;
+
+    // Drop a startup record so /var/log/messages is non-empty after boot.
+    rustos::syslog::log(
+        rustos::syslog::Facility::Syslog,
+        rustos::syslog::Severity::Notice,
+        "syslogd",
+        "syslog daemon started".into(),
+    );
+
+    loop {
+        // Flush every ~10 seconds (PIT ~18.2 Hz).
+        Timer::new(182).await;
+        rustos::syslog::flush_to_messages_log("rustos");
+    }
 }
 
 async fn status_task() {

@@ -336,7 +336,7 @@ impl Shell {
                 "passwd", "su", "service", "systemctl", "runlevel", "init",
                 "telinit", "slabinfo", "login", "logout", "exit", "motd",
                 "polltest", "ifconfig", "ip", "netstat", "ss", "ping",
-                "udptest",
+                "udptest", "logger", "syslog",
             ];
 
             let matches: Vec<&str> = commands
@@ -668,6 +668,8 @@ impl Shell {
             "netstat" | "ss" => self.cmd_netstat(args),
             "ping" => self.cmd_ping(args),
             "udptest" => self.cmd_udptest(args),
+            "logger" => self.cmd_logger(args),
+            "syslog" => self.cmd_syslog(args),
             "test" | "[" => self.cmd_test(args),
             "true" => {},
             "false" => println!("false"),
@@ -3551,6 +3553,64 @@ impl Shell {
         let level = crate::init::INIT.lock().runlevel();
         println!("N {}", level as u8);
         println!("({})", level.as_str());
+    }
+
+    /// logger: write a syslog entry. Usage: logger [-p facility.severity] [-t tag] message
+    fn cmd_logger(&self, args: &[&str]) {
+        if args.is_empty() {
+            println!("Usage: logger [-p fac.sev] [-t tag] <message>");
+            return;
+        }
+
+        let mut facility = crate::syslog::Facility::User;
+        let mut severity = crate::syslog::Severity::Info;
+        let mut tag = String::from("user");
+        let mut msg_parts: Vec<&str> = Vec::new();
+
+        let mut i = 0;
+        while i < args.len() {
+            match args[i] {
+                "-p" if i + 1 < args.len() => {
+                    let spec = args[i + 1];
+                    if let Some(dot) = spec.find('.') {
+                        if let Some(f) = crate::syslog::Facility::parse(&spec[..dot]) {
+                            facility = f;
+                        }
+                        if let Some(s) = crate::syslog::Severity::parse(&spec[dot + 1..]) {
+                            severity = s;
+                        }
+                    }
+                    i += 2;
+                }
+                "-t" if i + 1 < args.len() => {
+                    tag = String::from(args[i + 1]);
+                    i += 2;
+                }
+                other => {
+                    msg_parts.push(other);
+                    i += 1;
+                }
+            }
+        }
+
+        let message = msg_parts.join(" ");
+        crate::syslog::log(facility, severity, &tag, message);
+    }
+
+    /// syslog: dump in-memory syslog ring (most recent N entries)
+    fn cmd_syslog(&self, args: &[&str]) {
+        let count: usize = args.first()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(50);
+        let entries = crate::syslog::SYSLOG.lock().snapshot();
+        let start = entries.len().saturating_sub(count);
+        let host = self.hostname.clone();
+        for e in entries.iter().skip(start) {
+            println!("{}", e.format_line(&host));
+        }
+        if entries.is_empty() {
+            println!("syslog: empty");
+        }
     }
 
     /// ifconfig / ip: list network interfaces.

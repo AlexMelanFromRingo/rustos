@@ -176,6 +176,7 @@ Reference architecture: Linux/Unix-like.
 - [x] `top` — process monitor (one-shot) ✅
 - [x] `mount` / `umount` — filesystem mounting (FAT32) ✅
 - [x] `dmesg` — kernel log (ring buffer, 512 entries, log levels) ✅
+- [x] `syslog` / `logger` — RFC 3164 ring buffer with periodic flush to /var/log/messages ✅
 
 ### 5.4 Package Manager
 - [ ] Simple package format (.tar.gz with manifest)
