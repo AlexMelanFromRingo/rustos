@@ -166,24 +166,35 @@ pub fn syscall_dispatcher(
     arg5: usize,
     arg6: usize,
 ) -> isize {
-    // Seccomp gate: if the current process has a filter installed, consult
-    // it before dispatching.  Errno → return -EPERM; Kill → terminate.
+    // Seccomp gate: if the current process has a filter installed, run
+    // its BPF program against the syscall args.  See src/seccomp.rs.
     {
         let pid = crate::process::PROCESS_MANAGER.lock().current_pid.unwrap_or(0);
-        match crate::seccomp::check(pid, syscall_num) {
-            crate::seccomp::Action::Allow => {}
-            crate::seccomp::Action::Log => {
+        let args = [arg1 as u64, arg2 as u64, arg3 as u64,
+                    arg4 as u64, arg5 as u64, arg6 as u64];
+        match crate::seccomp::check(pid, syscall_num, args) {
+            crate::seccomp::Decision::Allow => {}
+            crate::seccomp::Decision::Log => {
                 crate::syslog::log(
                     crate::syslog::Facility::Authpriv,
                     crate::syslog::Severity::Notice,
                     "seccomp",
-                    alloc::format!("pid={} sc={}", pid, syscall_num),
+                    alloc::format!("pid={} sc={} (LOG)", pid, syscall_num),
                 );
             }
-            crate::seccomp::Action::Errno => {
+            crate::seccomp::Decision::Errno(errno) => {
+                return -(errno as isize);
+            }
+            crate::seccomp::Decision::Trap => {
+                crate::syslog::log(
+                    crate::syslog::Facility::Authpriv,
+                    crate::syslog::Severity::Warning,
+                    "seccomp",
+                    alloc::format!("pid={} sc={} (TRAP)", pid, syscall_num),
+                );
                 return SyscallError::PermissionDenied.as_isize();
             }
-            crate::seccomp::Action::Kill => {
+            crate::seccomp::Decision::Kill => {
                 let mut pm = crate::process::PROCESS_MANAGER.lock();
                 pm.exit(pid, 137);
                 return SyscallError::PermissionDenied.as_isize();

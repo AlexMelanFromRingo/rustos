@@ -11,7 +11,7 @@
 //!   60               echo cron-fire-1m
 //!   3600             echo cron-fire-1h
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use spin::Mutex;
 
@@ -111,28 +111,53 @@ pub fn install_defaults() {
     table.add(300, "echo cron: 5-minute heartbeat");
 }
 
-/// Tick-driven dispatcher.  Walks every job, fires the due ones, logs
-/// the firing through syslog (facility=cron, severity=info).  Returns the
-/// number of jobs fired this tick.
+/// Tick-driven dispatcher.  Walks every job, fires the due ones, queues
+/// the command for the shell to run, and logs the dispatch through syslog
+/// (facility=cron, severity=info).  Returns the number of jobs fired.
 pub fn tick() -> usize {
     let now = crate::task::timer::current_ticks();
     let mut fired = 0usize;
-    let mut table = CRONTAB.lock();
-    for job in table.jobs.iter_mut() {
-        if job.is_due(now) {
-            job.last_run_tick = now;
-            job.run_count += 1;
-            fired += 1;
-            // For now, "running" means logging the command — once the kernel
-            // has a real exec path for shell scripts, this is where we'd
-            // spawn it.
+    let mut to_dispatch: alloc::vec::Vec<(u64, alloc::string::String)> = alloc::vec::Vec::new();
+    {
+        let mut table = CRONTAB.lock();
+        for job in table.jobs.iter_mut() {
+            if job.is_due(now) {
+                job.last_run_tick = now;
+                job.run_count += 1;
+                fired += 1;
+                to_dispatch.push((job.run_count, job.command.clone()));
+            }
+        }
+    }
+    // Dispatch outside the lock so command execution can take CRONTAB later
+    // without deadlocking against itself.
+    for (run, cmd) in to_dispatch {
+        crate::syslog::log(
+            crate::syslog::Facility::Cron,
+            crate::syslog::Severity::Info,
+            "CRON",
+            alloc::format!("({}) CMD ({})", run, cmd),
+        );
+        // Actually execute: build a transient Shell, capture output, log it.
+        let output = run_in_transient_shell(&cmd);
+        if !output.trim().is_empty() {
             crate::syslog::log(
                 crate::syslog::Facility::Cron,
                 crate::syslog::Severity::Info,
-                "CRON",
-                alloc::format!("({}) CMD ({})", job.run_count, job.command),
+                "CRON-OUT",
+                output.trim_end_matches('\n').to_string(),
             );
         }
     }
     fired
+}
+
+/// Run `cmd` on a one-shot Shell, returning its captured output.  Used by
+/// cron and other background dispatchers that don't have the user's shell.
+fn run_in_transient_shell(cmd: &str) -> alloc::string::String {
+    crate::vga_buffer::start_capture();
+    let mut sh = crate::shell::Shell::new();
+    sh.set_buffer_for(cmd);
+    sh.execute();
+    crate::vga_buffer::stop_capture()
 }

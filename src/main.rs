@@ -101,6 +101,11 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // Capabilities table: root gets all, others get none.
     rustos::capability::init();
 
+    // CPU hardening: SMEP / SMAP / canary seed.
+    rustos::hardening::enable();
+    klog_info!("hardening: SMEP={} SMAP={}",
+        rustos::hardening::smep_enabled(), rustos::hardening::smap_enabled());
+
     // Calibrate the TSC against the PIT for nanosecond-precision time reads.
     rustos::tsc::calibrate();
     klog_info!("TSC calibrated at {} Hz", rustos::tsc::freq_hz());
@@ -351,6 +356,16 @@ async fn keyboard_task() {
     shell.print_prompt();
 
     while let Some(event) = input_stream.next().await {
+        // Drain any commands queued by background tasks (cron, init, etc.).
+        // Most subsystems run their command directly via a transient Shell,
+        // but the queue is still here for callers that want to interleave
+        // with the user's actual shell session.
+        if !rustos::shell::SHELL_COMMAND_QUEUE.lock().is_empty() {
+            print!("\n");
+            shell.drain_queued_commands();
+            shell.print_prompt();
+        }
+
         // Decode the event into a key action
         let decoded_key = match event {
             InputEvent::Scancode(scancode) => {

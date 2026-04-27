@@ -45,6 +45,7 @@ pub mod seccomp;
 pub mod capability;
 pub mod partition;
 pub mod pkg;
+pub mod hardening;
 
 pub fn init() {
     gdt::init();

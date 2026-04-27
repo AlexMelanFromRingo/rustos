@@ -83,6 +83,12 @@ pub struct Process {
     /// Entry == 0 (SIG_DFL) means default action; 1 (SIG_IGN) means ignore;
     /// any other value is the user-mode handler entry point.
     pub sigactions: [u64; 32],
+
+    /// Effective Linux-style capabilities held by this process.
+    /// Stored as a raw u64 bitmap.  See `crate::capability::Capability`.
+    pub cap_effective: u64,
+    /// Permitted set: maximum the process can ever raise effective to.
+    pub cap_permitted: u64,
 }
 
 impl Process {
@@ -116,6 +122,8 @@ impl Process {
             pgid: pid,
             sid: pid,
             sigactions: [0u64; 32],
+            cap_effective: u64::MAX, // kernel processes default to full caps
+            cap_permitted: u64::MAX,
         }
     }
 
@@ -157,6 +165,8 @@ impl Process {
             pgid: pid,
             sid: pid,
             sigactions: [0u64; 32],
+            cap_effective: u64::MAX, // kernel processes default to full caps
+            cap_permitted: u64::MAX,
         }
     }
 
@@ -193,6 +203,8 @@ impl Process {
             pgid: self.pgid, // child inherits parent's group
             sid: self.sid,   // and session
             sigactions: self.sigactions, // and signal handlers
+            cap_effective: self.cap_effective, // and capability sets
+            cap_permitted: self.cap_permitted,
         }
     }
 }

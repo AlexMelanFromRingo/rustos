@@ -1,13 +1,17 @@
 //! Linux-style capabilities.
 //!
 //! A capability is a single privileged operation a process is allowed to
-//! perform.  By default root has all caps and non-root has none, which
-//! matches Linux's traditional behaviour.  setcap can grant or drop
-//! individual caps.
+//! perform.  Capabilities live on the process control block (effective
+//! and permitted sets, mirroring the kernel's `task_struct.cred->cap_*`).
+//! A separate per-uid table holds the *initial* set granted to a process
+//! that runs as a given uid: when a process changes uid (setuid, su, sudo),
+//! its effective set is recomputed from the per-uid seed.
 //!
-//! This module owns a per-process capability bitmap (effective set only;
-//! permitted/inheritable/bounding sets are not modelled separately yet).
-//! Subsystems consult [`has_cap`] before performing privileged operations.
+//! Subsystems consult [`current_has`] / [`check`] before performing
+//! privileged operations.  Both look at the running process's
+//! `cap_effective`, falling back to "uid 0 has all caps" when no process
+//! is bound (e.g. early boot, kernel-mode shell command without a running
+//! user process).
 
 use spin::Mutex;
 use alloc::collections::BTreeMap;
@@ -15,26 +19,26 @@ use alloc::collections::BTreeMap;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum Capability {
-    Chown          = 0,  // CAP_CHOWN
-    DacOverride    = 1,  // CAP_DAC_OVERRIDE
-    DacReadSearch  = 2,  // CAP_DAC_READ_SEARCH
-    Fowner         = 3,  // CAP_FOWNER
-    Fsetid         = 4,  // CAP_FSETID
-    Kill           = 5,  // CAP_KILL
-    Setgid         = 6,  // CAP_SETGID
-    Setuid         = 7,  // CAP_SETUID
-    Setpcap        = 8,  // CAP_SETPCAP
-    NetBindService = 10, // CAP_NET_BIND_SERVICE
-    NetRaw         = 13, // CAP_NET_RAW
-    NetAdmin       = 12, // CAP_NET_ADMIN
-    SysModule      = 16, // CAP_SYS_MODULE
-    SysAdmin       = 21, // CAP_SYS_ADMIN
-    SysBoot        = 22, // CAP_SYS_BOOT
-    SysNice        = 23, // CAP_SYS_NICE
-    SysResource    = 24, // CAP_SYS_RESOURCE
-    SysTime        = 25, // CAP_SYS_TIME
-    Mknod          = 27, // CAP_MKNOD
-    Audit          = 30, // CAP_AUDIT_WRITE
+    Chown          = 0,
+    DacOverride    = 1,
+    DacReadSearch  = 2,
+    Fowner         = 3,
+    Fsetid         = 4,
+    Kill           = 5,
+    Setgid         = 6,
+    Setuid         = 7,
+    Setpcap        = 8,
+    NetBindService = 10,
+    NetAdmin       = 12,
+    NetRaw         = 13,
+    SysModule      = 16,
+    SysAdmin       = 21,
+    SysBoot        = 22,
+    SysNice        = 23,
+    SysResource    = 24,
+    SysTime        = 25,
+    Mknod          = 27,
+    Audit          = 30,
 }
 
 impl Capability {
@@ -90,6 +94,18 @@ impl Capability {
             Capability::Audit => "CAP_AUDIT_WRITE",
         }
     }
+
+    pub fn all() -> &'static [Capability] {
+        &[
+            Capability::Chown, Capability::DacOverride, Capability::DacReadSearch,
+            Capability::Fowner, Capability::Fsetid, Capability::Kill,
+            Capability::Setgid, Capability::Setuid, Capability::Setpcap,
+            Capability::NetBindService, Capability::NetRaw, Capability::NetAdmin,
+            Capability::SysModule, Capability::SysAdmin, Capability::SysBoot,
+            Capability::SysNice, Capability::SysResource, Capability::SysTime,
+            Capability::Mknod, Capability::Audit,
+        ]
+    }
 }
 
 /// Bitmap of granted capabilities for one principal.
@@ -107,8 +123,10 @@ impl CapSet {
     pub fn from_raw(b: u64) -> Self { CapSet { bits: b } }
 }
 
-/// Per-uid capability set (Linux puts caps on processes; we put them on
-/// uids since we don't track per-process state for non-running PIDs).
+/// Per-uid initial-cap table.  Acts as the seed used when a process is
+/// created or its uid changes.  Linux's equivalent is the file capabilities
+/// stored alongside binaries plus the process's `cap_inheritable` set; for
+/// our model the per-uid seed is a reasonable approximation.
 pub struct CapTable {
     by_uid: BTreeMap<u32, CapSet>,
 }
@@ -117,7 +135,7 @@ impl CapTable {
     pub const fn new() -> Self { CapTable { by_uid: BTreeMap::new() } }
 
     pub fn install_defaults(&mut self) {
-        // Root has all caps; everyone else starts with none.
+        // Root (uid 0) seeds with full caps; everyone else with empty set.
         self.by_uid.insert(0, CapSet::full());
     }
 
@@ -140,18 +158,60 @@ pub static CAPS: Mutex<CapTable> = Mutex::new(CapTable::new());
 
 pub fn init() { CAPS.lock().install_defaults(); }
 
-/// True if the current credentials have `c`.
-pub fn current_has(c: Capability) -> bool {
+/// Re-seed the running process's capability sets from the per-uid table.
+/// Called by setuid/su/sudo paths after switching CURRENT_CREDS.
+pub fn reseed_for_uid(uid: u32) {
+    let seed = CAPS.lock().for_uid(uid);
+    let mut pm = crate::process::PROCESS_MANAGER.lock();
+    if let Some(proc_) = pm.current_process_mut() {
+        proc_.cap_effective = seed.raw();
+        proc_.cap_permitted = seed.raw();
+    }
+}
+
+/// Return the running process's effective cap set, or — when there is no
+/// running user process — the per-uid seed for the current credentials.
+fn current_effective() -> CapSet {
+    let pm = crate::process::PROCESS_MANAGER.lock();
+    if let Some(proc_) = pm.current_process() {
+        return CapSet::from_raw(proc_.cap_effective);
+    }
+    drop(pm);
     let creds = crate::users::CURRENT_CREDS.lock();
     let uid = creds.euid;
     drop(creds);
-    CAPS.lock().for_uid(uid).has(c)
+    CAPS.lock().for_uid(uid)
 }
 
-/// Convenience: returns true if root, or has the named cap.
+/// True if the current credentials' effective set holds `c`.
+pub fn current_has(c: Capability) -> bool {
+    current_effective().has(c)
+}
+
+/// Convenience check used by privileged subsystems.
+/// Returns true for "uid 0 OR has the cap".
 pub fn check(c: Capability) -> bool {
-    let creds = crate::users::CURRENT_CREDS.lock();
-    if creds.euid == 0 { return true; }
-    drop(creds);
+    {
+        let creds = crate::users::CURRENT_CREDS.lock();
+        if creds.euid == 0 { return true; }
+    }
     current_has(c)
 }
+
+/// Drop a capability from the running process's effective + permitted sets.
+/// CAP_SETPCAP is required to call this for any cap other than the one
+/// being dropped from oneself (not enforced here yet).
+pub fn drop_self(c: Capability) {
+    let mut pm = crate::process::PROCESS_MANAGER.lock();
+    if let Some(proc_) = pm.current_process_mut() {
+        let mut eff = CapSet::from_raw(proc_.cap_effective);
+        let mut perm = CapSet::from_raw(proc_.cap_permitted);
+        eff.revoke(c); perm.revoke(c);
+        proc_.cap_effective = eff.raw();
+        proc_.cap_permitted = perm.raw();
+    }
+}
+
+/// Effective set of the running process or per-uid fallback.  Used by
+/// the `getcap` shell command for display.
+pub fn current_effective_raw() -> u64 { current_effective().raw() }

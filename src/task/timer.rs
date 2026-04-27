@@ -1,23 +1,47 @@
+//! PIT-driven kernel timer + Timer futures.
+//!
+//! Each timer interrupt bumps `TICKS` and wakes every task that registered
+//! a waker for the next tick.  An earlier version of this module used a
+//! single `AtomicWaker`, which silently starved every-but-one Timer future
+//! whenever multiple background tasks (cron, syslogd, httpd, status, …)
+//! were waiting concurrently.  We now keep a `Vec<Waker>` so all sleepers
+//! are woken on every tick.
+
 use core::{
     pin::Pin,
     future::Future,
-    task::{Context, Poll},
+    task::{Context, Poll, Waker},
     sync::atomic::{AtomicU64, Ordering},
 };
-use futures_util::task::AtomicWaker;
+use alloc::vec::Vec;
+use spin::Mutex;
 
 static TICKS: AtomicU64 = AtomicU64::new(0);
 
-/// Global waker for timer-based futures.
-/// When a timer tick occurs, all pending timer futures are woken
-/// so the executor re-polls them.
-static TIMER_WAKER: AtomicWaker = AtomicWaker::new();
+static WAKERS: Mutex<Vec<Waker>> = Mutex::new(Vec::new());
 
-/// Called by timer interrupt handler
+fn register_waker(w: &Waker) {
+    let mut list = WAKERS.lock();
+    if !list.iter().any(|other| other.will_wake(w)) {
+        list.push(w.clone());
+    }
+}
+
+fn drain_and_wake_all() {
+    let drained: Vec<Waker> = {
+        let mut list = WAKERS.lock();
+        core::mem::take(&mut *list)
+    };
+    for w in drained {
+        w.wake();
+    }
+}
+
+/// Called by the timer interrupt handler.  Bumps the tick counter and
+/// wakes every Timer future that registered for the next firing.
 pub fn tick() {
     TICKS.fetch_add(1, Ordering::Relaxed);
-    // Wake any futures waiting on timer
-    TIMER_WAKER.wake();
+    drain_and_wake_all();
 }
 
 /// Get current tick count
@@ -25,7 +49,7 @@ pub fn current_ticks() -> u64 {
     TICKS.load(Ordering::Relaxed)
 }
 
-/// Sleep for approximately N timer ticks
+/// Sleep for approximately N timer ticks.
 pub struct Timer {
     wake_time: u64,
 }
@@ -43,17 +67,15 @@ impl Future for Timer {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> {
         if current_ticks() >= self.wake_time {
-            Poll::Ready(())
-        } else {
-            // Register waker so timer interrupt can wake us
-            TIMER_WAKER.register(cx.waker());
-            // Re-check after registering to avoid race condition
-            if current_ticks() >= self.wake_time {
-                TIMER_WAKER.take();
-                Poll::Ready(())
-            } else {
-                Poll::Pending
-            }
+            return Poll::Ready(());
         }
+        register_waker(cx.waker());
+        // Re-check after registering to avoid the classic register/notify
+        // race where the tick fires between our first check and our
+        // registration.
+        if current_ticks() >= self.wake_time {
+            return Poll::Ready(());
+        }
+        Poll::Pending
     }
 }

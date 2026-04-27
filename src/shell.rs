@@ -1,10 +1,23 @@
 /// Simple command-line shell for RustOS
+use alloc::collections::VecDeque;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use spin::Mutex;
 use crate::{print, println};
 
 const MAX_HISTORY: usize = 50;
+
+/// Cross-task command queue: background tasks (cron, init, etc.) push command
+/// strings here.  The shell drains and runs them between user input events.
+pub static SHELL_COMMAND_QUEUE: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
+
+/// Submit a command string for the shell to execute when next idle.
+/// Returns true if queued.
+pub fn enqueue_command(cmd: &str) -> bool {
+    SHELL_COMMAND_QUEUE.lock().push_back(cmd.to_string());
+    true
+}
 /// Job status for shell job control
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobStatus {
@@ -501,6 +514,33 @@ impl Shell {
                 Some(self.saved_buffer.clone())
             }
         }
+    }
+
+    /// Drain the cross-task command queue, running each pending command in
+    /// this shell.  Called by the keyboard loop between input events so
+    /// background tasks (cron, etc.) can submit work.
+    pub fn drain_queued_commands(&mut self) {
+        loop {
+            let cmd = match SHELL_COMMAND_QUEUE.lock().pop_front() {
+                Some(c) => c,
+                None => break,
+            };
+            self.buffer = cmd;
+            self.cursor_pos = self.buffer.len();
+            self.execute();
+        }
+    }
+
+    /// True iff there is work pending in the queue.
+    pub fn has_queued_commands() -> bool {
+        !SHELL_COMMAND_QUEUE.lock().is_empty()
+    }
+
+    /// Set the input buffer to `cmd` (used by external dispatchers that
+    /// will then call .execute()).
+    pub fn set_buffer_for(&mut self, cmd: &str) {
+        self.buffer = cmd.to_string();
+        self.cursor_pos = self.buffer.len();
     }
 
     pub fn execute(&mut self) {
@@ -3593,6 +3633,7 @@ impl Shell {
             creds.egid = target.gid;
             creds.username = target.name.clone();
         }
+        crate::capability::reseed_for_uid(target.uid);
         crate::syslog::log(
             crate::syslog::Facility::Authpriv,
             crate::syslog::Severity::Notice,
@@ -3608,12 +3649,15 @@ impl Shell {
         self.execute();
 
         // Restore previous credentials.
-        let mut creds = crate::users::CURRENT_CREDS.lock();
-        creds.uid = prev.0;
-        creds.gid = prev.1;
-        creds.euid = prev.2;
-        creds.egid = prev.3;
-        creds.username = prev.4;
+        {
+            let mut creds = crate::users::CURRENT_CREDS.lock();
+            creds.uid = prev.0;
+            creds.gid = prev.1;
+            creds.euid = prev.2;
+            creds.egid = prev.3;
+            creds.username = prev.4;
+        }
+        crate::capability::reseed_for_uid(prev.2);
     }
 
     /// Switch user (su)
@@ -3655,6 +3699,7 @@ impl Shell {
         creds.egid = user.gid;
         creds.username = user.name.clone();
         drop(creds);
+        crate::capability::reseed_for_uid(user.uid);
 
         // Move to user's home directory if it exists
         if !user.home.is_empty() {
@@ -4184,38 +4229,42 @@ impl Shell {
         }
     }
 
-    /// getcap: print the capabilities granted to a uid.
-    ///   getcap [UID]
+    /// getcap: print the running process's effective+permitted set, or
+    /// the per-uid seed for a given uid.
+    ///   getcap            -> running process effective set
+    ///   getcap UID        -> per-uid seed for UID
     fn cmd_getcap(&self, args: &[&str]) {
-        let uid: u32 = args.first().and_then(|s| s.parse().ok())
-            .unwrap_or_else(|| crate::users::CURRENT_CREDS.lock().euid);
+        if args.is_empty() {
+            // Running process's view.
+            let pm = crate::process::PROCESS_MANAGER.lock();
+            let (eff, perm) = match pm.current_process() {
+                Some(p) => (p.cap_effective, p.cap_permitted),
+                None => {
+                    drop(pm);
+                    let raw = crate::capability::current_effective_raw();
+                    (raw, raw)
+                }
+            };
+            println!("(current process)");
+            println!("  effective:  0x{:016x}", eff);
+            println!("  permitted:  0x{:016x}", perm);
+            for c in crate::capability::Capability::all() {
+                let bit = 1u64 << (*c as u32);
+                if eff & bit != 0 {
+                    println!("  + {}", c.name());
+                }
+            }
+            return;
+        }
+
+        let uid: u32 = match args[0].parse() {
+            Ok(n) => n,
+            Err(_) => { println!("getcap: bad uid"); return; }
+        };
         let caps = crate::capability::CAPS.lock().for_uid(uid);
-        // Decode bits using the known set.
-        let all = [
-            crate::capability::Capability::Chown,
-            crate::capability::Capability::DacOverride,
-            crate::capability::Capability::DacReadSearch,
-            crate::capability::Capability::Fowner,
-            crate::capability::Capability::Fsetid,
-            crate::capability::Capability::Kill,
-            crate::capability::Capability::Setgid,
-            crate::capability::Capability::Setuid,
-            crate::capability::Capability::Setpcap,
-            crate::capability::Capability::NetBindService,
-            crate::capability::Capability::NetRaw,
-            crate::capability::Capability::NetAdmin,
-            crate::capability::Capability::SysModule,
-            crate::capability::Capability::SysAdmin,
-            crate::capability::Capability::SysBoot,
-            crate::capability::Capability::SysNice,
-            crate::capability::Capability::SysResource,
-            crate::capability::Capability::SysTime,
-            crate::capability::Capability::Mknod,
-            crate::capability::Capability::Audit,
-        ];
-        println!("uid={} caps=0x{:016x}", uid, caps.raw());
-        for c in all {
-            if caps.has(c) {
+        println!("uid={} seed=0x{:016x}", uid, caps.raw());
+        for c in crate::capability::Capability::all() {
+            if caps.has(*c) {
                 println!("  + {}", c.name());
             }
         }
@@ -4252,27 +4301,35 @@ impl Shell {
         };
         if grant {
             crate::capability::CAPS.lock().grant(uid, cap);
-            println!("setcap: granted {} to uid {}", cap.name(), uid);
+            println!("setcap: granted {} to uid {} (seed)", cap.name(), uid);
         } else {
             crate::capability::CAPS.lock().revoke(uid, cap);
-            println!("setcap: revoked {} from uid {}", cap.name(), uid);
+            println!("setcap: revoked {} from uid {} (seed)", cap.name(), uid);
+        }
+        // If the running process is this uid, refresh its effective set so the
+        // change takes effect immediately rather than on next setuid.
+        let cur_euid = crate::users::CURRENT_CREDS.lock().euid;
+        if cur_euid == uid {
+            crate::capability::reseed_for_uid(uid);
         }
     }
 
-    /// seccomp: install / inspect a per-process syscall filter.
-    ///   seccomp                                : show count of installed filters
-    ///   seccomp install PID DEFAULT_ACTION     : install filter for PID with default
-    ///   seccomp set PID SYSCALL ACTION         : per-syscall override
-    ///   seccomp remove PID                     : drop the filter
-    /// Actions: allow, errno, kill, log
+    /// seccomp: install / inspect a per-process BPF syscall filter.
+    ///   seccomp                                  : count of installed filters
+    ///   seccomp allowlist PID SC1,SC2,... ACTION : install BPF allowlist
+    ///   seccomp remove PID                       : drop the filter
+    ///   seccomp test PID SC                      : run the filter on (SC, args=0)
+    /// Actions: allow, errno, kill, log, trap
     fn cmd_seccomp(&self, args: &[&str]) {
-        use crate::seccomp::{Action, Filter, FILTERS};
-        let parse_action = |s: &str| -> Option<Action> {
+        use crate::seccomp::{action, build_allowlist, check, Decision, FILTERS};
+
+        let parse_action = |s: &str| -> Option<u32> {
             match s {
-                "allow" => Some(Action::Allow),
-                "errno" => Some(Action::Errno),
-                "kill"  => Some(Action::Kill),
-                "log"   => Some(Action::Log),
+                "allow" => Some(action::RET_ALLOW),
+                "errno" => Some(action::RET_ERRNO | 13), // EACCES
+                "kill"  => Some(action::RET_KILL_PROCESS),
+                "log"   => Some(action::RET_LOG),
+                "trap"  => Some(action::RET_TRAP),
                 _ => None,
             }
         };
@@ -4283,27 +4340,18 @@ impl Shell {
             return;
         }
         match args[0] {
-            "install" if args.len() >= 3 => {
+            "allowlist" if args.len() >= 4 => {
                 let pid: usize = match args[1].parse() { Ok(n) => n, Err(_) => { println!("seccomp: bad pid"); return; }};
-                let act = match parse_action(args[2]) { Some(a) => a, None => { println!("seccomp: bad action"); return; }};
-                let f = Filter::new(act);
-                if FILTERS.lock().install(pid, f) {
-                    println!("seccomp: filter installed for pid {} (default {:?})", pid, act);
+                let allowed: alloc::vec::Vec<u32> = args[2].split(',')
+                    .filter_map(|s| s.parse().ok())
+                    .collect();
+                let act = match parse_action(args[3]) { Some(a) => a, None => { println!("seccomp: bad action"); return; }};
+                let prog = build_allowlist(&allowed, act);
+                if FILTERS.lock().install(pid, prog) {
+                    println!("seccomp: BPF allowlist of {} syscalls installed for pid {} (default action 0x{:x})",
+                        allowed.len(), pid, act);
                 } else {
                     println!("seccomp: filter table full");
-                }
-            }
-            "set" if args.len() >= 4 => {
-                let pid: usize = match args[1].parse() { Ok(n) => n, Err(_) => { println!("seccomp: bad pid"); return; }};
-                let sc: usize = match args[2].parse() { Ok(n) => n, Err(_) => { println!("seccomp: bad syscall"); return; }};
-                let act = match parse_action(args[3]) { Some(a) => a, None => { println!("seccomp: bad action"); return; }};
-                let mut t = FILTERS.lock();
-                if let Some(mut f) = t.for_pid(pid) {
-                    f.set(sc, act);
-                    t.install(pid, f);
-                    println!("seccomp: pid {} sc {} -> {:?}", pid, sc, act);
-                } else {
-                    println!("seccomp: no filter for pid {}", pid);
                 }
             }
             "remove" if args.len() >= 2 => {
@@ -4311,7 +4359,20 @@ impl Shell {
                 FILTERS.lock().remove(pid);
                 println!("seccomp: removed filter for pid {}", pid);
             }
-            _ => println!("Usage: seccomp [install PID ACTION | set PID SYSCALL ACTION | remove PID]"),
+            "test" if args.len() >= 3 => {
+                let pid: usize = args[1].parse().unwrap_or(0);
+                let sc: usize = args[2].parse().unwrap_or(0);
+                let dec = check(pid, sc, [0u64; 6]);
+                let label: &str = match dec {
+                    Decision::Allow => "ALLOW",
+                    Decision::Log => "LOG",
+                    Decision::Trap => "TRAP",
+                    Decision::Kill => "KILL",
+                    Decision::Errno(_) => "ERRNO",
+                };
+                println!("seccomp: pid={} sc={} -> {} ({:?})", pid, sc, label, dec);
+            }
+            _ => println!("Usage: seccomp [allowlist PID SC1,SC2,... ACTION | remove PID | test PID SC]"),
         }
     }
 
@@ -5398,6 +5459,7 @@ impl Shell {
             creds.egid = user_entry.gid;
             creds.username = user_entry.name.clone();
         }
+        crate::capability::reseed_for_uid(user_entry.uid);
 
         if !user_entry.home.is_empty() {
             self.current_dir = user_entry.home.clone();
@@ -5430,6 +5492,7 @@ impl Shell {
             creds.egid = 65534;
             creds.username = alloc::string::String::from("guest");
         }
+        crate::capability::reseed_for_uid(65534);
         self.current_dir = String::from("/");
     }
 
