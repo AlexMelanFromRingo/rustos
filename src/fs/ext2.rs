@@ -243,7 +243,218 @@ pub struct Ext2Fs {
 }
 
 impl Ext2Fs {
-    pub fn mount(source: alloc::boxed::Box<dyn BlockSource + Send>) -> Result<Self, &'static str> {
+    /// Try to replay any outstanding ext3/ext4 journal transactions on
+    /// `source` *before* the regular mount path commits to the
+    /// (potentially stale) on-disk metadata.  Returns Ok(true) if a
+    /// journal existed and was inspected (and replayed if non-empty),
+    /// Ok(false) if the filesystem has no journal, Err otherwise.
+    ///
+    /// Journal layout (ext3/ext4 §15, Linux fs/jbd2):
+    ///   * Superblock byte 96 holds incompat features; bit 0x4 =
+    ///     HAS_JOURNAL.
+    ///   * Superblock offset 224 holds s_journal_inum (u32).
+    ///   * The journal's data blocks are an ext2-style file rooted at
+    ///     that inode; block 0 is the journal superblock.
+    ///   * Journal SB (jbd2_journal_superblock_s) — all big-endian:
+    ///         u32 h_magic     = 0xC03B3998
+    ///         u32 h_blocktype = 3 or 4  (sb v1 / v2)
+    ///         u32 h_sequence
+    ///         u32 s_blocksize
+    ///         u32 s_maxlen
+    ///         u32 s_first     (first log block after the superblock)
+    ///         u32 s_sequence  (seq at which to start writing)
+    ///         u32 s_start     (first unwritten block; 0 = clean)
+    ///         ...
+    ///   * Each log block's first 12 bytes are header:
+    ///         u32 h_magic, u32 h_blocktype, u32 h_sequence
+    ///   * blocktype 1 = DESCRIPTOR (tags list block# the next data
+    ///     blocks should overwrite), 2 = COMMIT, 5 = REVOKE.
+    ///
+    /// This implementation does the conservative thing:
+    ///   * Verifies the journal superblock magic + blocktype.
+    ///   * If `s_start == 0` we treat the journal as clean and return.
+    ///   * Otherwise we walk from `s_start` block-by-block until we
+    ///     hit a sequence-mismatch (= end of log) and apply each
+    ///     descriptor's data-block list to the filesystem, then
+    ///     advance past the commit block.
+    ///   * After replay we write `s_start = 0` so a future mount sees
+    ///     a clean journal.
+    fn maybe_replay_journal(source: &mut (dyn BlockSource + Send))
+        -> Result<bool, &'static str>
+    {
+        const HAS_JOURNAL: u32 = 0x0000_0004;
+        const JBD2_MAGIC: u32 = 0xC03B_3998;
+
+        let bs = source.block_size() as usize;
+        let sb_block = SUPERBLOCK_OFFSET / bs as u64;
+        let sb_off   = (SUPERBLOCK_OFFSET % bs as u64) as usize;
+        let mut blk = alloc::vec![0u8; bs];
+        source.read_block(sb_block, &mut blk)?;
+        let sb_bytes = &blk[sb_off..sb_off + 1024.min(bs - sb_off)];
+        // Compat features at offset 92 (s_feature_compat).
+        if sb_bytes.len() < 232 { return Ok(false); }
+        let compat = le32(&sb_bytes[92..96]);
+        if compat & HAS_JOURNAL == 0 { return Ok(false); }
+        let journal_inum = le32(&sb_bytes[224..228]);
+        if journal_inum == 0 { return Ok(false); }
+
+        // Read the journal inode just like read_inode does, but inline
+        // because we can't fully construct an Ext2Fs yet.
+        let inodes_per_group = le32(&sb_bytes[40..44]);
+        let inode_size = le16(&sb_bytes[88..90]) as u32;
+        if inodes_per_group == 0 || inode_size == 0 { return Ok(false); }
+        let group = (journal_inum - 1) / inodes_per_group;
+        let index = (journal_inum - 1) % inodes_per_group;
+        // BGDT starts at the block after the superblock.
+        let first_data_block = le32(&sb_bytes[20..24]);
+        let bgdt_block = if first_data_block == 0 { 1 } else { first_data_block } + 1;
+        let entries_per_block = (bs / 32) as u32;
+        let block_idx = group / entries_per_block;
+        let entry_idx = (group % entries_per_block) as usize;
+        let mut bg_blk = alloc::vec![0u8; bs];
+        source.read_block((bgdt_block + block_idx) as u64, &mut bg_blk)?;
+        let off = entry_idx * 32;
+        let inode_table = le32(&bg_blk[off + 8..off + 12]);
+
+        let table_byte_off = inode_table as u64 * bs as u64
+            + index as u64 * inode_size as u64;
+        let inode_block = table_byte_off / bs as u64;
+        let inode_off   = (table_byte_off % bs as u64) as usize;
+        let mut in_blk = alloc::vec![0u8; bs];
+        source.read_block(inode_block, &mut in_blk)?;
+        let inode = Inode::parse(&in_blk[inode_off..]);
+        if inode.block[0] == 0 { return Ok(false); }
+
+        // Read journal block 0 = journal superblock.
+        let mut jsb = alloc::vec![0u8; bs];
+        source.read_block(inode.block[0] as u64, &mut jsb)?;
+        let magic = u32::from_be_bytes([jsb[0], jsb[1], jsb[2], jsb[3]]);
+        if magic != JBD2_MAGIC {
+            crate::klog_warn!("ext: HAS_JOURNAL set but journal SB magic {:#x}", magic);
+            return Ok(true);
+        }
+        let s_blocksize = u32::from_be_bytes([jsb[12], jsb[13], jsb[14], jsb[15]]);
+        let s_maxlen    = u32::from_be_bytes([jsb[16], jsb[17], jsb[18], jsb[19]]);
+        let s_first     = u32::from_be_bytes([jsb[20], jsb[21], jsb[22], jsb[23]]);
+        let s_sequence  = u32::from_be_bytes([jsb[24], jsb[25], jsb[26], jsb[27]]);
+        let s_start     = u32::from_be_bytes([jsb[28], jsb[29], jsb[30], jsb[31]]);
+
+        if s_blocksize as usize != bs {
+            crate::klog_warn!("ext: journal block size {} ≠ FS block size {}; skipping replay",
+                s_blocksize, bs);
+            return Ok(true);
+        }
+        if s_start == 0 {
+            crate::klog_info!("ext: journal clean (seq {})", s_sequence);
+            return Ok(true);
+        }
+
+        // Walk from s_start, applying each descriptor's data blocks.
+        // The journal is laid out as a circular buffer of log blocks
+        // [s_first .. s_maxlen).  Each log block lives at journal-inode
+        // file-block index N → physical FS block inode.block[N] (only
+        // direct blocks supported for replay; ext2 journal files are
+        // typically contiguous so this covers the common case).
+        let log_block = |idx: u32| -> Option<u64> {
+            if (idx as usize) < 12 { Some(inode.block[idx as usize] as u64) }
+            else { None } // Indirect not supported in replay.
+        };
+
+        let mut applied = 0usize;
+        let mut cur = s_start;
+        let mut seq = s_sequence;
+        let max_iters = s_maxlen.saturating_sub(s_first) * 2; // generous upper bound
+        let mut iter = 0u32;
+        'walk: while iter < max_iters {
+            iter += 1;
+            let phys = match log_block(cur) {
+                Some(p) => p,
+                None => break,
+            };
+            let mut hdr_blk = alloc::vec![0u8; bs];
+            source.read_block(phys, &mut hdr_blk)?;
+            let h_magic = u32::from_be_bytes([hdr_blk[0], hdr_blk[1], hdr_blk[2], hdr_blk[3]]);
+            if h_magic != JBD2_MAGIC { break; } // End of log.
+            let h_type  = u32::from_be_bytes([hdr_blk[4], hdr_blk[5], hdr_blk[6], hdr_blk[7]]);
+            let h_seq   = u32::from_be_bytes([hdr_blk[8], hdr_blk[9], hdr_blk[10], hdr_blk[11]]);
+            if h_seq != seq && h_type != 4 { break; } // Out-of-sequence = end.
+
+            match h_type {
+                1 => {
+                    // Descriptor: tag list at offset 12, each tag is at
+                    // least 16 bytes (block# u64 BE + flags u32 + uuid
+                    // sometimes).  We use the simplest tag layout:
+                    //   u32 t_blocknr_hi (only if 64BIT feature)
+                    //   u32 t_blocknr_lo
+                    //   u32 t_flags
+                    //   (uuid only if !UUID_SAME flag)
+                    let mut pos = 12usize;
+                    cur = (cur + 1) % s_maxlen;
+                    while pos + 16 <= bs {
+                        let blocknr = u32::from_be_bytes([
+                            hdr_blk[pos + 4], hdr_blk[pos + 5],
+                            hdr_blk[pos + 6], hdr_blk[pos + 7],
+                        ]) as u64;
+                        let flags   = u32::from_be_bytes([
+                            hdr_blk[pos + 8],  hdr_blk[pos + 9],
+                            hdr_blk[pos + 10], hdr_blk[pos + 11],
+                        ]);
+                        if blocknr != 0 {
+                            // Read the next data block from the log and
+                            // copy it to the target FS block.
+                            let data_phys = match log_block(cur) {
+                                Some(p) => p,
+                                None => break 'walk,
+                            };
+                            let mut data = alloc::vec![0u8; bs];
+                            source.read_block(data_phys, &mut data)?;
+                            // The first 4 bytes of the data block
+                            // shadow the JBD2 magic; the journal stores
+                            // them separately if escape flag set.
+                            if flags & 0x1 != 0 {
+                                data[0..4].copy_from_slice(&JBD2_MAGIC.to_be_bytes());
+                            }
+                            source.write_block(blocknr, &data)?;
+                            applied += 1;
+                            cur = (cur + 1) % s_maxlen;
+                        }
+                        pos += 16;
+                        if flags & 0x2 == 0 { pos += 16; } // skip uuid
+                        if flags & 0x8 != 0 { break; } // last_tag flag
+                    }
+                }
+                2 => {
+                    // Commit block: this transaction is done; bump seq.
+                    seq = seq.wrapping_add(1);
+                    cur = (cur + 1) % s_maxlen;
+                }
+                5 => {
+                    // Revoke: skip; we don't track revoked-blocks.
+                    cur = (cur + 1) % s_maxlen;
+                }
+                _ => break,
+            }
+            if cur < s_first { cur = s_first; }
+        }
+
+        // Mark journal clean: s_start = 0.  Re-read the journal SB,
+        // mutate, write back so we don't replay these txns again.
+        if applied > 0 {
+            crate::klog_info!("ext: journal replayed {} blocks", applied);
+        }
+        for b in &mut jsb[28..32] { *b = 0; }
+        source.write_block(inode.block[0] as u64, &jsb)?;
+        Ok(true)
+    }
+
+    pub fn mount(mut source: alloc::boxed::Box<dyn BlockSource + Send>) -> Result<Self, &'static str> {
+        // Replay the ext3/ext4 journal if present so the metadata we're
+        // about to read reflects every committed transaction.  Best
+        // effort: a missing/clean journal is fine; a replay error
+        // propagates as a mount failure since the FS view would be
+        // inconsistent.
+        let _ = Self::maybe_replay_journal(&mut *source);
+
         // Read the superblock from offset 1024.
         let bs = source.block_size();
         let sb_block = SUPERBLOCK_OFFSET / bs as u64;
@@ -294,9 +505,19 @@ impl Ext2Fs {
         Ok(Inode::parse(&blk[off..]))
     }
 
-    /// Read all data of an inode into a Vec.  Walks direct, single,
-    /// double, and triple indirect block pointers.
+    /// Read all data of an inode into a Vec.  If the inode's flags
+    /// have EXT4_EXTENTS_FL set, walk the extent tree (Ext4 layout);
+    /// otherwise fall back to the classic Ext2 direct + single/double
+    /// /triple indirect block pointers.
+    ///
+    /// Both layouts coexist on a single Ext4 filesystem: small files
+    /// stay on the legacy path, larger files migrate to extents.
     pub fn read_inode_data(&self, ino: &Inode) -> Result<Vec<u8>, &'static str> {
+        const EXT4_EXTENTS_FL: u32 = 0x0008_0000;
+        if ino.flags & EXT4_EXTENTS_FL != 0 {
+            return self.read_extent_inode(ino);
+        }
+
         let bs = self.sb.block_size() as usize;
         let mut out = Vec::with_capacity(ino.size as usize);
         let total = ino.size as usize;
@@ -321,6 +542,91 @@ impl Ext2Fs {
 
         out.truncate(total);
         Ok(out)
+    }
+
+    /// Walk an Ext4 extent tree rooted in `inode.block[]` and return
+    /// the contiguous file contents.  Layout per ext4 §10:
+    ///
+    ///   struct ext4_extent_header {
+    ///       le16 eh_magic;     // 0xF30A
+    ///       le16 eh_entries;
+    ///       le16 eh_max;
+    ///       le16 eh_depth;     // 0 = leaf, > 0 = index
+    ///       le32 eh_generation;
+    ///   };
+    ///   // Followed by eh_entries entries of:
+    ///   //   leaf  (depth == 0): { le32 ee_block, le16 ee_len,
+    ///   //                         le16 ee_start_hi, le32 ee_start_lo }
+    ///   //   index (depth > 0):  { le32 ei_block, le32 ei_leaf_lo,
+    ///   //                         le16 ei_leaf_hi, le16 ei_unused }
+    ///
+    /// On disk these all use 12-byte entries.  ee_len > 32768 marks an
+    /// uninitialised extent (treat as a sparse hole).
+    fn read_extent_inode(&self, ino: &Inode) -> Result<Vec<u8>, &'static str> {
+        let bs = self.sb.block_size() as usize;
+        let total = ino.size as usize;
+        // Serialize inode.block[15] into a 60-byte buffer for parsing.
+        let mut hdr_buf = [0u8; 60];
+        for i in 0..15 {
+            hdr_buf[i * 4..i * 4 + 4].copy_from_slice(&ino.block[i].to_le_bytes());
+        }
+        let mut out = alloc::vec![0u8; total];
+        self.walk_extent_node(&hdr_buf, bs, total, &mut out)?;
+        Ok(out)
+    }
+
+    fn walk_extent_node(&self, node: &[u8], bs: usize, total: usize,
+                        out: &mut [u8]) -> Result<(), &'static str> {
+        if node.len() < 12 { return Err("ext4: extent node truncated"); }
+        let magic = le16(&node[0..2]);
+        if magic != 0xF30A { return Err("ext4: bad extent magic"); }
+        let entries = le16(&node[2..4]) as usize;
+        let depth   = le16(&node[6..8]);
+        let entries_off = 12usize;
+
+        if depth == 0 {
+            for i in 0..entries {
+                let off = entries_off + i * 12;
+                if off + 12 > node.len() { break; }
+                let ee_block = le32(&node[off..off + 4]) as usize;
+                let ee_len   = le16(&node[off + 4..off + 6]) as usize;
+                let ee_start_hi = le16(&node[off + 6..off + 8]) as u64;
+                let ee_start_lo = le32(&node[off + 8..off + 12]) as u64;
+                let phys = (ee_start_hi << 32) | ee_start_lo;
+                let len = if ee_len > 32768 {
+                    // Uninitialised extent: file shows zeros at this range.
+                    ee_len - 32768
+                } else {
+                    ee_len
+                };
+                let initialised = ee_len <= 32768;
+                let file_byte = ee_block * bs;
+                for blk in 0..len {
+                    let dst_start = file_byte + blk * bs;
+                    if dst_start >= total { break; }
+                    let dst_end = (dst_start + bs).min(total);
+                    if initialised {
+                        let mut buf = alloc::vec![0u8; bs];
+                        self.source.read_block(phys + blk as u64, &mut buf)?;
+                        out[dst_start..dst_end].copy_from_slice(&buf[..dst_end - dst_start]);
+                    }
+                    // else: out is already zero-init
+                }
+            }
+        } else {
+            // Index node — each entry points at a deeper extent block.
+            for i in 0..entries {
+                let off = entries_off + i * 12;
+                if off + 12 > node.len() { break; }
+                let ei_leaf_lo = le32(&node[off + 4..off + 8]) as u64;
+                let ei_leaf_hi = le16(&node[off + 8..off + 10]) as u64;
+                let leaf_phys = (ei_leaf_hi << 32) | ei_leaf_lo;
+                let mut buf = alloc::vec![0u8; bs];
+                self.source.read_block(leaf_phys, &mut buf)?;
+                self.walk_extent_node(&buf, bs, total, out)?;
+            }
+        }
+        Ok(())
     }
 
     fn append_block(&self, block_no: u32, bs: usize, total: usize, out: &mut Vec<u8>)

@@ -93,6 +93,27 @@ impl PackageManifest {
     }
 }
 
+/// Fetch a package manifest from `url` (HTTP/1.0), save it under
+/// `/tmp/<basename>` so the regular `install` path can read it via the
+/// VFS, then return the local path.  Used by `pkg fetch URL` so the
+/// system can pull packages off the network.
+pub fn fetch_url(url: &str) -> Result<String, &'static str> {
+    let (status, body) = crate::net::http::get(url)
+        .map_err(|_| "pkg fetch: HTTP GET failed")?;
+    // Accept anything that looks like a 2xx success line.
+    if !status.contains(" 200") && !status.contains(" 201") {
+        crate::klog_warn!("pkg fetch: HTTP status: {}", status);
+        return Err("pkg fetch: non-2xx status");
+    }
+    // Derive a filename from the trailing path component.
+    let local_name = url.rsplit('/').next().unwrap_or("downloaded.pkg");
+    let local_path = alloc::format!("/tmp/{}", local_name);
+    use crate::fs::vfs::VfsContext;
+    let _ = VfsContext::mkdir("/tmp");
+    VfsContext::write(&local_path, body).map_err(|_| "pkg fetch: write failed")?;
+    Ok(local_path)
+}
+
 /// Install a package read from `pkg_file` (a path in the VFS).
 ///
 /// Verifies that every entry in `DEPENDS` is already installed; refuses

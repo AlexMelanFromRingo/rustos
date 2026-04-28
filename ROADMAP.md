@@ -72,7 +72,7 @@ Reference architecture: Linux/Unix-like.
 
 ### 2.3 Thread Support
 - [x] `clone` syscall (delegates to fork; CLONE_THREAD flag noted but VM/files not yet shared) ✅
-- [ ] Thread-local storage (TLS)
+- [x] Thread-local storage (TLS) — arch_prctl(2) ARCH_SET/GET_FS|GS, FSBASE/GSBASE MSRs, per-Process fs_base/gs_base ✅
 - [x] Futex for userspace synchronization (FUTEX_WAIT/WAKE, per-uaddr wait queues, syscall 202) ✅
 
 ---
@@ -95,14 +95,14 @@ Reference architecture: Linux/Unix-like.
 - [x] Write to both FAT copies (mirror per BPB num_fats; preserves reserved top 4 bits) ✅
 - [x] FSInfo sector updates for free cluster tracking (decrements on alloc, increments on free, last-alloc hint) ✅
 - [x] File truncation (truncate_chain with explicit keep_clusters parameter) ✅
-- [ ] Proper error recovery
+- [x] Error recovery (BPB sanity validation on mount, FSInfo signature check + free-count rebuild from FAT scan) ✅
 
 ### 3.3 Ext2/Ext4 Filesystem
 - [x] Ext2 read support (superblock, BGDT, inodes, direct + 1/2/3-level indirect blocks, dir entries, lookup-by-path) ✅
 - [x] Ext2 mount from disk via virtio-blk (VirtioBlkSource adapter, auto-mount on boot if magic at sector 2) ✅
 - [x] Ext2 write support (alloc inode/block, write_inode_data, add_dir_entry, create_root_file; round-trips with Linux debugfs) ✅
-- [ ] Ext4 basic support (extents, large files)
-- [ ] Journal support for crash recovery
+- [x] Ext4 read with extents (eh_magic 0xF30A, leaf + index nodes, sparse handling) ✅
+- [x] Ext3-style journal replay (jbd2 magic 0xC03B3998, descriptor + commit walk, marks s_start = 0 after replay) ✅
 
 ### 3.4 Special Filesystems
 - [x] `/proc` — process information filesystem (uptime, meminfo, version, cpuinfo, kmsg, loadavg, stat, per-pid) ✅
@@ -123,7 +123,7 @@ Reference architecture: Linux/Unix-like.
 
 ### 4.2 Network Stack
 - [x] RTL8139 NIC driver (PCI 10ec:8139, 8K RX ring + 4 TX bounce buffers, polling, MAC read) ✅
-- [ ] E1000 NIC driver (Intel, used by QEMU)
+- [x] E1000 NIC driver (PCI 8086:100E, MMIO, 32 RX + 32 TX descriptors with DMA bounce buffers, EEPROM-or-RAL MAC) ✅
 - [x] Virtio-net driver (PCI scan, BAR0 I/O, RESET→ACK→DRIVER→FEATURES→DRIVER_OK, RX/TX virtqueues, MAC read from device config) ✅
 - [x] Ethernet frame handling (build_frame, EthHeader parse, ethertypes IPv4/ARP/IPv6) ✅
 - [x] ARP (RFC 826: REQUEST/REPLY build+parse, ARP cache, arp shell command) ✅
@@ -183,7 +183,7 @@ Reference architecture: Linux/Unix-like.
 
 ### 5.4 Package Manager
 - [x] Simple package format (text manifest + inline FILE blocks) ✅
-- [ ] Package repository support (over network)
+- [x] Package repository support over network (`pkg fetch URL` + `pkg fetch-install URL` via HTTP/1.0 GET on TCP) ✅
 - [x] Dependency resolution (DEPENDS in manifest, refuse install/remove on missing/required-by) ✅
 - [x] Install / remove / list / info operations (`pkg` shell command, /var/lib/pkg) ✅
 
@@ -220,6 +220,31 @@ The `bootloader` crate currently handles:
 
 ### 6.3 Recommendation
 Start with **Option A** (upgrade to bootloader v0.11+) for UEFI support, then evaluate **Option C** (Limine) for production. Custom bootloader (Option B) is only worth it if boot-level control is a project goal.
+
+### 6.4 Migration evaluation (2026-04)
+
+After the kernel grew to ~50 KSLoC and started using `bootloader 0.9`'s
+`map_physical_memory` heavily (DMA contiguous allocation, APIC MMIO,
+LAPIC + IOAPIC discovery, virtio-blk/net/e1000 RX/TX descriptor rings),
+upgrading is non-trivial:
+
+* **0.11 / Edition 3** changes the entry-point ABI from `_start(BootInfo)`
+  to a `bootloader_api`-driven entry; we'd refactor `kernel_main` and
+  every `boot_info.physical_memory_offset` reader.  The new
+  `BootInfo::physical_memory_offset` is `Optional<u64>` (firmware can
+  decline the mapping) so every `phys_offset()` consumer needs a
+  fallback path.  Worth it for UEFI but a significant churn (~ a day
+  of careful work + re-running every device-driver self-test).
+* **Limine** would give us UEFI + a richer info struct (modules, RSDP,
+  framebuffer, SMP startup hand-off) but introduces a different build
+  pipeline (`limine.conf`, Limine binary in tree, separate ESP image
+  for UEFI).  Best after we have a real userspace + ACPI-MADT
+  consumer that benefits from the SMP hand-off.
+
+**Decision (deferred):** stay on bootloader 0.9 until either (a) the
+tooling forces UEFI (current QEMU SeaBIOS is fine), or (b) Limine's
+SMP info becomes load-bearing for the per-CPU work.  Both are
+post-fork+COW + per-process page-table milestones.
 
 ---
 

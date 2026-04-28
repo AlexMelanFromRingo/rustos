@@ -4820,6 +4820,23 @@ impl Shell {
                     Err(e) => println!("pkg: {}", e),
                 }
             }
+            "fetch" if args.len() >= 2 => {
+                match crate::pkg::fetch_url(args[1]) {
+                    Ok(local) => println!("pkg: saved {} (run `pkg install {}`)",
+                        local, local),
+                    Err(e) => println!("pkg: {}", e),
+                }
+            }
+            "fetch-install" if args.len() >= 2 => {
+                match crate::pkg::fetch_url(args[1]) {
+                    Ok(local) => match crate::pkg::install(&local) {
+                        Ok(m) => println!("pkg: fetched + installed {}-{} ({} files)",
+                            m.name, m.version, m.files.len()),
+                        Err(e) => println!("pkg: install: {}", e),
+                    }
+                    Err(e) => println!("pkg: fetch: {}", e),
+                }
+            }
             "remove" if args.len() >= 2 => {
                 let force = args.contains(&"--force") || args.contains(&"-f");
                 match crate::pkg::remove_with(args[1], force) {
