@@ -84,6 +84,15 @@ unsafe fn config_read8(addr: PciAddr, off: u8) -> u8 {
     ((dword >> ((off & 3) * 8)) & 0xFF) as u8
 }
 
+unsafe fn config_write16(addr: PciAddr, off: u8, val: u16) {
+    let aligned_off = off & 0xFC;
+    let shift = (off & 2) as u32 * 8;
+    let mask = !(0xFFFFu32 << shift);
+    let dword = unsafe { config_read32(addr, aligned_off) };
+    let merged = (dword & mask) | ((val as u32) << shift);
+    unsafe { config_write32(addr, aligned_off, merged) };
+}
+
 fn read_device(addr: PciAddr) -> Option<PciDevice> {
     let vendor_id = unsafe { config_read16(addr, 0x00) };
     if vendor_id == 0xFFFF { return None; }
@@ -121,12 +130,19 @@ fn read_device(addr: PciAddr) -> Option<PciDevice> {
 ///
 /// Note: header status register bit 4 (Capabilities List) must be set
 /// for this list to exist.  We check it; otherwise return zeros.
+///
+/// Spec quirk: only the high six bits of the next-pointer are
+/// significant; we mask with 0xFC.  But the *cap pointer* at config
+/// offset 0x34 already has the low two bits reserved-zero — masking
+/// would still be safe.  Some QEMU revisions left the low bits set on
+/// reset, so we mask defensively.
 fn walk_capabilities(addr: PciAddr, header_type: u8) -> (u8, u8) {
     let status = unsafe { config_read16(addr, 0x06) };
     if status & 0x10 == 0 { return (0, 0); } // No capabilities list
     if header_type > 1 { return (0, 0); }
 
-    let mut cur = unsafe { config_read8(addr, 0x34) } & 0xFC;
+    let cap_ptr_raw = unsafe { config_read8(addr, 0x34) };
+    let mut cur = cap_ptr_raw & 0xFC;
     let mut msi: u8 = 0;
     let mut msix: u8 = 0;
     let mut hops = 0;
@@ -197,6 +213,71 @@ pub fn find_class(class_code: u8, subclass: u8) -> Vec<PciDevice> {
         .filter(|d| d.class_code == class_code && d.subclass == subclass)
         .copied()
         .collect()
+}
+
+/// Read the MSI Message Control register (bit 0 = Enable, bit 7 =
+/// 64-bit address capable, bits 1..3 = Multiple Message Capable,
+/// bits 4..6 = Multiple Message Enable).  Returns 0 if the device has
+/// no MSI capability.
+pub fn msi_message_control(addr: PciAddr) -> u16 {
+    let dev = match read_device(addr) { Some(d) => d, None => return 0 };
+    if dev.msi_cap == 0 { return 0; }
+    unsafe { config_read16(addr, dev.msi_cap + 2) }
+}
+
+/// Disable MSI by clearing the Enable bit (bit 0) of Message Control.
+pub fn disable_msi(addr: PciAddr) -> Result<(), &'static str> {
+    let dev = read_device(addr).ok_or("pci: device not present")?;
+    let cap = dev.msi_cap;
+    if cap == 0 { return Err("pci: device has no MSI capability"); }
+    unsafe {
+        let mc = config_read16(addr, cap + 2);
+        config_write16(addr, cap + 2, mc & !1);
+    }
+    Ok(())
+}
+
+/// Configure MSI on a device that has the MSI capability.  Programs
+/// the LAPIC delivery address (FEE0_0000 + APIC ID in bits 12..19),
+/// the message data (`vector | trigger:0 | level:0` per Intel SDM
+/// §10.11), and sets the Enable bit (bit 0 of Message Control).
+///
+/// `lapic_id` is the destination LAPIC ID — typically 0 (BSP) on a
+/// uniprocessor system; SMP code chooses based on per-CPU policy.
+///
+/// Returns Err if the device has no MSI capability or if the
+/// capability is malformed.
+pub fn enable_msi(addr: PciAddr, vector: u8, lapic_id: u8) -> Result<(), &'static str> {
+    let dev = read_device(addr).ok_or("pci: device not present")?;
+    let cap = dev.msi_cap;
+    if cap == 0 { return Err("pci: device has no MSI capability"); }
+    unsafe {
+        // Message Control at cap+2.  Bit 7 = 64-bit address support.
+        let mc = config_read16(addr, cap + 2);
+        let is_64 = mc & (1 << 7) != 0;
+
+        // Message Address at cap+4.  Format: 0xFEE0_0000 | (apic_id << 12)
+        // | (RH << 3) | (DM << 2).  We use physical destination, no RH.
+        let addr_lo: u32 = 0xFEE0_0000 | ((lapic_id as u32) << 12);
+        config_write32(addr, cap + 4, addr_lo);
+
+        // Message Data offset: cap+8 if 32-bit, cap+12 if 64-bit.
+        let data_off = if is_64 {
+            // High dword of address is unused on a non-x2APIC system.
+            config_write32(addr, cap + 8, 0);
+            cap + 12
+        } else {
+            cap + 8
+        };
+        // Data: bits 0..7 vector, 8..10 delivery mode 000=fixed,
+        // bit 14 level (0=deassert, 1=assert), bit 15 trigger
+        // (0=edge, 1=level).  We use fixed/edge.
+        config_write16(addr, data_off, vector as u16);
+
+        // Set Enable (bit 0).  Leave MMC/MME at default (single vector).
+        config_write16(addr, cap + 2, mc | 1);
+    }
+    Ok(())
 }
 
 /// Enable bus mastering + memory space + IO space for a device by

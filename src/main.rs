@@ -115,6 +115,22 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         );
     }
 
+    // Bring up LAPIC + IOAPIC infrastructure (must precede
+    // `interrupts::switch_to_apic`, which depends on apic::is_available).
+    match rustos::apic::init() {
+        Ok(()) => println!("apic: LAPIC id={} ready ({} IOAPIC pins)",
+            rustos::apic::lapic_id(),
+            rustos::apic::ioapic_max_entries()),
+        Err(e) => println!("apic: not available ({})", e),
+    }
+    // Retire the 8259 PIC: program IOAPIC RTEs for every IRQ we use
+    // (honouring MADT ISO overrides), mask the PIC, flip every ISR's
+    // EOI path from PICS.notify to apic::eoi().
+    match rustos::interrupts::switch_to_apic() {
+        Ok(()) => println!("apic: PIC retired, IRQs through IOAPIC"),
+        Err(e) => println!("apic: keeping PIC ({})", e),
+    }
+
     // IPv6 self-test: echo to ::1 should round-trip through
     // handle_inbound and produce a reply we can re-parse.
     {
@@ -155,20 +171,34 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         }
     }
 
-    // Bring up LAPIC + IOAPIC infrastructure.  We don't yet retire the
-    // legacy 8259 PIC — that requires re-routing every existing IRQ
-    // through the IOAPIC and switching all EOI calls to apic::eoi().
-    // For now the APIC is just available, useful for SMP / MSI later.
-    match rustos::apic::init() {
-        Ok(()) => println!("apic: LAPIC id={} ready ({} IOAPIC pins)",
-            rustos::apic::lapic_id(),
-            rustos::apic::ioapic_max_entries()),
-        Err(e) => println!("apic: not available ({})", e),
-    }
-
     rustos::drivers::virtio_net::init();
     rustos::drivers::virtio_blk::init();
     rustos::drivers::rtl8139::init();
+
+    // PCI MSI primitive smoke test: pick the first listed device that
+    // advertises MSI, program MSI to a probe vector, read Message
+    // Control back to confirm the Enable bit is set, then disable.
+    // Confirms that `pci::enable_msi` round-trips against real
+    // hardware (QEMU's virtio-blk-pci) without leaving the device
+    // armed for an IRQ we don't yet handle.
+    {
+        let mut tested = false;
+        for d in rustos::drivers::pci::list() {
+            if d.msi_cap == 0 { continue; }
+            let before = rustos::drivers::pci::msi_message_control(d.addr);
+            if rustos::drivers::pci::enable_msi(d.addr, 0x40, 0).is_ok() {
+                let after = rustos::drivers::pci::msi_message_control(d.addr);
+                let _ = rustos::drivers::pci::disable_msi(d.addr);
+                let final_mc = rustos::drivers::pci::msi_message_control(d.addr);
+                println!("pci-msi: {:02x}:{:02x}.{} {:#06x}/{:04x} mc {:#x}→{:#x}→{:#x}",
+                    d.addr.bus, d.addr.dev, d.addr.func,
+                    d.vendor_id, d.device_id, before, after, final_mc);
+                tested = true;
+                break;
+            }
+        }
+        if !tested { println!("pci-msi: no MSI-capable device found to probe"); }
+    }
     if rustos::drivers::rtl8139::is_available() {
         let g = rustos::drivers::rtl8139::RTL8139.lock();
         if let Some(nic) = g.as_ref() {

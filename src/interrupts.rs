@@ -86,6 +86,53 @@ pub fn init_pics() {
 /// Set by `enter_preemptive_idle()`, cleared when all user processes finish.
 pub static PREEMPTIVE_MODE: AtomicBool = AtomicBool::new(false);
 
+/// When true, the system delivers IRQs through IOAPIC + LAPIC; ISRs
+/// must EOI via `apic::eoi()` instead of the legacy 8259 PIC.  Set by
+/// `switch_to_apic()` after the IOAPIC has been programmed and the
+/// PIC masked.
+pub static APIC_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Issue an EOI for the currently-being-handled IRQ.  Picks the right
+/// controller (LAPIC vs 8259) based on `APIC_ACTIVE`.
+fn eoi_for(vector: u8) {
+    if APIC_ACTIVE.load(Ordering::Relaxed) {
+        crate::apic::eoi();
+    } else {
+        unsafe { PICS.lock().notify_end_of_interrupt(vector); }
+    }
+}
+
+/// Migrate IRQ delivery from the 8259 PIC to the IOAPIC.  Reads the
+/// MADT for IOAPIC base + Interrupt Source Override entries, programs
+/// each in-use ISA IRQ → IDT vector via `apic::ioapic_route`, masks the
+/// PIC, and flips `APIC_ACTIVE`.  Returns Err with a reason if any
+/// step fails (the caller stays on PIC).
+pub fn switch_to_apic() -> Result<(), &'static str> {
+    if !crate::apic::is_available() { return Err("apic not initialised"); }
+    let madt = crate::acpi::parse_madt().ok_or("no MADT")?;
+    if madt.ioapics.is_empty() { return Err("MADT has no IOAPIC"); }
+
+    // The IRQs we currently use, paired with their installed IDT vectors.
+    let pairs: &[(u8, u8)] = &[
+        (0,  InterruptIndex::Timer.as_u8()),         // PIT timer
+        (1,  InterruptIndex::Keyboard.as_u8()),
+        (4,  InterruptIndex::Serial1.as_u8()),
+        (12, InterruptIndex::Mouse.as_u8()),
+        (14, InterruptIndex::PrimaryATA.as_u8()),
+        (15, InterruptIndex::SecondaryATA.as_u8()),
+    ];
+    for (irq, vector) in pairs {
+        let (gsi, _polarity, _trigger) = crate::acpi::resolve_irq(&madt, *irq);
+        // GSIs are global; for QEMU PIIX they fit in the single IOAPIC's
+        // 24-pin range, so gsi == pin number.  A multi-IOAPIC system
+        // would dispatch on madt.ioapics[].gsi_base.
+        crate::apic::ioapic_route(gsi as u8, *vector);
+    }
+    crate::apic::mask_pic_all();
+    APIC_ACTIVE.store(true, Ordering::Release);
+    Ok(())
+}
+
 /// Saved kernel TrapFrame for returning to shell after all user processes exit.
 /// Only valid when PREEMPTIVE_MODE is true.
 static mut KERNEL_RETURN_FRAME: crate::process::context::TrapFrame = crate::process::context::TrapFrame::empty();
@@ -186,11 +233,8 @@ extern "C" fn timer_preempt_handler(frame: *mut crate::process::context::TrapFra
     // Always tick the system timer
     crate::task::timer::tick();
 
-    // Send EOI early so we don't miss the next timer tick
-    unsafe {
-        PICS.lock()
-            .notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
-    }
+    // Send EOI early so we don't miss the next timer tick.
+    eoi_for(InterruptIndex::Timer.as_u8());
 
     // Check if we interrupted a user-mode process (CS RPL=3)
     let trap = unsafe { &*frame };
@@ -376,10 +420,7 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(
     let scancode: u8 = unsafe { port.read() };
     crate::task::keyboard::add_scancode(scancode);
 
-    unsafe {
-        PICS.lock()
-            .notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8());
-    }
+    eoi_for(InterruptIndex::Keyboard.as_u8());
 }
 
 /// PS/2 auxiliary (mouse) — IRQ 12.  Reads a byte from port 0x60 and
@@ -391,10 +432,7 @@ extern "x86-interrupt" fn mouse_interrupt_handler(
     let mut port = Port::<u8>::new(0x60);
     let byte: u8 = unsafe { port.read() };
     crate::drivers::mouse::input_byte(byte);
-    unsafe {
-        PICS.lock()
-            .notify_end_of_interrupt(InterruptIndex::Mouse.as_u8());
-    }
+    eoi_for(InterruptIndex::Mouse.as_u8());
 }
 
 /// Non-maskable interrupt — used by hardware to flag irrecoverable
@@ -424,28 +462,19 @@ extern "x86-interrupt" fn serial1_interrupt_handler(
     let byte: u8 = unsafe { port.read() };
     crate::task::keyboard::add_serial_byte(byte);
 
-    unsafe {
-        PICS.lock()
-            .notify_end_of_interrupt(InterruptIndex::Serial1.as_u8());
-    }
+    eoi_for(InterruptIndex::Serial1.as_u8());
 }
 
 extern "x86-interrupt" fn primary_ata_interrupt_handler(
     _stack_frame: InterruptStackFrame)
 {
-    unsafe {
-        PICS.lock()
-            .notify_end_of_interrupt(InterruptIndex::PrimaryATA.as_u8());
-    }
+    eoi_for(InterruptIndex::PrimaryATA.as_u8());
 }
 
 extern "x86-interrupt" fn secondary_ata_interrupt_handler(
     _stack_frame: InterruptStackFrame)
 {
-    unsafe {
-        PICS.lock()
-            .notify_end_of_interrupt(InterruptIndex::SecondaryATA.as_u8());
-    }
+    eoi_for(InterruptIndex::SecondaryATA.as_u8());
 }
 
 #[cfg(test)]

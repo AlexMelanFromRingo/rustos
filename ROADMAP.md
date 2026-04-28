@@ -35,11 +35,11 @@ Reference architecture: Linux/Unix-like.
 - [ ] Multi-core support (per-CPU run queues, SMP init)
 
 ### 1.4 Interrupt & Exception Handling
-- [ ] APIC support (replace legacy 8259 PIC for multi-core)
-- [ ] IOAPIC for IRQ routing
-- [ ] MSI/MSI-X support for modern devices
+- [x] APIC support (LAPIC + IOAPIC discovery, EOI via LAPIC, 8259 PIC retired through ACPI MADT ISO routing) ✅
+- [x] IOAPIC for IRQ routing (every existing IRQ programmed via apic::ioapic_route honouring MADT overrides) ✅
+- [x] MSI/MSI-X support: pci::enable_msi programs Message Address (LAPIC) + Data, verified round-trip on e1000e ✅
 - [x] NMI handling (logs RIP and continues, MCE halts) ✅
-- [x] Kernel panic stack trace (RBP chain via force-frame-pointers; DWARF symbolisation pending) ✅
+- [x] Kernel panic stack trace + DWARF symbolisation (function+offset (file:line) via build.rs nm + addr2line, two-pass build) ✅
 
 ---
 
