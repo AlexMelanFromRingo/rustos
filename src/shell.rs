@@ -767,6 +767,7 @@ impl Shell {
             "mouse" => self.cmd_mouse(),
             "hpet" => self.cmd_hpet(),
             "futex" => self.cmd_futex(args),
+            "panic-test" => self.cmd_panic_test(),
             "httptest" => self.cmd_httptest(args),
             "unixtest" => self.cmd_unixtest(args),
             "wget" | "curl" => self.cmd_wget(args),
@@ -5436,6 +5437,11 @@ impl Shell {
 
         let _ = close(client);
         let _ = close(server);
+    }
+
+    /// panic-test: deliberately panic to exercise the backtrace printer.
+    fn cmd_panic_test(&self) -> ! {
+        panic!("panic-test: this is intentional");
     }
 
     /// futex: list active wait queues, or run a wake self-test.

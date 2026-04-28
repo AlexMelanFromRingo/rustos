@@ -38,7 +38,7 @@ Reference architecture: Linux/Unix-like.
 - [ ] APIC support (replace legacy 8259 PIC for multi-core)
 - [ ] IOAPIC for IRQ routing
 - [ ] MSI/MSI-X support for modern devices
-- [ ] NMI handling
+- [x] NMI handling (logs RIP and continues, MCE halts) ✅
 - [ ] Proper kernel panic with stack trace (using DWARF unwind info)
 
 ---
@@ -71,9 +71,9 @@ Reference architecture: Linux/Unix-like.
 - [x] Signal delivery during scheduler tick ✅
 
 ### 2.3 Thread Support
-- [ ] `clone` syscall with CLONE_THREAD
+- [x] `clone` syscall (delegates to fork; CLONE_THREAD flag noted but VM/files not yet shared) ✅
 - [ ] Thread-local storage (TLS)
-- [ ] Futex for userspace synchronization
+- [x] Futex for userspace synchronization (FUTEX_WAIT/WAKE, per-uaddr wait queues, syscall 202) ✅
 
 ---
 
@@ -137,7 +137,7 @@ Reference architecture: Linux/Unix-like.
 - [x] `wget` / `curl` equivalent (HTTP/1.0 client, -O / --, dns-aware) ✅
 
 ### 4.3 Input/Output
-- [ ] PS/2 mouse driver
+- [x] PS/2 mouse driver (IRQ 12, 8042 init, 3-byte packet decode, X/Y/buttons) ✅
 - [ ] USB HID (keyboard/mouse via UHCI/EHCI/xHCI)
 - [ ] Framebuffer driver (VESA/VBE for graphics mode)
 - [ ] Serial console improvements (full terminal emulation)

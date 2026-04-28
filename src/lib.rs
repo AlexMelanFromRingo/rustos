@@ -49,6 +49,7 @@ pub mod partition;
 pub mod pkg;
 pub mod hardening;
 pub mod futex;
+pub mod backtrace;
 
 pub fn init() {
     gdt::init();

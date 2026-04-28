@@ -19,9 +19,10 @@ entry_point!(kernel_main);
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    // Use serial output to avoid VGA WRITER deadlock if panic occurs while WRITER is held
-    rustos::serial_println!("KERNEL PANIC: {}", info);
-    // Also try VGA (best-effort, may deadlock if WRITER is already locked)
+    // Print message + frame-pointer backtrace to serial (VGA WRITER may
+    // be held by the panicking code).  Then a second pass to VGA so the
+    // user sees something on screen.
+    rustos::backtrace::print_panic(info);
     println!("{}", info);
     rustos::hlt_loop();
 }
