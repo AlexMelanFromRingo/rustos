@@ -96,6 +96,15 @@ pub struct Process {
     /// arrival order.  See `crate::process::scheduler::Scheduler::tick`
     /// for the increment formula.
     pub vruntime: u64,
+
+    /// Per-thread storage base for FS segment.  Set by `arch_prctl(2)`
+    /// with ARCH_SET_FS, written into IA32_FS_BASE on context switch.
+    /// musl/glibc point this at the TCB so `mov %fs:0, %rax` reads
+    /// thread-local storage in O(1).
+    pub fs_base: u64,
+    /// Per-thread storage base for GS segment (kernel uses GS for the
+    /// per-CPU pointer; user-space gets it via ARCH_SET_GS).
+    pub gs_base: u64,
 }
 
 impl Process {
@@ -132,6 +141,8 @@ impl Process {
             cap_effective: u64::MAX, // kernel processes default to full caps
             cap_permitted: u64::MAX,
             vruntime: 0,
+            fs_base: 0,
+            gs_base: 0,
         }
     }
 
@@ -176,6 +187,8 @@ impl Process {
             cap_effective: u64::MAX, // kernel processes default to full caps
             cap_permitted: u64::MAX,
             vruntime: 0,
+            fs_base: 0,
+            gs_base: 0,
         }
     }
 
@@ -215,6 +228,8 @@ impl Process {
             cap_effective: self.cap_effective, // and capability sets
             cap_permitted: self.cap_permitted,
             vruntime: self.vruntime,
+            fs_base: self.fs_base,
+            gs_base: self.gs_base,
         }
     }
 }

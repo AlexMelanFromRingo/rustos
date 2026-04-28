@@ -244,10 +244,32 @@ impl Fat32 {
             &*((boot_sector.as_ptr() as usize + mem::size_of::<BiosParameterBlock>()) as *const Fat32ExtendedBootRecord)
         };
 
-        // Verify FAT32 signature
+        // Verify FAT32 boot-sector signature.
         let signature = u16::from_le_bytes([boot_sector[510], boot_sector[511]]);
         if signature != 0xAA55 {
             return Err("Invalid boot sector signature");
+        }
+
+        // BPB sanity validation — refuses obviously corrupt fields up
+        // front rather than computing nonsense from them later.  Each
+        // check matches the EFI FAT spec §3.1 / Microsoft FATGEN §3.2.
+        if bpb.bytes_per_sector == 0
+            || bpb.bytes_per_sector & (bpb.bytes_per_sector - 1) != 0
+            || bpb.bytes_per_sector < 512
+            || bpb.bytes_per_sector > 4096
+        {
+            return Err("FAT32: bytes_per_sector not power-of-two in [512..4096]");
+        }
+        if bpb.sectors_per_cluster == 0
+            || bpb.sectors_per_cluster & (bpb.sectors_per_cluster - 1) != 0
+        {
+            return Err("FAT32: sectors_per_cluster not power-of-two");
+        }
+        if bpb.reserved_sectors == 0 {
+            return Err("FAT32: reserved_sectors must be non-zero");
+        }
+        if bpb.num_fats == 0 {
+            return Err("FAT32: num_fats must be non-zero");
         }
 
         // Calculate first data sector
@@ -257,6 +279,9 @@ impl Fat32 {
         } else {
             ebr.fat_size_32
         };
+        if fat_size == 0 {
+            return Err("FAT32: fat_size_32 zero");
+        }
 
         let first_data_sector = bpb.reserved_sectors as u32 + (bpb.num_fats as u32 * fat_size) + root_dir_sectors;
         let first_fat_sector = bpb.reserved_sectors as u32;
@@ -267,14 +292,24 @@ impl Fat32 {
         } else {
             bpb.total_sectors_32
         };
+        if total_sectors == 0 {
+            return Err("FAT32: total_sectors zero");
+        }
+        if total_sectors <= first_data_sector {
+            return Err("FAT32: total_sectors smaller than reserved+FAT region");
+        }
+        if ebr.root_cluster < 2 {
+            return Err("FAT32: root_cluster must be ≥ 2");
+        }
 
         // Calculate total clusters in data area
         let data_sectors = total_sectors - first_data_sector;
         let total_clusters = data_sectors / (bpb.sectors_per_cluster as u32);
+        if total_clusters < 65525 {
+            return Err("FAT32: cluster count below 65525 (FAT12/16 layout)");
+        }
 
-        // Filesystem is valid and initialized
-
-        Ok(Fat32 {
+        let mut fs = Fat32 {
             first_data_sector,
             sectors_per_cluster: bpb.sectors_per_cluster as u32,
             bytes_per_sector: bpb.bytes_per_sector as u32,
@@ -285,7 +320,88 @@ impl Fat32 {
             total_clusters,
             num_fats: bpb.num_fats,
             fs_info_sector: ebr.fs_info as u32,
-        })
+        };
+
+        // FSInfo recovery: read the on-disk FSInfo sector, validate its
+        // three signatures (lead 0x41615252, struct 0x61417272, tail
+        // 0xAA550000).  If any are wrong, recompute the free-cluster
+        // count by scanning the FAT and rewrite a clean FSInfo so
+        // future writes have correct counters.  Recovery is silent on
+        // success; failures are logged.
+        if let Err(e) = fs.recover_fsinfo() {
+            crate::klog_warn!("FAT32: FSInfo recovery skipped: {}", e);
+        }
+        Ok(fs)
+    }
+
+    /// Validate the FSInfo sector and rebuild it from a FAT scan when
+    /// any of the three expected signatures is missing or the recorded
+    /// free count is the "unknown" sentinel (0xFFFF_FFFF).  Returns Ok
+    /// even when everything was already valid.
+    fn recover_fsinfo(&mut self) -> Result<(), &'static str> {
+        if self.fs_info_sector == 0 || self.fs_info_sector >= self.total_sectors {
+            return Ok(()); // Volume has no FSInfo (unusual but legal).
+        }
+        let mut buf = alloc::vec![0u8; self.bytes_per_sector as usize];
+        {
+            let mut drive = ATA_DRIVE.lock();
+            drive.read_sectors(self.fs_info_sector, 1, &mut buf)?;
+        }
+        let lead   = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        let struc  = u32::from_le_bytes([buf[484], buf[485], buf[486], buf[487]]);
+        let tail   = u32::from_le_bytes([buf[508], buf[509], buf[510], buf[511]]);
+        let recorded_free = u32::from_le_bytes([buf[488], buf[489], buf[490], buf[491]]);
+
+        let sigs_ok = lead == 0x4161_5252 && struc == 0x6141_7272 && tail == 0xAA55_0000;
+        let free_ok = recorded_free != 0xFFFF_FFFF && recorded_free <= self.total_clusters;
+        if sigs_ok && free_ok {
+            return Ok(());
+        }
+
+        // Rebuild: scan FAT for free-cluster count and rewrite FSInfo.
+        // Read the FAT one sector at a time and tally entries that are 0
+        // (== "cluster free" in FAT32).  Bypasses get_next_cluster's
+        // EOC checks since we want raw values here.
+        let mut free = 0u32;
+        let entries_per_sector = (self.bytes_per_sector / 4) as u32;
+        let mut sector_buf = alloc::vec![0u8; self.bytes_per_sector as usize];
+        let mut sector_idx = u32::MAX;
+        for cluster in 2..(self.total_clusters + 2) {
+            let fat_offset = cluster * 4;
+            let need_sector = self.first_fat_sector + (fat_offset / self.bytes_per_sector);
+            if need_sector != sector_idx {
+                let mut drive = ATA_DRIVE.lock();
+                drive.read_sectors(need_sector, 1, &mut sector_buf)?;
+                sector_idx = need_sector;
+            }
+            let off = (fat_offset % self.bytes_per_sector) as usize;
+            let entry = u32::from_le_bytes([
+                sector_buf[off], sector_buf[off + 1],
+                sector_buf[off + 2], sector_buf[off + 3],
+            ]) & 0x0FFF_FFFF;
+            if entry == 0 { free += 1; }
+            // Bound the scan so a corrupt total_clusters can't run away.
+            if cluster > 2 + entries_per_sector * self.sectors_per_fat {
+                break;
+            }
+        }
+        crate::klog_warn!(
+            "FAT32: FSInfo invalid (lead={:#x} struc={:#x} tail={:#x}); rebuilt free_count={}",
+            lead, struc, tail, free);
+
+        // Write a fresh FSInfo with proper signatures.
+        for b in buf.iter_mut() { *b = 0; }
+        buf[0..4].copy_from_slice(&0x4161_5252u32.to_le_bytes());
+        // bytes 4..484 reserved (zero).
+        buf[484..488].copy_from_slice(&0x6141_7272u32.to_le_bytes());
+        buf[488..492].copy_from_slice(&free.to_le_bytes());
+        buf[492..496].copy_from_slice(&2u32.to_le_bytes()); // last-alloc hint
+        // bytes 496..508 reserved.
+        buf[508..512].copy_from_slice(&0xAA55_0000u32.to_le_bytes());
+
+        let mut drive = ATA_DRIVE.lock();
+        drive.write_sectors(self.fs_info_sector, 1, &buf)?;
+        Ok(())
     }
 
     /// Get the sector number for a given cluster

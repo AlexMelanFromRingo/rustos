@@ -118,6 +118,15 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
                 nic.mac[3], nic.mac[4], nic.mac[5]);
         }
     }
+    rustos::drivers::e1000::init();
+    if rustos::drivers::e1000::is_available() {
+        let g = rustos::drivers::e1000::E1000.lock();
+        if let Some(nic) = g.as_ref() {
+            println!("e1000: present, MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                nic.mac[0], nic.mac[1], nic.mac[2],
+                nic.mac[3], nic.mac[4], nic.mac[5]);
+        }
+    }
 
     if rustos::drivers::virtio_blk::is_available() {
         println!("virtio-blk: present");

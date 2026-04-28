@@ -783,7 +783,16 @@ impl Shell {
             "dns-cache" => self.cmd_dns_cache(args),
             "test" | "[" => self.cmd_test(args),
             "true" => {},
-            "false" => println!("false"),
+            "false" => { /* exit 1 — but our shell doesn't surface $? per-line */ }
+            "basename" => self.cmd_basename(args),
+            "dirname"  => self.cmd_dirname(args),
+            "sort"     => self.cmd_sort(args),
+            "uniq"     => self.cmd_uniq(args),
+            "tee"      => self.cmd_tee(args),
+            "tr"       => self.cmd_tr(args),
+            "cut"      => self.cmd_cut(args),
+            "nl"       => self.cmd_nl(args),
+            "yes"      => self.cmd_yes(args),
             _ => {
                 // Check if it's an alias
                 if let Some(expanded) = self.expand_alias(cmd) {
@@ -3608,6 +3617,200 @@ impl Shell {
         while (step > 0 && i <= end) || (step < 0 && i >= end) {
             println!("{}", i);
             i += step;
+        }
+    }
+
+    // ---------- coreutils tail: small string/file utilities ----------
+
+    /// `basename PATH [SUFFIX]` — strip leading directories (and an
+    /// optional matching suffix) from PATH.  Implements POSIX semantics
+    /// for the common case: strip trailing slashes, then take the
+    /// component after the last remaining slash.
+    fn cmd_basename(&self, args: &[&str]) {
+        if args.is_empty() {
+            println!("Usage: basename PATH [SUFFIX]");
+            return;
+        }
+        let path = args[0].trim_end_matches('/');
+        let path = if path.is_empty() { "/" } else { path };
+        let base = path.rsplit('/').next().unwrap_or(path);
+        let mut out: alloc::string::String = base.into();
+        if let Some(suffix) = args.get(1) {
+            if out.ends_with(suffix) && out.len() > suffix.len() {
+                out.truncate(out.len() - suffix.len());
+            }
+        }
+        println!("{}", out);
+    }
+
+    /// `dirname PATH` — print all but the last component (POSIX).
+    fn cmd_dirname(&self, args: &[&str]) {
+        if args.is_empty() {
+            println!("Usage: dirname PATH");
+            return;
+        }
+        let path = args[0];
+        match path.rfind('/') {
+            None => println!("."),
+            Some(0) => println!("/"),
+            Some(idx) => println!("{}", &path[..idx]),
+        }
+    }
+
+    /// `sort [-r] FILE...` — read line-oriented input (or args[0] file)
+    /// and print sorted; `-r` reverses order.  Stable sort, lexicographic
+    /// byte ordering.  Without arguments and with no piped stdin, prints
+    /// usage.
+    fn cmd_sort(&self, args: &[&str]) {
+        let reverse = args.iter().any(|&a| a == "-r");
+        let files: alloc::vec::Vec<&&str> = args.iter().filter(|a| !a.starts_with('-')).collect();
+        if files.is_empty() {
+            println!("Usage: sort [-r] FILE...");
+            return;
+        }
+        let mut all: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+        for f in &files {
+            if let Ok(data) = crate::fs::vfs::VfsContext::read(f) {
+                if let Ok(s) = core::str::from_utf8(&data) {
+                    for line in s.lines() { all.push(line.into()); }
+                }
+            }
+        }
+        all.sort();
+        if reverse { all.reverse(); }
+        for l in all { println!("{}", l); }
+    }
+
+    /// `uniq FILE` — collapse adjacent duplicate lines (assumes input is
+    /// already sorted, like GNU uniq).
+    fn cmd_uniq(&self, args: &[&str]) {
+        if args.is_empty() {
+            println!("Usage: uniq FILE");
+            return;
+        }
+        let data = match crate::fs::vfs::VfsContext::read(args[0]) {
+            Ok(d) => d,
+            Err(e) => { println!("uniq: {}: {:?}", args[0], e); return; }
+        };
+        let s = match core::str::from_utf8(&data) {
+            Ok(s) => s,
+            Err(_) => { println!("uniq: binary file"); return; }
+        };
+        let mut prev: Option<&str> = None;
+        for line in s.lines() {
+            if Some(line) != prev {
+                println!("{}", line);
+                prev = Some(line);
+            }
+        }
+    }
+
+    /// `tee FILE` — copy input lines to FILE while also re-emitting
+    /// them.  Without piped stdin (which the shell doesn't surface yet)
+    /// the only sensible source is args[1..] as literal lines.
+    fn cmd_tee(&self, args: &[&str]) {
+        if args.is_empty() {
+            println!("Usage: tee FILE [LINE...]");
+            return;
+        }
+        let path = args[0];
+        let lines = &args[1..];
+        let mut buf = alloc::string::String::new();
+        for l in lines {
+            println!("{}", l);
+            buf.push_str(l);
+            buf.push('\n');
+        }
+        if let Err(e) = crate::fs::vfs::VfsContext::write(path, buf.into_bytes()) {
+            println!("tee: write {}: {:?}", path, e);
+        }
+    }
+
+    /// `tr SET1 SET2` — translate every byte in SET1 to the same-index
+    /// byte in SET2, on each non-flag arg (which we treat as a line of
+    /// input).  Truncated SET2 is right-padded with the last byte (GNU
+    /// behaviour).
+    fn cmd_tr(&self, args: &[&str]) {
+        if args.len() < 3 {
+            println!("Usage: tr SET1 SET2 STRING [STRING...]");
+            return;
+        }
+        let s1 = args[0].as_bytes();
+        let s2 = args[1].as_bytes();
+        let mut map = [0u8; 256];
+        for i in 0..256 { map[i] = i as u8; }
+        for (i, &b) in s1.iter().enumerate() {
+            let r = if i < s2.len() { s2[i] } else { *s2.last().unwrap_or(&b) };
+            map[b as usize] = r;
+        }
+        for arg in &args[2..] {
+            let translated: alloc::vec::Vec<u8> = arg.bytes().map(|b| map[b as usize]).collect();
+            if let Ok(s) = core::str::from_utf8(&translated) {
+                println!("{}", s);
+            }
+        }
+    }
+
+    /// `cut -dDELIM -fN FILE` — split each line by DELIM and print
+    /// field N (1-based).  Both flags required; very minimal POSIX
+    /// subset but covers the common use case.
+    fn cmd_cut(&self, args: &[&str]) {
+        let mut delim = '\t';
+        let mut field = 0usize;
+        let mut path: Option<&str> = None;
+        let mut i = 0;
+        while i < args.len() {
+            let a = args[i];
+            if let Some(d) = a.strip_prefix("-d") {
+                delim = d.chars().next().unwrap_or('\t');
+            } else if let Some(f) = a.strip_prefix("-f") {
+                field = f.parse::<usize>().unwrap_or(0);
+            } else {
+                path = Some(a);
+            }
+            i += 1;
+        }
+        if field == 0 || path.is_none() {
+            println!("Usage: cut -dDELIM -fN FILE");
+            return;
+        }
+        let data = match crate::fs::vfs::VfsContext::read(path.unwrap()) {
+            Ok(d) => d,
+            Err(e) => { println!("cut: {:?}", e); return; }
+        };
+        if let Ok(s) = core::str::from_utf8(&data) {
+            for line in s.lines() {
+                if let Some(field_val) = line.split(delim).nth(field - 1) {
+                    println!("{}", field_val);
+                }
+            }
+        }
+    }
+
+    /// `nl FILE` — number lines, GNU-style: 6-wide right-aligned counter
+    /// followed by a tab and the line.
+    fn cmd_nl(&self, args: &[&str]) {
+        if args.is_empty() {
+            println!("Usage: nl FILE");
+            return;
+        }
+        let data = match crate::fs::vfs::VfsContext::read(args[0]) {
+            Ok(d) => d,
+            Err(e) => { println!("nl: {:?}", e); return; }
+        };
+        if let Ok(s) = core::str::from_utf8(&data) {
+            for (i, line) in s.lines().enumerate() {
+                println!("{:>6}\t{}", i + 1, line);
+            }
+        }
+    }
+
+    /// `yes [STRING]` — print STRING (or "y") forever.  Capped at 100
+    /// repetitions in this shell so it doesn't lock the only terminal.
+    fn cmd_yes(&self, args: &[&str]) {
+        let s = args.first().copied().unwrap_or("y");
+        for _ in 0..100 {
+            println!("{}", s);
         }
     }
 

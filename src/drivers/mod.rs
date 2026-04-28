@@ -7,3 +7,4 @@ pub mod pci;
 pub mod virtio_net;
 pub mod virtio_blk;
 pub mod rtl8139;
+pub mod e1000;

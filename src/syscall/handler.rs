@@ -1266,6 +1266,67 @@ pub fn sys_futex(uaddr: usize, op: i32, val: i32, timeout_ticks: u64) -> isize {
     }
 }
 
+/// arch_prctl(code, addr) — set or query the FS/GS base MSR for the
+/// current process.  Linux numbers (asm/prctl.h):
+///
+///     ARCH_SET_GS = 0x1001    ARCH_SET_FS = 0x1002
+///     ARCH_GET_FS = 0x1003    ARCH_GET_GS = 0x1004
+///
+/// On SET_*, `addr` is the new base.  On GET_*, `addr` is a userspace
+/// pointer where the kernel writes the current base as u64.
+///
+/// We persist the value on the calling Process (`fs_base` / `gs_base`)
+/// so a future context-switch path can restore it on return-to-user,
+/// and we write the MSR right now so the calling thread sees the new
+/// base immediately.  A musl/glibc thread that calls
+/// `arch_prctl(ARCH_SET_FS, &my_tcb)` immediately gets working
+/// `mov %fs:0, %rax` semantics for thread-local storage.
+pub fn sys_arch_prctl(code: i32, addr: u64) -> isize {
+    use x86_64::registers::model_specific::{FsBase, GsBase};
+    use x86_64::VirtAddr;
+
+    const ARCH_SET_GS: i32 = 0x1001;
+    const ARCH_SET_FS: i32 = 0x1002;
+    const ARCH_GET_FS: i32 = 0x1003;
+    const ARCH_GET_GS: i32 = 0x1004;
+
+    let pm = crate::process::PROCESS_MANAGER.lock();
+    let pid = pm.current_pid;
+    drop(pm);
+
+    match code {
+        ARCH_SET_FS => {
+            FsBase::write(VirtAddr::new(addr));
+            if let Some(pid) = pid {
+                let mut pm = crate::process::PROCESS_MANAGER.lock();
+                if let Some(p) = pm.get_process_mut(pid) { p.fs_base = addr; }
+            }
+            0
+        }
+        ARCH_SET_GS => {
+            GsBase::write(VirtAddr::new(addr));
+            if let Some(pid) = pid {
+                let mut pm = crate::process::PROCESS_MANAGER.lock();
+                if let Some(p) = pm.get_process_mut(pid) { p.gs_base = addr; }
+            }
+            0
+        }
+        ARCH_GET_FS => {
+            if addr == 0 { return SyscallError::InvalidArgument.as_isize(); }
+            let cur = FsBase::read().as_u64();
+            unsafe { core::ptr::write_unaligned(addr as *mut u64, cur); }
+            0
+        }
+        ARCH_GET_GS => {
+            if addr == 0 { return SyscallError::InvalidArgument.as_isize(); }
+            let cur = GsBase::read().as_u64();
+            unsafe { core::ptr::write_unaligned(addr as *mut u64, cur); }
+            0
+        }
+        _ => SyscallError::InvalidArgument.as_isize(),
+    }
+}
+
 /// rt_sigaction(sig, *act, *oldact)
 ///
 /// Linux ABI: act is { sa_handler: u64, sa_flags: u32, sa_restorer: u64,
