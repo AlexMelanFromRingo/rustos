@@ -2,7 +2,8 @@
 ///
 /// Provides Unix-like user database (/etc/passwd format),
 /// password checking, and credential management.
-/// Passwords are stored as simple SHA-256-like hashes (simplified for kernel).
+/// Passwords are stored as SHA-256 hashes (FIPS 180-4) with a per-user
+/// random salt prepended ("$5$<hex-salt>$<hex-digest>" inspired layout).
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -121,17 +122,11 @@ impl UserDb {
         self.groups.iter().find(|g| g.gid == gid)
     }
 
-    /// Check if a password matches for a user
+    /// Check if a password matches for a user.  Constant-time comparison
+    /// via SHA-256(salt || password) against the stored salted hash.
     pub fn check_password(&self, name: &str, password: &str) -> bool {
         if let Some(user) = self.get_user(name) {
-            if user.password_hash.is_empty() {
-                return true; // no password set
-            }
-            if user.password_hash == "*" || user.password_hash == "!" {
-                return false; // account locked
-            }
-            // Simple hash comparison
-            simple_hash(password) == user.password_hash
+            verify_hash(password, &user.password_hash)
         } else {
             false
         }
@@ -209,14 +204,50 @@ impl UserDb {
     }
 }
 
-/// Simple hash function for passwords (not cryptographically secure — just for demo)
-/// Uses djb2 hash and formats as hex string
+/// Hash a password as SHA-256(salt || password) and produce a
+/// `$sha256$<hex-salt>$<hex-digest>` string we can compare on lookup.
+/// The salt comes from the TSC + a counter so two equal passwords for
+/// different users produce different stored hashes.
 fn simple_hash(input: &str) -> String {
-    let mut hash: u64 = 5381;
-    for byte in input.bytes() {
-        hash = hash.wrapping_mul(33).wrapping_add(byte as u64);
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static SALT_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let salt_seed = (crate::task::timer::current_ticks()
+        ^ SALT_COUNTER.fetch_add(1, Ordering::Relaxed))
+        .wrapping_mul(0x9E3779B97F4A7C15);
+    let salt = alloc::format!("{:016x}", salt_seed);
+
+    let mut sha = crate::sha256::Sha256::new();
+    sha.update(salt.as_bytes());
+    sha.update(b"|");
+    sha.update(input.as_bytes());
+    let digest = sha.finalize();
+
+    alloc::format!("$sha256${}${}", salt, crate::sha256::hex(&digest))
+}
+
+/// Constant-time check for "does this password produce the stored hash?"
+/// Re-runs SHA-256 with the salt embedded in the stored string and
+/// compares with [`crate::sha256::constant_time_eq`].
+fn verify_hash(input: &str, stored: &str) -> bool {
+    if stored.is_empty() { return true; }     // no password set
+    if stored == "*" || stored == "!" { return false; }
+
+    // Format: "$sha256$<salt>$<hex>"
+    if let Some(rest) = stored.strip_prefix("$sha256$") {
+        if let Some(dollar) = rest.find('$') {
+            let salt = &rest[..dollar];
+            let want = &rest[dollar + 1..];
+
+            let mut sha = crate::sha256::Sha256::new();
+            sha.update(salt.as_bytes());
+            sha.update(b"|");
+            sha.update(input.as_bytes());
+            let digest = sha.finalize();
+            let got = crate::sha256::hex(&digest);
+            return crate::sha256::constant_time_eq(got.as_bytes(), want.as_bytes());
+        }
     }
-    alloc::format!("{:016x}", hash)
+    false
 }
 
 /// Global user database

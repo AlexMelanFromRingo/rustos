@@ -29,6 +29,7 @@ pub mod syscall;
 pub mod userspace;
 pub mod elf;
 pub mod klog;
+pub mod sha256;
 pub mod tty;
 pub mod users;
 pub mod init;

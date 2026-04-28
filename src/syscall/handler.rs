@@ -598,38 +598,53 @@ unsafe fn read_user_string(ptr: usize) -> Option<String> {
     core::str::from_utf8(slice).ok().map(String::from)
 }
 
-/// sys_nanosleep - suspend execution for a specified time
+/// sys_nanosleep - suspend execution for a specified time.
 ///
-/// req: pointer to struct { tv_sec: i64, tv_nsec: i64 }
-/// rem: pointer to struct for remaining time (ignored for now)
-pub fn sys_nanosleep(req: usize, _rem: usize) -> isize {
+/// `req` points at `{ tv_sec: i64, tv_nsec: i64 }`.  On wake-up the
+/// remaining time (zero in the common path) is written into `rem`.  If
+/// the sleep was interrupted before completion (delivered signal, etc.)
+/// `rem` reflects the unspent budget so the caller can resume the sleep,
+/// matching Linux semantics.
+pub fn sys_nanosleep(req: usize, rem: usize) -> isize {
     if req == 0 {
         return SyscallError::InvalidArgument.as_isize();
     }
 
-    // Read timespec from user space
-    let (seconds, _nsec) = unsafe {
+    let (seconds, nsec) = unsafe {
         let ts = req as *const [i64; 2];
         ((*ts)[0], (*ts)[1])
     };
-
-    if seconds < 0 {
+    if seconds < 0 || nsec < 0 || nsec >= 1_000_000_000 {
         return SyscallError::InvalidArgument.as_isize();
     }
 
-    // Convert to timer ticks (~18.2 Hz PIT)
-    // 1 second ≈ 18 ticks
-    let ticks = (seconds as u64) * 18;
+    // Convert request to PIT ticks (~18.2 Hz).
+    let ns_total = (seconds as u64).saturating_mul(1_000_000_000)
+        .saturating_add(nsec as u64);
+    let ticks = (ns_total + 54_944_000) / 54_945_055; // ≈ 1/18.2065 s in ns
+    let start = crate::task::timer::current_ticks();
 
-    // Put process to sleep via scheduler
     let mut sched = crate::process::scheduler::SCHEDULER.lock();
     sched.sleep_ticks(ticks);
     drop(sched);
-
-    // Trigger reschedule so another process can run
     crate::process::scheduler::schedule();
 
-    0
+    // Compute remaining time on wake-up.
+    let elapsed_ticks = crate::task::timer::current_ticks().saturating_sub(start);
+    let remaining_ticks = ticks.saturating_sub(elapsed_ticks);
+    let remaining_ns = remaining_ticks.saturating_mul(54_945_055);
+    let rem_sec = (remaining_ns / 1_000_000_000) as i64;
+    let rem_nsec = (remaining_ns % 1_000_000_000) as i64;
+
+    if rem != 0 {
+        unsafe {
+            let ts = rem as *mut [i64; 2];
+            (*ts)[0] = rem_sec;
+            (*ts)[1] = rem_nsec;
+        }
+    }
+
+    if remaining_ticks == 0 { 0 } else { -4 /* EINTR */ }
 }
 
 /// sys_clock_gettime - get time from a specified clock
@@ -958,29 +973,37 @@ const MAP_FIXED: usize = 0x10;
 const PROT_READ: usize = 0x1;
 const PROT_WRITE: usize = 0x2;
 
-/// sys_mmap - map virtual memory
+/// sys_mmap - map virtual memory.
 ///
-/// Currently only supports anonymous private mappings (MAP_ANONYMOUS | MAP_PRIVATE).
-/// File-backed mappings are not yet implemented.
-pub fn sys_mmap(addr: usize, length: usize, prot: usize, flags: usize, fd: isize, _offset: usize) -> isize {
+/// Supports anonymous private mappings (MAP_ANONYMOUS | MAP_PRIVATE) and
+/// file-backed read-only/private mappings, which copy `length` bytes from
+/// `fd` at `offset` into the new mapping (Linux's MAP_PRIVATE semantics
+/// — writes don't propagate back to the file).
+pub fn sys_mmap(addr: usize, length: usize, prot: usize, flags: usize, fd: isize, offset: usize) -> isize {
     use core::sync::atomic::{AtomicUsize, Ordering};
 
-    // Virtual address allocator for mmap region (above program break area)
-    static MMAP_BASE: AtomicUsize = AtomicUsize::new(0x1000_0000); // Start at 256 MiB
+    static MMAP_BASE: AtomicUsize = AtomicUsize::new(0x1000_0000);
 
     if length == 0 {
         return SyscallError::InvalidArgument.as_isize();
     }
 
-    // Only support anonymous private mappings for now
-    if flags & MAP_ANONYMOUS == 0 {
-        // File-backed mapping requested
-        if fd < 0 {
-            return SyscallError::InvalidArgument.as_isize();
+    // For file-backed mappings: read the file content via the FD table.
+    let file_data: Option<alloc::vec::Vec<u8>> = if flags & MAP_ANONYMOUS == 0 {
+        if fd < 0 { return SyscallError::InvalidArgument.as_isize(); }
+        let table = crate::syscall::filedesc::get_fd_table();
+        let path = match table.get(fd as usize) {
+            Some(f) => f.path.clone(),
+            None => return SyscallError::BadFileDescriptor.as_isize(),
+        };
+        drop(table);
+        match crate::fs::vfs::VfsContext::read(&path) {
+            Ok(d) => Some(d),
+            Err(_) => return SyscallError::FileNotFound.as_isize(),
         }
-        // Not implemented yet
-        return SyscallError::NotImplemented.as_isize();
-    }
+    } else {
+        None
+    };
 
     // Round length up to page boundary
     let page_size = 4096usize;
@@ -1036,9 +1059,26 @@ pub fn sys_mmap(addr: usize, length: usize, prot: usize, flags: usize, fd: isize
             }
         }
 
-        // Zero the mapped memory (anonymous mappings must be zeroed)
+        // Zero the mapped memory first (anonymous mappings must be zeroed
+        // per POSIX; file-backed get the trailing pad zeroed too).
         unsafe {
             core::ptr::write_bytes(map_addr as *mut u8, 0, aligned_length);
+        }
+
+        // For file-backed mappings, copy `length` bytes starting at `offset`
+        // into the new region.  Linux MAP_PRIVATE semantics: writes are
+        // page-private (we don't write back to the FS).
+        if let Some(ref data) = file_data {
+            let src_start = offset.min(data.len());
+            let avail = data.len().saturating_sub(src_start);
+            let to_copy = length.min(avail);
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    data.as_ptr().add(src_start),
+                    map_addr as *mut u8,
+                    to_copy,
+                );
+            }
         }
 
         Ok::<usize, SyscallError>(map_addr)

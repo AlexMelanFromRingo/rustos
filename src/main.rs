@@ -162,7 +162,9 @@ Type 'help' to list available shell commands.\n\
               ::1         ip6-localhost ip6-loopback\n\
               255.255.255.255  broadcasthost\n".to_vec());
         let _ = VfsContext::write("/etc/resolv.conf",
-            b"# DNS not yet implemented; uses /etc/hosts\n\
+            b"# Resolver order: cache -> /etc/hosts -> wire DNS (UDP/53).\n\
+              # Loopback-only build: queries to non-loopback resolvers will\n\
+              # fall back to /etc/hosts since there's no NIC driver yet.\n\
               nameserver 127.0.0.1\n".to_vec());
         let _ = VfsContext::write("/etc/sudoers",
             b"# /etc/sudoers - minimal syntax: USER ALL=(ALL) [NOPASSWD]\n\

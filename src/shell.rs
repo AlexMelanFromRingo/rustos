@@ -763,6 +763,7 @@ impl Shell {
             "tcptest" => self.cmd_tcptest(args),
             "tcpinfo" => self.cmd_tcpinfo(),
             "inode" => self.cmd_inode(args),
+            "sha256" | "sha256sum" => self.cmd_sha256(args),
             "httptest" => self.cmd_httptest(args),
             "unixtest" => self.cmd_unixtest(args),
             "wget" | "curl" => self.cmd_wget(args),
@@ -2764,31 +2765,87 @@ impl Shell {
         println!("\n{} files", files.len());
     }
 
-    fn cmd_less(&self, args: &[&str]) {
-        use crate::fs::ramdisk::RAMDISK;
-        use crate::fs::vfs::FileSystem;
-
+    /// less / more: page through a file one screen at a time.
+    /// Press SPACE / Enter for next page, q to quit.  No backwards motion
+    /// (matches `more(1)`).  Reads keys directly from the scancode/serial
+    /// queues since the shell's main loop is async.
+    fn cmd_less(&mut self, args: &[&str]) {
         if args.is_empty() {
             println!("Usage: less <filename>");
             return;
         }
 
         let filename = args[0];
-        let ramdisk = RAMDISK.lock();
+        let content = match crate::fs::vfs::VfsContext::read(filename) {
+            Ok(c) => c,
+            Err(_) => { println!("Error: File '{}' not found", filename); return; }
+        };
+        let text = match core::str::from_utf8(&content) {
+            Ok(t) => t,
+            Err(_) => { println!("Error: File is not valid UTF-8 text"); return; }
+        };
 
-        match ramdisk.read(filename) {
-            Ok(content) => {
-                match core::str::from_utf8(&content) {
-                    Ok(text) => {
-                        // Simple pager - just display all content for now
-                        // In a real implementation, this would paginate
-                        println!("{}", text);
-                        println!("\n(END)");
-                    }
-                    Err(_) => println!("Error: File is not valid UTF-8 text"),
+        // VGA console height — leave one line for the status prompt.
+        const ROWS_PER_PAGE: usize = 24;
+        let lines: alloc::vec::Vec<&str> = text.lines().collect();
+        let total = lines.len();
+        let mut idx = 0usize;
+
+        loop {
+            // Print one page.
+            let end = (idx + ROWS_PER_PAGE).min(total);
+            for line in &lines[idx..end] {
+                println!("{}", line);
+            }
+            idx = end;
+
+            if idx >= total {
+                println!("(END)");
+                return;
+            }
+
+            // Status line — show how far through the file we are.
+            let pct = idx * 100 / total.max(1);
+            print!(":-- {}% (line {}/{}) — SPACE/Enter: next, q: quit --", pct, idx, total);
+
+            // Read one key.
+            match self.read_pager_key() {
+                'q' | 'Q' => { println!(); return; }
+                _ => { println!(); /* SPACE / ENTER / anything else = next page */ }
+            }
+        }
+    }
+
+    /// Block until a key arrives.  Returns the lower-case character.
+    fn read_pager_key(&mut self) -> char {
+        use crate::task::keyboard::{SCANCODE_QUEUE, SERIAL_QUEUE};
+        use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
+
+        let mut keyboard = Keyboard::new(
+            ScancodeSet1::new(),
+            layouts::Us104Key,
+            HandleControl::MapLettersToUnicode,
+        );
+
+        loop {
+            if let Ok(q) = SERIAL_QUEUE.try_get() {
+                if let Some(byte) = q.pop() {
+                    let c = byte as char;
+                    if c.is_ascii() && !c.is_control() { return c.to_ascii_lowercase(); }
+                    if byte == b'\r' || byte == b'\n' || byte == b' ' { return ' '; }
                 }
             }
-            Err(_) => println!("Error: File '{}' not found", filename),
+            if let Ok(q) = SCANCODE_QUEUE.try_get() {
+                if let Some(scancode) = q.pop() {
+                    if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
+                        if let Some(DecodedKey::Unicode(c)) = keyboard.process_keyevent(key_event) {
+                            if c.is_ascii() && !c.is_control() { return c.to_ascii_lowercase(); }
+                            if c == '\r' || c == '\n' || c == ' ' { return ' '; }
+                        }
+                    }
+                }
+            }
+            x86_64::instructions::interrupts::enable_and_hlt();
         }
     }
 
@@ -4050,9 +4107,39 @@ impl Shell {
                 Some(n) => self.print_service_status(n),
                 None => self.print_service_list(),
             },
-            "enable" | "disable" => {
-                println!("service: {}: not yet implemented", verb);
-            }
+            "enable" => match name {
+                Some(n) => {
+                    let mut init = crate::init::INIT.lock();
+                    let level = init.runlevel() as u8;
+                    match init.get_mut(n) {
+                        Some(svc) => {
+                            // Add this runlevel + the standard multi-user
+                            // levels so a freshly enabled service comes up
+                            // on the next runlevel transition.
+                            svc.runlevels |= 1 << level;
+                            svc.runlevels |= (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5);
+                            println!("Enabled {} (runlevels mask {:#04x})", n, svc.runlevels);
+                        }
+                        None => println!("service: {}: not found", n),
+                    }
+                }
+                None => println!("service: missing service name"),
+            },
+            "disable" => match name {
+                Some(n) => {
+                    let mut init = crate::init::INIT.lock();
+                    match init.get_mut(n) {
+                        Some(svc) => {
+                            svc.runlevels = 0;
+                            println!("Disabled {} (runlevels mask 0x00)", n);
+                        }
+                        None => println!("service: {}: not found", n),
+                    }
+                    // Stop it now if it's currently running.
+                    let _ = init.stop(n);
+                }
+                None => println!("service: missing service name"),
+            },
             _ => println!("service: unknown verb '{}'", verb),
         }
     }
@@ -4553,7 +4640,9 @@ impl Shell {
 
     /// partprobe: parse the MBR sector of the first ATA disk (or a synthetic
     /// disk image if none is attached) and print the partition table.
-    fn cmd_partprobe(&self, _args: &[&str]) {
+    fn cmd_partprobe(&self, args: &[&str]) {
+        let want_gpt = args.first() == Some(&"gpt");
+
         // Try a real ATA read first.
         let mut sector = [0u8; 512];
         let got_real = {
@@ -4562,28 +4651,64 @@ impl Shell {
         };
 
         if !got_real {
-            // Synthesise a small MBR: one bootable Linux partition + one
-            // FAT32 partition.  Lets us exercise the parser in QEMU runs
-            // that don't have a real disk image attached.
             for b in sector.iter_mut() { *b = 0; }
             sector[510] = 0x55;
             sector[511] = 0xAA;
-            // Partition 1 — Linux, bootable
-            sector[446] = 0x80;
-            sector[446 + 4] = 0x83;
-            sector[446 + 8..446 + 12].copy_from_slice(&2048u32.to_le_bytes());
-            sector[446 + 12..446 + 16].copy_from_slice(&102400u32.to_le_bytes());
-            // Partition 2 — FAT32
-            sector[462 + 4] = 0x0C;
-            sector[462 + 8..462 + 12].copy_from_slice(&104448u32.to_le_bytes());
-            sector[462 + 12..462 + 16].copy_from_slice(&102400u32.to_le_bytes());
-            println!("partprobe: no ATA disk; using synthetic MBR for self-test");
+            if want_gpt {
+                // Protective MBR: single 0xEE entry covering the whole disk.
+                sector[446 + 4] = 0xEE;
+                sector[446 + 8..446 + 12].copy_from_slice(&1u32.to_le_bytes());
+                sector[446 + 12..446 + 16].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+                println!("partprobe: no ATA disk; using synthetic GPT for self-test");
+            } else {
+                // MBR with two real entries.
+                sector[446] = 0x80;
+                sector[446 + 4] = 0x83;
+                sector[446 + 8..446 + 12].copy_from_slice(&2048u32.to_le_bytes());
+                sector[446 + 12..446 + 16].copy_from_slice(&102400u32.to_le_bytes());
+                sector[462 + 4] = 0x0C;
+                sector[462 + 8..462 + 12].copy_from_slice(&104448u32.to_le_bytes());
+                sector[462 + 12..462 + 16].copy_from_slice(&102400u32.to_le_bytes());
+                println!("partprobe: no ATA disk; using synthetic MBR for self-test");
+            }
         }
 
         match crate::partition::parse_mbr(&sector) {
             Ok(parts) => {
                 if crate::partition::is_gpt_protective(&parts) {
-                    println!("partprobe: GPT protective MBR detected (GPT parsing not yet implemented)");
+                    println!("partprobe: GPT protective MBR detected — reading GPT header at LBA 1");
+                    // Read sector 1 (the GPT header) and the partition
+                    // entry array.  Without a real disk we fall back to
+                    // a synthetic GPT layout matching what `mkfs.gpt` /
+                    // gdisk would produce.
+                    let mut hdr_sector = [0u8; 512];
+                    let got_real_hdr = {
+                        let mut drv = crate::drivers::ata::ATA_DRIVE.lock();
+                        drv.read_sector(1, &mut hdr_sector).is_ok()
+                    };
+                    let mut entries: alloc::vec::Vec<u8> = if got_real_hdr {
+                        // Read 32 sectors of partition array (128 entries × 128 bytes = 16 KB).
+                        let mut buf = alloc::vec![0u8; 32 * 512];
+                        let mut drv = crate::drivers::ata::ATA_DRIVE.lock();
+                        for i in 0..32 {
+                            let mut s = [0u8; 512];
+                            if drv.read_sector(2 + i, &mut s).is_err() { break; }
+                            buf[i as usize * 512..i as usize * 512 + 512].copy_from_slice(&s);
+                        }
+                        buf
+                    } else {
+                        // Synthesise a GPT with two entries: EFI system + Linux fs.
+                        synthesise_demo_gpt(&mut hdr_sector)
+                    };
+                    let _ = entries.len();
+                    match crate::partition::parse_gpt(&hdr_sector, &entries) {
+                        Ok((hdr, parts)) => {
+                            for line in crate::partition::format_gpt(&hdr, &parts) {
+                                println!("{}", line);
+                            }
+                        }
+                        Err(e) => println!("partprobe: GPT parse error: {}", e),
+                    }
                     return;
                 }
                 for line in crate::partition::format_table(&parts) {
@@ -5289,6 +5414,29 @@ impl Shell {
         let _ = close(server);
     }
 
+    /// sha256 / sha256sum: hash a file or stdin (heredoc).
+    fn cmd_sha256(&mut self, args: &[&str]) {
+        if args.is_empty() {
+            // Stdin (heredoc) path.
+            let body = match self.take_stdin() {
+                Some(b) => b,
+                None => { println!("Usage: sha256 <file> [file ...]"); return; }
+            };
+            let d = crate::sha256::hash(body.as_bytes());
+            println!("{}  -", crate::sha256::hex(&d));
+            return;
+        }
+        for path in args {
+            match crate::fs::vfs::VfsContext::read(path) {
+                Ok(data) => {
+                    let d = crate::sha256::hash(&data);
+                    println!("{}  {}", crate::sha256::hex(&d), path);
+                }
+                Err(_) => println!("sha256: {}: read error", path),
+            }
+        }
+    }
+
     /// inode: show the inode number assigned by the backing filesystem to
     /// each path passed.  Looks the path up via DentryCache, which calls
     /// the filesystem's ino() implementation under the hood.
@@ -5767,6 +5915,69 @@ impl Shell {
             }
         }
     }
+}
+
+/// Build a self-test GPT header + partition array entirely in memory.
+/// Lets the partprobe demo exercise the GPT parser without a real disk.
+fn synthesise_demo_gpt(hdr_sector: &mut [u8; 512]) -> alloc::vec::Vec<u8> {
+    use crate::partition::GPT_SIGNATURE;
+    // Two-entry partition array: EFI System (LBA 2048..) + Linux fs.
+    let mut entries: alloc::vec::Vec<u8> = alloc::vec![0u8; 32 * 512];
+
+    // EFI System Partition GUID and a Linux-fs GUID (from UEFI Annex A).
+    let efi: [u8; 16] = [0x28, 0x73, 0x2a, 0xc1, 0x1f, 0xf8, 0xd2, 0x11,
+                          0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b];
+    let linux_fs: [u8; 16] = [0xaf, 0x3d, 0xc6, 0x0f, 0x83, 0x84, 0x72, 0x47,
+                               0x8e, 0x79, 0x3d, 0x69, 0xd8, 0x47, 0x7d, 0xe4];
+
+    // Partition 1: EFI System, LBA 2048..104447 (50 MiB).
+    entries[0..16].copy_from_slice(&efi);
+    entries[32..40].copy_from_slice(&2048u64.to_le_bytes());
+    entries[40..48].copy_from_slice(&104447u64.to_le_bytes());
+    let efi_name: &str = "EFI";
+    let mut name_off = 56;
+    for ch in efi_name.encode_utf16() {
+        entries[name_off..name_off + 2].copy_from_slice(&ch.to_le_bytes());
+        name_off += 2;
+    }
+
+    // Partition 2: Linux fs, LBA 104448..1048575 (~460 MiB).
+    let p2 = 128usize;
+    entries[p2..p2 + 16].copy_from_slice(&linux_fs);
+    entries[p2 + 32..p2 + 40].copy_from_slice(&104448u64.to_le_bytes());
+    entries[p2 + 40..p2 + 48].copy_from_slice(&1048575u64.to_le_bytes());
+    let lfs_name: &str = "rootfs";
+    let mut name_off = p2 + 56;
+    for ch in lfs_name.encode_utf16() {
+        entries[name_off..name_off + 2].copy_from_slice(&ch.to_le_bytes());
+        name_off += 2;
+    }
+
+    let entries_crc = crate::partition::crc32(&entries);
+
+    // Now build the header.
+    for b in hdr_sector.iter_mut() { *b = 0; }
+    hdr_sector[0..8].copy_from_slice(&GPT_SIGNATURE.to_le_bytes());
+    hdr_sector[8..12].copy_from_slice(&0x0001_0000u32.to_le_bytes()); // rev 1.0
+    hdr_sector[12..16].copy_from_slice(&92u32.to_le_bytes());        // header size
+    // CRC32 of header — left zero, computed below.
+    hdr_sector[24..32].copy_from_slice(&1u64.to_le_bytes());          // current LBA
+    hdr_sector[32..40].copy_from_slice(&0xFFFF_FFFF_FFFF_FFFEu64.to_le_bytes()); // backup
+    hdr_sector[40..48].copy_from_slice(&34u64.to_le_bytes());         // first usable
+    hdr_sector[48..56].copy_from_slice(&1048574u64.to_le_bytes());    // last usable
+    // Disk GUID — fixed for the demo.
+    let disk_guid: [u8; 16] = *b"\x12\x34\x56\x78\x9a\xbc\xde\xf0RUSTOSG\x01";
+    hdr_sector[56..72].copy_from_slice(&disk_guid);
+    hdr_sector[72..80].copy_from_slice(&2u64.to_le_bytes());          // partition entry LBA
+    hdr_sector[80..84].copy_from_slice(&128u32.to_le_bytes());        // num entries
+    hdr_sector[84..88].copy_from_slice(&128u32.to_le_bytes());        // entry size
+    hdr_sector[88..92].copy_from_slice(&entries_crc.to_le_bytes());   // entries CRC32
+
+    // Recompute the header CRC32 with the CRC field zeroed.
+    let crc = crate::partition::crc32(&hdr_sector[..92]);
+    hdr_sector[16..20].copy_from_slice(&crc.to_le_bytes());
+
+    entries
 }
 
 /// Parse "aa:bb:cc:dd:ee:ff" into a [u8; 6].

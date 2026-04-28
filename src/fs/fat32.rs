@@ -576,39 +576,56 @@ impl Fat32 {
         Ok(())
     }
 
-    /// Allocate a cluster chain for a file
-    /// Returns the first cluster number
+    /// Allocate a cluster chain for a file.  Returns the first cluster
+    /// number on success.  On any allocation failure mid-chain the partial
+    /// chain is rolled back (every cluster we'd already linked is freed)
+    /// before returning the error, so the FAT never contains an orphan
+    /// chain.
     fn allocate_clusters(&mut self, num_clusters: u32) -> Result<u32, &'static str> {
         if num_clusters == 0 {
             return Err("Cannot allocate zero clusters");
         }
 
-        // Find first free cluster
         let first_cluster = match self.find_free_cluster()? {
             Some(cluster) => cluster,
             None => return Err("No free space available"),
         };
 
-        let mut prev_cluster = first_cluster;
+        // Reserve the first cluster immediately so a subsequent
+        // find_free_cluster doesn't hand it out again.
+        self.write_fat_entry(first_cluster, 0x0FFFFFFF)?;
+        let mut chain: alloc::vec::Vec<u32> = alloc::vec![first_cluster];
 
-        // Allocate remaining clusters
         for _ in 1..num_clusters {
             let next_cluster = match self.find_free_cluster()? {
-                Some(cluster) => cluster,
+                Some(c) => c,
                 None => {
-                    // TODO: Clean up partially allocated chain
+                    // Roll back: free every cluster we'd already grabbed.
+                    for &c in &chain {
+                        let _ = self.write_fat_entry(c, 0x00000000);
+                    }
                     return Err("Insufficient space");
                 }
             };
-
-            // Link prev_cluster to next_cluster
-            self.write_fat_entry(prev_cluster, next_cluster)?;
-            prev_cluster = next_cluster;
+            // Link previous → next in the FAT.
+            let prev = *chain.last().unwrap();
+            if let Err(e) = self.write_fat_entry(prev, next_cluster) {
+                for &c in &chain {
+                    let _ = self.write_fat_entry(c, 0x00000000);
+                }
+                return Err(e);
+            }
+            // Reserve next so we don't re-find it.
+            if let Err(e) = self.write_fat_entry(next_cluster, 0x0FFFFFFF) {
+                for &c in &chain {
+                    let _ = self.write_fat_entry(c, 0x00000000);
+                }
+                return Err(e);
+            }
+            chain.push(next_cluster);
         }
 
-        // Mark last cluster as end of chain
-        self.write_fat_entry(prev_cluster, 0x0FFFFFFF)?;
-
+        // Last cluster is already marked end-of-chain by the reservation.
         Ok(first_cluster)
     }
 
@@ -1251,7 +1268,17 @@ impl FileSystem for Fat32 {
             file_size: 0,
         };
 
-        // Create ".." entry (points to parent — root for now)
+        // Resolve the parent directory's cluster.  When the new directory
+        // is at the root the spec calls for first_cluster=0 (Microsoft FAT
+        // spec §6.5.3), otherwise it must point at the parent's first
+        // cluster.  We compute that from the path.
+        let (parent_path, _new_name) = Self::split_path(path);
+        let parent_cluster = if parent_path.trim_start_matches('/').is_empty() {
+            0
+        } else {
+            self.find_directory_cluster(parent_path)
+                .unwrap_or(self.root_cluster)
+        };
         let dotdot_entry = DirectoryEntry {
             name: *b"..         ",
             attributes: ATTR_DIRECTORY,
@@ -1260,10 +1287,10 @@ impl FileSystem for Fat32 {
             creation_time: 0,
             creation_date: 0,
             last_access_date: 0,
-            first_cluster_high: 0,
+            first_cluster_high: ((parent_cluster >> 16) & 0xFFFF) as u16,
             write_time: 0,
             write_date: 0,
-            first_cluster_low: 0,
+            first_cluster_low: (parent_cluster & 0xFFFF) as u16,
             file_size: 0,
         };
 
