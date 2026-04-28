@@ -196,6 +196,12 @@ pub struct DirEntry {
 pub trait BlockSource {
     fn read_block(&self, block: u64, buf: &mut [u8]) -> Result<(), &'static str>;
     fn block_size(&self) -> u32;
+    /// Persist `buf` to logical block `block`.  Default rejects with
+    /// "read-only" so an unwritable backend surfaces clearly; a real
+    /// implementation should round-trip with `read_block`.
+    fn write_block(&mut self, _block: u64, _buf: &[u8]) -> Result<(), &'static str> {
+        Err("ext2: backing device is read-only")
+    }
 }
 
 pub struct MemoryImage {
@@ -219,6 +225,14 @@ impl BlockSource for MemoryImage {
         Ok(())
     }
     fn block_size(&self) -> u32 { self.block_size }
+    fn write_block(&mut self, block: u64, buf: &[u8]) -> Result<(), &'static str> {
+        let start = block as usize * self.block_size as usize;
+        let end = start + self.block_size as usize;
+        if end > self.data.len() { return Err("write past end"); }
+        if buf.len() < self.block_size as usize { return Err("buf too small"); }
+        self.data[start..end].copy_from_slice(&buf[..self.block_size as usize]);
+        Ok(())
+    }
 }
 
 /// In-memory mounted Ext2 filesystem.
@@ -378,6 +392,292 @@ impl Ext2Fs {
         Ok(cur_ino)
     }
 
+    // =========================================================================
+    // Write support
+    // =========================================================================
+    //
+    // Allocator strategy: scan the inode bitmap of each group looking for
+    // a 0 bit, mark it 1, decrement free_inodes in BGDT and superblock,
+    // sync both back to disk.  Same for blocks via the block bitmap.
+    //
+    // Limits of this implementation:
+    //   * Files up to 12 * block_size (= 48 KiB on 4 K blocks) — only
+    //     direct blocks are populated; indirects are not yet allocated.
+    //   * `add_dir_entry` extends the parent directory by simply
+    //     appending in the existing tail block; we don't grow the
+    //     directory if it overflows.
+    //   * No symlink/special-file creation, no journaling.
+    //
+    // These limits are enough for a self-test that round-trips a small
+    // payload across a reboot, which is the immediate value.
+
+    /// Serialize one Inode and write it back to the inode table.
+    pub fn write_inode(&mut self, ino: u32, inode: &Inode) -> Result<(), &'static str> {
+        if ino == 0 { return Err("invalid inode 0"); }
+        let bs = self.sb.block_size();
+        let group = (ino - 1) / self.sb.inodes_per_group;
+        let index = (ino - 1) % self.sb.inodes_per_group;
+        let gd = self.bgdt.get(group as usize).ok_or("group out of range")?.clone();
+        let inode_size = self.sb.inode_size as u32;
+        let table_byte_off = gd.inode_table as u64 * bs as u64
+            + index as u64 * inode_size as u64;
+        let block = table_byte_off / bs as u64;
+        let off = (table_byte_off % bs as u64) as usize;
+
+        let mut blk = alloc::vec![0u8; bs as usize];
+        self.source.read_block(block, &mut blk)?;
+        let buf = &mut blk[off..off + inode_size as usize];
+        write_le16(buf, inode.mode);
+        write_le16(&mut buf[2..], inode.uid);
+        write_le32(&mut buf[4..], inode.size);
+        write_le32(&mut buf[8..], inode.atime);
+        write_le32(&mut buf[12..], inode.ctime);
+        write_le32(&mut buf[16..], inode.mtime);
+        write_le32(&mut buf[20..], inode.dtime);
+        write_le16(&mut buf[24..], inode.gid);
+        write_le16(&mut buf[26..], inode.links_count);
+        write_le32(&mut buf[28..], inode.blocks);
+        write_le32(&mut buf[32..], inode.flags);
+        write_le32(&mut buf[36..], inode.osd1);
+        for i in 0..15 {
+            write_le32(&mut buf[40 + i * 4..], inode.block[i]);
+        }
+        write_le32(&mut buf[100..], inode.generation);
+        // bytes 104..inode_size left as-is (osd2 etc.)
+
+        self.source.write_block(block, &blk)
+    }
+
+    /// Persist the superblock at byte 1024 (block 1 if bs=1024, block 0
+    /// otherwise) — only the fields we mutate in this driver: inode and
+    /// block free counts.  Uses read-modify-write to preserve the
+    /// fields we don't touch.
+    fn sync_superblock(&mut self) -> Result<(), &'static str> {
+        let bs = self.sb.block_size();
+        let sb_block = SUPERBLOCK_OFFSET / bs as u64;
+        let sb_off   = (SUPERBLOCK_OFFSET % bs as u64) as usize;
+        let mut blk = alloc::vec![0u8; bs as usize];
+        self.source.read_block(sb_block, &mut blk)?;
+        write_le32(&mut blk[sb_off + 12..], self.sb.free_blocks_count);
+        write_le32(&mut blk[sb_off + 16..], self.sb.free_inodes_count);
+        self.source.write_block(sb_block, &blk)
+    }
+
+    /// Persist one BGDT entry (32 bytes) back to disk, preserving every
+    /// other byte of the BGDT block.
+    fn sync_bgdt_entry(&mut self, group: u32) -> Result<(), &'static str> {
+        let bs = self.sb.block_size();
+        let bgdt_block = if self.sb.first_data_block == 0 { 1 } else { self.sb.first_data_block } + 1;
+        let entries_per_block = bs / 32;
+        let block_idx = group / entries_per_block;
+        let entry_idx = group % entries_per_block;
+        let block = (bgdt_block + block_idx) as u64;
+        let off = (entry_idx * 32) as usize;
+
+        let mut blk = alloc::vec![0u8; bs as usize];
+        self.source.read_block(block, &mut blk)?;
+        let gd = &self.bgdt[group as usize];
+        write_le32(&mut blk[off..],     gd.block_bitmap);
+        write_le32(&mut blk[off + 4..], gd.inode_bitmap);
+        write_le32(&mut blk[off + 8..], gd.inode_table);
+        write_le16(&mut blk[off + 12..], gd.free_blocks_count);
+        write_le16(&mut blk[off + 14..], gd.free_inodes_count);
+        write_le16(&mut blk[off + 16..], gd.used_dirs_count);
+        // bytes 18..32 reserved/padding — leave as-is.
+        self.source.write_block(block, &blk)
+    }
+
+    /// Find a clear bit in the given bitmap block, set it, and return
+    /// the bit's index (0-based).  Returns None if the block is full.
+    fn alloc_bit_in_bitmap(&mut self, bitmap_block: u32, max_bits: u32)
+        -> Result<Option<u32>, &'static str>
+    {
+        let bs = self.sb.block_size() as usize;
+        let mut blk = alloc::vec![0u8; bs];
+        self.source.read_block(bitmap_block as u64, &mut blk)?;
+        for byte_idx in 0..bs.min((max_bits as usize + 7) / 8) {
+            if blk[byte_idx] == 0xFF { continue; }
+            for bit in 0..8u32 {
+                let total_bit = byte_idx as u32 * 8 + bit;
+                if total_bit >= max_bits { break; }
+                if blk[byte_idx] & (1 << bit) == 0 {
+                    blk[byte_idx] |= 1 << bit;
+                    self.source.write_block(bitmap_block as u64, &blk)?;
+                    return Ok(Some(total_bit));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Allocate a free inode anywhere in the filesystem.  Returns its
+    /// 1-based inode number.  Updates the BGDT entry's free_inodes_count
+    /// and the superblock's free_inodes_count, and syncs both.
+    pub fn alloc_inode(&mut self) -> Result<u32, &'static str> {
+        for g in 0..self.bgdt.len() {
+            if self.bgdt[g].free_inodes_count == 0 { continue; }
+            let bm = self.bgdt[g].inode_bitmap;
+            let inodes_in_group = self.sb.inodes_per_group;
+            if let Some(bit) = self.alloc_bit_in_bitmap(bm, inodes_in_group)? {
+                self.bgdt[g].free_inodes_count -= 1;
+                self.sb.free_inodes_count = self.sb.free_inodes_count.saturating_sub(1);
+                self.sync_bgdt_entry(g as u32)?;
+                self.sync_superblock()?;
+                let ino = (g as u32) * inodes_in_group + bit + 1;
+                return Ok(ino);
+            }
+        }
+        Err("ext2: no free inodes")
+    }
+
+    /// Allocate a free data block.  Returns its 0-based block number.
+    pub fn alloc_block(&mut self) -> Result<u32, &'static str> {
+        for g in 0..self.bgdt.len() {
+            if self.bgdt[g].free_blocks_count == 0 { continue; }
+            let bm = self.bgdt[g].block_bitmap;
+            let blocks_in_group = self.sb.blocks_per_group;
+            if let Some(bit) = self.alloc_bit_in_bitmap(bm, blocks_in_group)? {
+                self.bgdt[g].free_blocks_count -= 1;
+                self.sb.free_blocks_count = self.sb.free_blocks_count.saturating_sub(1);
+                self.sync_bgdt_entry(g as u32)?;
+                self.sync_superblock()?;
+                // Block numbering: first block in group g is
+                // sb.first_data_block + g * sb.blocks_per_group.
+                let blk = self.sb.first_data_block + (g as u32) * blocks_in_group + bit;
+                return Ok(blk);
+            }
+        }
+        Err("ext2: no free blocks")
+    }
+
+    /// Write `data` as the entire content of inode `ino_no`, allocating
+    /// new blocks as needed.  Limited to ≤ 12 * block_size (direct
+    /// pointers only); larger files would need single/double/triple
+    /// indirect allocation, which this driver does not yet do.
+    pub fn write_inode_data(&mut self, ino_no: u32, data: &[u8]) -> Result<(), &'static str> {
+        let bs = self.sb.block_size() as usize;
+        if data.len() > 12 * bs {
+            return Err("ext2: write > 12 direct blocks not yet supported");
+        }
+        let mut inode = self.read_inode(ino_no)?;
+        let now = crate::drivers::rtc::read_datetime().to_unix_timestamp() as u32;
+        inode.atime = now;
+        inode.mtime = now;
+        if inode.ctime == 0 { inode.ctime = now; }
+        inode.size = data.len() as u32;
+
+        let block_count = (data.len() + bs - 1) / bs;
+        // Free old blocks beyond what we need.  Easier path: just leave
+        // them allocated; truncate is a separate API.  For simplicity
+        // here we *only* extend; the caller should truncate first if
+        // shrinking.
+        for i in 0..block_count {
+            if inode.block[i] == 0 {
+                inode.block[i] = self.alloc_block()?;
+            }
+            let off = i * bs;
+            let take = (data.len() - off).min(bs);
+            let mut buf = alloc::vec![0u8; bs];
+            buf[..take].copy_from_slice(&data[off..off + take]);
+            self.source.write_block(inode.block[i] as u64, &buf)?;
+        }
+        // 512-byte sector count for inode.blocks field.
+        inode.blocks = (block_count * (bs / 512)) as u32;
+        self.write_inode(ino_no, &inode)
+    }
+
+    /// Append a directory entry (inode, name, file_type) to the parent
+    /// directory's last data block.  Assumes the last block has free
+    /// space for one more entry — simple case that covers the test
+    /// path.  Linux ext2 keeps the last entry's `rec_len` extended to
+    /// the end of the block, so insert by shrinking that entry's
+    /// rec_len down to its actual size and using the freed space for
+    /// the new entry.
+    pub fn add_dir_entry(&mut self, parent_ino: u32, child_ino: u32,
+                         name: &str, file_type: u8)
+        -> Result<(), &'static str>
+    {
+        let bs = self.sb.block_size() as usize;
+        let parent = self.read_inode(parent_ino)?;
+        if !parent.is_dir() { return Err("parent not a directory"); }
+        // Find the last allocated direct block.
+        let mut last_idx: Option<usize> = None;
+        for (i, &bn) in parent.block[..12].iter().enumerate() {
+            if bn != 0 { last_idx = Some(i); }
+        }
+        let last_idx = last_idx.ok_or("ext2: parent dir has no blocks")?;
+        let last_block = parent.block[last_idx];
+
+        let mut buf = alloc::vec![0u8; bs];
+        self.source.read_block(last_block as u64, &mut buf)?;
+
+        // Walk to the last entry; shrink its rec_len to its actual size.
+        let name_bytes = name.as_bytes();
+        let new_entry_size = ((8 + name_bytes.len()) + 3) & !3; // 4-byte align
+        let mut pos = 0usize;
+        let mut last_pos = 0usize;
+        while pos + 8 <= bs {
+            let rec_len = u16::from_le_bytes([buf[pos+4], buf[pos+5]]) as usize;
+            if rec_len == 0 || pos + rec_len > bs { break; }
+            last_pos = pos;
+            if pos + rec_len >= bs { break; }
+            pos += rec_len;
+        }
+        // last entry occupies last_pos .. bs.  Shrink it to its actual size.
+        let last_name_len = buf[last_pos + 6] as usize;
+        let last_actual = ((8 + last_name_len) + 3) & !3;
+        let last_remaining = bs - last_pos;
+        if last_remaining < last_actual + new_entry_size {
+            return Err("ext2: parent dir block full (would need to grow)");
+        }
+        // Truncate last entry's rec_len.
+        write_le16(&mut buf[last_pos + 4..], last_actual as u16);
+        // Place new entry right after.
+        let new_pos = last_pos + last_actual;
+        let new_rec_len = bs - new_pos; // takes the rest of the block
+        write_le32(&mut buf[new_pos..], child_ino);
+        write_le16(&mut buf[new_pos + 4..], new_rec_len as u16);
+        buf[new_pos + 6] = name_bytes.len() as u8;
+        buf[new_pos + 7] = file_type;
+        buf[new_pos + 8..new_pos + 8 + name_bytes.len()].copy_from_slice(name_bytes);
+
+        self.source.write_block(last_block as u64, &buf)
+    }
+
+    /// Create a regular file at `/<name>` (root dir only) with the
+    /// given content.  Returns the new inode number.
+    pub fn create_root_file(&mut self, name: &str, data: &[u8]) -> Result<u32, &'static str> {
+        // Make sure the name doesn't already exist.
+        let root = self.read_inode(2)?;
+        if let Ok(entries) = self.read_dir(&root) {
+            if entries.iter().any(|e| e.name == name) {
+                return Err("ext2: name already exists");
+            }
+        }
+        let ino_no = self.alloc_inode()?;
+        // Build a fresh regular-file inode.
+        let now = crate::drivers::rtc::read_datetime().to_unix_timestamp() as u32;
+        let inode = Inode {
+            mode: IFREG | 0o644,
+            uid: 0,
+            size: 0,
+            atime: now, ctime: now, mtime: now, dtime: 0,
+            gid: 0,
+            links_count: 1,
+            blocks: 0,
+            flags: 0,
+            osd1: 0,
+            block: [0u32; 15],
+            generation: 0,
+        };
+        self.write_inode(ino_no, &inode)?;
+        // Write the file data (allocates blocks).
+        self.write_inode_data(ino_no, data)?;
+        // Link it under root with file_type=1 (regular file).
+        self.add_dir_entry(2, ino_no, name, 1)?;
+        Ok(ino_no)
+    }
+
     /// Read a file at `path` to a Vec.
     pub fn read_file(&self, path: &str) -> Result<Vec<u8>, &'static str> {
         let ino_no = self.lookup(path)?;
@@ -438,6 +738,20 @@ impl BlockSource for VirtioBlkSource {
         Ok(())
     }
     fn block_size(&self) -> u32 { self.block_size }
+    fn write_block(&mut self, block: u64, buf: &[u8]) -> Result<(), &'static str> {
+        if buf.len() < self.block_size as usize { return Err("buf too small"); }
+        let sectors_per_block = (self.block_size / 512) as u64;
+        let base_lba = self.start_lba + block * sectors_per_block;
+        let mut g = crate::drivers::virtio_blk::VIRTIO_BLK.lock();
+        let blk = g.as_mut().ok_or("virtio-blk: device not available")?;
+        for i in 0..sectors_per_block {
+            let off = (i * 512) as usize;
+            let mut sector = [0u8; 512];
+            sector.copy_from_slice(&buf[off..off + 512]);
+            blk.write_sector(base_lba + i, &sector)?;
+        }
+        Ok(())
+    }
 }
 
 /// Probe sector 2 of the virtio-blk device for an Ext2 superblock and,

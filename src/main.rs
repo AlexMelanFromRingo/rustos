@@ -127,10 +127,8 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         match rustos::fs::ext2::try_auto_mount_disk() {
             Ok(bs) => {
                 println!("ext2: mounted from virtio-blk (block size {})", bs);
-                // Show the root directory listing so the boot log proves
-                // we can walk the filesystem.
-                let g = rustos::fs::ext2::EXT2.lock();
-                if let Some(fs) = g.as_ref() {
+                let mut g = rustos::fs::ext2::EXT2.lock();
+                if let Some(fs) = g.as_mut() {
                     if let Ok(root) = fs.read_inode(2) {
                         if let Ok(entries) = fs.read_dir(&root) {
                             print!("ext2: /:");
@@ -140,6 +138,41 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
                                 }
                             }
                             println!();
+                        }
+                    }
+                    // Write self-test: append a line to /boot.log (or
+                    // create it on first boot).  Lets us verify across
+                    // a real reboot that our writes persisted.
+                    let now = rustos::drivers::rtc::read_datetime().to_unix_timestamp();
+                    let line = alloc::format!("boot at unix {}\n", now);
+                    let exists_before = fs.lookup("/boot.log").is_ok();
+                    let payload = if exists_before {
+                        match fs.read_file("/boot.log") {
+                            Ok(mut prev) => {
+                                prev.extend_from_slice(line.as_bytes());
+                                prev
+                            }
+                            Err(_) => line.as_bytes().to_vec(),
+                        }
+                    } else {
+                        line.as_bytes().to_vec()
+                    };
+                    if exists_before {
+                        // Re-write existing inode in place.
+                        if let Ok(ino_no) = fs.lookup("/boot.log") {
+                            match fs.write_inode_data(ino_no, &payload) {
+                                Ok(()) => println!(
+                                    "ext2: appended {} bytes to /boot.log (now {} bytes)",
+                                    line.len(), payload.len()),
+                                Err(e) => println!("ext2: write_inode_data err {}", e),
+                            }
+                        }
+                    } else {
+                        match fs.create_root_file("boot.log", &payload) {
+                            Ok(ino) => println!(
+                                "ext2: created /boot.log (inode {}, {} bytes)",
+                                ino, payload.len()),
+                            Err(e) => println!("ext2: create err {}", e),
                         }
                     }
                 }
