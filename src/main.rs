@@ -104,6 +104,32 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     } else {
         println!("acpi: not found");
     }
+    if let Some(madt) = rustos::acpi::parse_madt() {
+        println!(
+            "acpi: MADT lapic={:#x} pic={} ioapics={} iso={} cpus={}",
+            madt.lapic_phys,
+            if madt.pic_present { "yes" } else { "no" },
+            madt.ioapics.len(),
+            madt.overrides.len(),
+            madt.lapic_ids.len(),
+        );
+    }
+
+    // IPv6 self-test: echo to ::1 should round-trip through
+    // handle_inbound and produce a reply we can re-parse.
+    {
+        use rustos::net::ipv6::{Ipv6Addr, build_echo_request, handle_inbound, Ipv6Header};
+        let req = build_echo_request(Ipv6Addr::LOOPBACK, Ipv6Addr::LOOPBACK,
+            0xBEEF, 1, b"hello6");
+        match handle_inbound(&req, &[Ipv6Addr::LOOPBACK]) {
+            Some(reply) => {
+                let h = Ipv6Header::parse(&reply).expect("ipv6 reply parse");
+                println!("ipv6: ::1 echo round-trip ok ({} bytes, hop={})",
+                    reply.len(), h.hop_limit);
+            }
+            None => println!("ipv6: echo dispatch FAILED"),
+        }
+    }
 
     // Symbol-table smoke test: pick an address from the running kernel
     // (the address of kernel_main itself) and ask `symbols::lookup`
@@ -112,13 +138,16 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     {
         let probe_addr = kernel_main as *const () as u64;
         match rustos::symbols::lookup(probe_addr) {
-            Some((name, off)) => println!(
-                "symbols: {} entries; probe {:#x} → {}+{:#x}",
-                rustos::symbols::count(),
-                probe_addr,
-                rustos::symbols::pretty_name(name),
-                off,
-            ),
+            Some((name, off, loc)) => {
+                let pretty = rustos::symbols::pretty_name(name);
+                if loc.is_empty() {
+                    println!("symbols: {} entries; probe {:#x} → {}+{:#x}",
+                        rustos::symbols::count(), probe_addr, pretty, off);
+                } else {
+                    println!("symbols: {} entries; probe {:#x} → {}+{:#x} ({})",
+                        rustos::symbols::count(), probe_addr, pretty, off, loc);
+                }
+            }
             None => println!(
                 "symbols: {} entries; probe {:#x} → (no match)",
                 rustos::symbols::count(), probe_addr,

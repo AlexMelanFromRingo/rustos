@@ -9,6 +9,11 @@ panic = "abort"
 
 [profile.release]
 panic = "abort"
+# Keep DWARF in the kernel binary so build.rs can extract source-line
+# info via addr2line for symbolised panic backtraces.  bootloader 0.9
+# strips the unloaded .debug_* sections when building the bootimage,
+# so this only adds size to the on-disk ELF, not the running kernel.
+debug = 2
 
 [dependencies]
 bootloader = { version = "0.9.23", features = ["map_physical_memory"] }

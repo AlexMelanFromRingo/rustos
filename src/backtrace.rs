@@ -59,9 +59,14 @@ pub fn print_panic(info: &core::panic::PanicInfo) {
     } else {
         for (i, addr) in frames.iter().enumerate() {
             match crate::symbols::lookup(*addr) {
-                Some((name, off)) => {
-                    crate::serial_println!("  #{:<2} {:#018x}  {}+{:#x}",
-                        i, addr, crate::symbols::pretty_name(name), off);
+                Some((name, off, loc)) => {
+                    if loc.is_empty() {
+                        crate::serial_println!("  #{:<2} {:#018x}  {}+{:#x}",
+                            i, addr, crate::symbols::pretty_name(name), off);
+                    } else {
+                        crate::serial_println!("  #{:<2} {:#018x}  {}+{:#x}  ({})",
+                            i, addr, crate::symbols::pretty_name(name), off, loc);
+                    }
                 }
                 None => {
                     crate::serial_println!("  #{:<2} {:#018x}", i, addr);

@@ -15,22 +15,21 @@
 
 include!(concat!(env!("OUT_DIR"), "/symbols.rs"));
 
-/// Look up `addr`.  Returns the matching symbol's name and the
-/// offset of `addr` from the symbol's start, or None if no symbol
-/// covers `addr`.
-pub fn lookup(addr: u64) -> Option<(&'static str, u64)> {
+/// Look up `addr`.  Returns the matching symbol's name, the offset
+/// of `addr` from the symbol's start, and an optional source-file:line
+/// (empty string when the build had no DWARF or addr2line couldn't
+/// resolve the symbol's start).
+pub fn lookup(addr: u64) -> Option<(&'static str, u64, &'static str)> {
     if SYMBOLS.is_empty() { return None; }
-    // Binary search for the largest start ≤ addr.
     let idx = match SYMBOLS.binary_search_by_key(&addr, |t| t.0) {
         Ok(i)  => i,
         Err(0) => return None,
         Err(i) => i - 1,
     };
-    let (start, size, name) = SYMBOLS[idx];
+    let (start, size, name, loc) = SYMBOLS[idx];
     let offset = addr - start;
-    // If the symbol's size is known, only accept addresses inside it.
     if size != 0 && offset >= size { return None; }
-    Some((name, offset))
+    Some((name, offset, loc))
 }
 
 /// Try to extract the most readable substring from a Rust-mangled

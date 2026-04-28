@@ -203,3 +203,142 @@ pub fn sdt_body(phys: u64) -> &'static [u8] {
         core::slice::from_raw_parts(virt as *const u8, len - 36)
     }
 }
+
+// =============================================================================
+// MADT — Multiple APIC Description Table (signature "APIC", ACPI 6.5 §5.2.12)
+// =============================================================================
+//
+// MADT body layout, after the standard 36-byte SDT header:
+//
+//     u32 lapic_address       — physical base of the local APIC (32-bit
+//                               low half; 64-bit override is in entry
+//                               type 5 if present)
+//     u32 flags               — bit 0 = PCAT_COMPAT (8259 present)
+//     u8  entries[]           — variable-length entry stream
+//
+// Each entry begins with `u8 type, u8 length, ...payload`.  Types we
+// honour:
+//
+//     0  Processor Local APIC: { acpi_proc_id, apic_id, flags }
+//     1  IOAPIC:               { ioapic_id, _reserved, address, gsi_base }
+//     2  Interrupt Source Override:
+//                              { bus, source_irq, gsi, flags(u16) }
+//     5  Local APIC Address Override (u64 phys)
+//
+// The ISO entries describe how legacy PC-AT IRQs are wired to the
+// IOAPIC's Global System Interrupts — on PIIX QEMU, ISA IRQ 0 (timer)
+// is routed to GSI 2, which is the canonical reason a naive
+// "irq N → IOAPIC pin N" routing breaks.
+
+/// One MADT IOAPIC record.  GSI base says "this IOAPIC handles GSIs
+/// starting at this number"; combined with `redir_count` (which the
+/// caller reads from IOAPICVER) it covers a contiguous range.
+#[derive(Debug, Clone, Copy)]
+pub struct MadtIoApic {
+    pub id: u8,
+    pub phys_addr: u32,
+    pub gsi_base:  u32,
+}
+
+/// One MADT Interrupt Source Override.  `polarity` and `trigger` are
+/// the two-bit subfields of `flags` (bits 1:0 polarity, 3:2 trigger).
+#[derive(Debug, Clone, Copy)]
+pub struct MadtIso {
+    pub bus: u8,
+    pub source_irq: u8,
+    pub gsi: u32,
+    pub polarity: u8, // 0=conforming, 1=high, 3=low
+    pub trigger:  u8, // 0=conforming, 1=edge, 3=level
+}
+
+#[derive(Debug, Clone)]
+pub struct Madt {
+    pub lapic_phys: u64,
+    pub pic_present: bool,
+    pub ioapics: alloc::vec::Vec<MadtIoApic>,
+    pub overrides: alloc::vec::Vec<MadtIso>,
+    pub lapic_ids: alloc::vec::Vec<u8>, // LAPIC IDs of all enabled CPUs
+}
+
+/// Parse the MADT, if present.  Returns None if no APIC table was
+/// listed in RSDT/XSDT.
+pub fn parse_madt() -> Option<Madt> {
+    let (phys, _hdr) = find_sdt(b"APIC")?;
+    let body = sdt_body(phys);
+    if body.len() < 8 { return None; }
+    let lapic_addr_lo = u32::from_le_bytes([body[0], body[1], body[2], body[3]]);
+    let flags         = u32::from_le_bytes([body[4], body[5], body[6], body[7]]);
+    let mut madt = Madt {
+        lapic_phys: lapic_addr_lo as u64,
+        pic_present: flags & 1 != 0,
+        ioapics: alloc::vec::Vec::new(),
+        overrides: alloc::vec::Vec::new(),
+        lapic_ids: alloc::vec::Vec::new(),
+    };
+
+    // Walk entries.
+    let mut pos = 8usize;
+    while pos + 2 <= body.len() {
+        let etype = body[pos];
+        let elen  = body[pos + 1] as usize;
+        if elen < 2 || pos + elen > body.len() { break; }
+        let payload = &body[pos + 2..pos + elen];
+        match etype {
+            0 if payload.len() >= 6 => {
+                // Processor Local APIC: bytes are
+                // (proc_id, apic_id, flags:u32).  Bit 0 of flags = enabled.
+                let apic_id = payload[1];
+                let p_flags = u32::from_le_bytes([
+                    payload[2], payload[3], payload[4], payload[5]]);
+                if p_flags & 1 != 0 {
+                    madt.lapic_ids.push(apic_id);
+                }
+            }
+            1 if payload.len() >= 10 => {
+                let id = payload[0];
+                // payload[1] reserved
+                let phys = u32::from_le_bytes([
+                    payload[2], payload[3], payload[4], payload[5]]);
+                let gsi  = u32::from_le_bytes([
+                    payload[6], payload[7], payload[8], payload[9]]);
+                madt.ioapics.push(MadtIoApic { id, phys_addr: phys, gsi_base: gsi });
+            }
+            2 if payload.len() >= 8 => {
+                let bus = payload[0];
+                let src = payload[1];
+                let gsi = u32::from_le_bytes([
+                    payload[2], payload[3], payload[4], payload[5]]);
+                let f   = u16::from_le_bytes([payload[6], payload[7]]);
+                madt.overrides.push(MadtIso {
+                    bus, source_irq: src, gsi,
+                    polarity: (f & 0x3) as u8,
+                    trigger:  ((f >> 2) & 0x3) as u8,
+                });
+            }
+            5 if payload.len() >= 10 => {
+                // Local APIC Address Override: 2 reserved + u64 phys.
+                let phys = u64::from_le_bytes([
+                    payload[2], payload[3], payload[4], payload[5],
+                    payload[6], payload[7], payload[8], payload[9],
+                ]);
+                madt.lapic_phys = phys;
+            }
+            _ => {}
+        }
+        pos += elen;
+    }
+    Some(madt)
+}
+
+/// Translate an ISA IRQ to the IOAPIC GSI, applying any matching
+/// Interrupt Source Override.  Returns the GSI (== `irq` if no
+/// override) plus the polarity/trigger overrides that should be
+/// programmed into the redirection-table entry.
+pub fn resolve_irq(madt: &Madt, irq: u8) -> (u32, u8, u8) {
+    for iso in &madt.overrides {
+        if iso.bus == 0 && iso.source_irq == irq {
+            return (iso.gsi, iso.polarity, iso.trigger);
+        }
+    }
+    (irq as u32, 0, 0)
+}

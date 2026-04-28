@@ -29,6 +29,7 @@ pub mod dhcp;
 pub mod eth;
 pub mod arp;
 pub mod http;
+pub mod ipv6;
 
 use alloc::string::String;
 use alloc::vec::Vec;
