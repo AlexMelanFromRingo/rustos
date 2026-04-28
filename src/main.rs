@@ -97,6 +97,15 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     rustos::drivers::pci::scan();
     rustos::drivers::virtio_net::init();
     rustos::drivers::virtio_blk::init();
+    rustos::drivers::rtl8139::init();
+    if rustos::drivers::rtl8139::is_available() {
+        let g = rustos::drivers::rtl8139::RTL8139.lock();
+        if let Some(nic) = g.as_ref() {
+            println!("rtl8139: present, MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                nic.mac[0], nic.mac[1], nic.mac[2],
+                nic.mac[3], nic.mac[4], nic.mac[5]);
+        }
+    }
 
     if rustos::drivers::virtio_blk::is_available() {
         println!("virtio-blk: present");
