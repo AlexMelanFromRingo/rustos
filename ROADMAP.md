@@ -100,7 +100,7 @@ Reference architecture: Linux/Unix-like.
 ### 3.3 Ext2/Ext4 Filesystem
 - [x] Ext2 read support (superblock, BGDT, inodes, direct + 1/2/3-level indirect blocks, dir entries, lookup-by-path) ✅
 - [x] Ext2 mount from disk via virtio-blk (VirtioBlkSource adapter, auto-mount on boot if magic at sector 2) ✅
-- [ ] Ext2 write support
+- [x] Ext2 write support (alloc inode/block, write_inode_data, add_dir_entry, create_root_file; round-trips with Linux debugfs) ✅
 - [ ] Ext4 basic support (extents, large files)
 - [ ] Journal support for crash recovery
 
