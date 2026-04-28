@@ -1,7 +1,30 @@
-/// Process scheduler
+/// Process scheduler — CFS-style virtual runtime.
 ///
-/// Implements a priority-based round-robin scheduler with sleep queues,
-/// timer-based wakeups, and preemptive user-mode context switching.
+/// Each runnable process carries a `vruntime` (in `Process` struct), which
+/// is *normalised* CPU time: every tick the running process spends on
+/// the CPU adds `BASE_WEIGHT / weight(nice)` to its vruntime, where the
+/// weight table follows Linux CFS:
+///
+///     nice = -20 ⇒ weight = 88761  (much faster vruntime growth slowdown)
+///     nice =   0 ⇒ weight =  1024  (BASE_WEIGHT — neutral)
+///     nice =  19 ⇒ weight =    15
+///
+/// The next process to run is always the runnable one with the smallest
+/// vruntime, which guarantees long-term proportional fairness regardless
+/// of arrival order.  When a freshly-runnable process enters the queue
+/// (new fork, wake from sleep) its vruntime is set to the current
+/// minimum so it can't dominate the CPU just because it sat at zero
+/// while others accumulated time.
+///
+/// Sleep queues, signal delivery, and the kernel-mode tick are
+/// unchanged — only the pick-next and quantum arithmetic moved to CFS.
+///
+/// Implementation notes:
+/// * The runqueue is a `BTreeMap<u64, Vec<Pid>>` keyed by vruntime so
+///   `O(log n)` insert/remove and `O(1)` peek-min work.
+/// * To bound the number of context switches per second we keep a
+///   minimum quantum (`SCHED_MIN_GRANULARITY`).  We only re-pick after
+///   that many ticks even if a smaller-vruntime process became runnable.
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
@@ -10,98 +33,143 @@ use crate::process::{Pid, ProcessState, PROCESS_MANAGER};
 use crate::process::context::switch_context;
 use crate::task::timer::current_ticks;
 
-/// Base quantum in timer ticks (for nice 0)
-const BASE_QUANTUM: usize = 10;
-/// Minimum quantum (for nice 19)
-const MIN_QUANTUM: usize = 2;
-/// Maximum quantum (for nice -20)
-const MAX_QUANTUM: usize = 40;
+/// Linux CFS weight table.  Index = nice + 20 (so nice=-20 is index 0).
+/// Each successive nice level changes the weight by a factor of ~1.25.
+const NICE_WEIGHTS: [u32; 40] = [
+    88761, 71755, 56483, 46273, 36291,
+    29154, 23254, 18705, 14949, 11916,
+     9548,  7620,  6100,  4904,  3906,
+     3121,  2501,  1991,  1586,  1277,
+     1024,   820,   655,   526,   423,
+      335,   272,   215,   172,   137,
+      110,    87,    70,    56,    45,
+       36,    29,    23,    18,    15,
+];
+/// Weight for nice=0 — used as the numerator when scaling vruntime.
+const BASE_WEIGHT: u32 = 1024;
+
+fn weight_for_nice(nice: i8) -> u32 {
+    let idx = (nice as i32 + 20).clamp(0, 39) as usize;
+    NICE_WEIGHTS[idx]
+}
+
+/// Increment in vruntime for one tick of CPU time, given a nice value.
+/// We multiply by 1024 so the integer arithmetic keeps useful precision
+/// for low-priority (high-nice) processes.
+fn vtick_for_nice(nice: i8) -> u64 {
+    (BASE_WEIGHT as u64 * BASE_WEIGHT as u64) / weight_for_nice(nice) as u64
+}
+
+/// Minimum slice the running process gets before we consider re-picking.
+/// Without this the scheduler would context-switch on every tick whenever
+/// two processes had equal vruntimes (which is the common case).
+const SCHED_MIN_GRANULARITY: usize = 2;
+/// Targeted period over which all runnable processes get one slice.
+/// Larger values give bigger slices when many processes are runnable.
+const SCHED_LATENCY: usize = 16;
 
 struct SleepEntry {
     pid: Pid,
     wake_tick: u64,
 }
 
-fn quantum_from_nice(nice: i8) -> usize {
-    let q = BASE_QUANTUM as i32 - (nice as i32 * (MAX_QUANTUM as i32 - MIN_QUANTUM as i32) / 39);
-    (q as usize).clamp(MIN_QUANTUM, MAX_QUANTUM)
+/// Time slice for the current process — varies with the number of
+/// runnable processes so the total period stays bounded.
+fn slice_for(runnable: usize) -> usize {
+    let s = SCHED_LATENCY / runnable.max(1);
+    s.max(SCHED_MIN_GRANULARITY)
 }
 
 pub struct Scheduler {
+    /// Runnable processes — kept as an unordered VecDeque for O(1)
+    /// add/remove; we sort by vruntime in `next_process` against the
+    /// current `Process.vruntime` values.  At scale this would become
+    /// a BTreeMap<vruntime, Pid>, but for tens of processes the linear
+    /// scan is faster and avoids keeping vruntime duplicated in two
+    /// places (the BTree key would need updating on every tick).
     ready_queue: VecDeque<Pid>,
+    /// Slice the current process is allowed to hold.
     quantum: usize,
+    /// Ticks the current process has been running this slice.
     quantum_counter: usize,
     sleep_queue: Vec<SleepEntry>,
+    /// Tracks the global minimum vruntime ever observed; new and
+    /// awakening processes start at this value so they get a fair
+    /// (but not infinite) head start.
+    min_vruntime: u64,
 }
 
 impl Scheduler {
     pub const fn new() -> Self {
         Scheduler {
             ready_queue: VecDeque::new(),
-            quantum: BASE_QUANTUM,
+            quantum: SCHED_LATENCY,
             quantum_counter: 0,
             sleep_queue: Vec::new(),
+            min_vruntime: 0,
         }
     }
 
     pub fn enqueue(&mut self, pid: Pid) {
-        if !self.ready_queue.contains(&pid) {
-            self.ready_queue.push_back(pid);
+        if self.ready_queue.contains(&pid) { return; }
+        // Lift this process's vruntime to at least min_vruntime so it
+        // can't sit at 0 and starve the queue when we picked from it.
+        let mut pm = PROCESS_MANAGER.lock();
+        if let Some(p) = pm.get_process_mut(pid) {
+            if p.vruntime < self.min_vruntime {
+                p.vruntime = self.min_vruntime;
+            }
         }
+        drop(pm);
+        self.ready_queue.push_back(pid);
     }
 
     pub fn dequeue(&mut self, pid: Pid) {
         self.ready_queue.retain(|&p| p != pid);
     }
 
-    /// Get and remove the next process from the ready queue (public for ISR use).
-    /// Uses an already-locked ProcessManager to avoid deadlock in ISR context.
+    /// Pick the runnable PID with the smallest vruntime, given an
+    /// already-locked ProcessManager (so we can call this from the
+    /// timer ISR without deadlock).  Removes the chosen PID from the
+    /// run queue.
     pub fn dequeue_next_with_pm(&mut self, pm: &crate::process::ProcessManager) -> Option<Pid> {
-        if self.ready_queue.is_empty() {
-            return None;
-        }
-        let mut best_idx = 0;
-        let mut best_nice: i8 = 19;
+        if self.ready_queue.is_empty() { return None; }
+        let mut best_idx = 0usize;
+        let mut best_v = u64::MAX;
         for (i, &pid) in self.ready_queue.iter().enumerate() {
-            let nice = pm.get_process(pid).map(|p| p.nice).unwrap_or(19);
-            if nice < best_nice {
-                best_nice = nice;
-                best_idx = i;
-            }
+            let v = pm.get_process(pid).map(|p| p.vruntime).unwrap_or(u64::MAX);
+            if v < best_v { best_v = v; best_idx = i; }
+        }
+        if best_v != u64::MAX && best_v > self.min_vruntime {
+            self.min_vruntime = best_v;
         }
         self.ready_queue.remove(best_idx)
     }
 
-    /// Get and remove the next process from the ready queue (locks PM internally).
-    pub fn dequeue_next(&mut self) -> Option<Pid> {
-        self.next_process()
-    }
+    /// Same as `dequeue_next_with_pm` but takes the PM lock itself.
+    pub fn dequeue_next(&mut self) -> Option<Pid> { self.next_process() }
 
-    /// Get the next process to run (priority-aware round-robin)
     fn next_process(&mut self) -> Option<Pid> {
-        if self.ready_queue.is_empty() {
-            return None;
-        }
-
+        if self.ready_queue.is_empty() { return None; }
         let pm = PROCESS_MANAGER.lock();
-        let mut best_idx = 0;
-        let mut best_nice: i8 = 19;
-
+        let mut best_idx = 0usize;
+        let mut best_v = u64::MAX;
         for (i, &pid) in self.ready_queue.iter().enumerate() {
-            let nice = pm.get_process(pid).map(|p| p.nice).unwrap_or(19);
-            if nice < best_nice {
-                best_nice = nice;
-                best_idx = i;
-            }
+            let v = pm.get_process(pid).map(|p| p.vruntime).unwrap_or(u64::MAX);
+            if v < best_v { best_v = v; best_idx = i; }
         }
         drop(pm);
-
+        if best_v != u64::MAX && best_v > self.min_vruntime {
+            self.min_vruntime = best_v;
+        }
         self.ready_queue.remove(best_idx)
     }
 
-    /// Full tick — used when preempting user-mode processes.
-    /// Handles sleep wakeups, signal delivery, quantum counting, and preemption.
+    /// Full tick — used when preempting user-mode processes.  Charges
+    /// the running process's vruntime, handles sleep wakeups and
+    /// signal delivery, then preempts when the slice is exhausted.
     pub fn tick(&mut self) {
+        self.charge_running_vruntime();
         self.wake_sleepers();
         self.deliver_signals();
 
@@ -109,8 +177,19 @@ impl Scheduler {
         if self.quantum_counter >= self.quantum {
             self.quantum_counter = 0;
             self.preempt();
-            // After preempt, schedule the next user process
             self.schedule_user();
+        }
+    }
+
+    /// Add one tick's worth of normalised CPU time to the currently
+    /// running process's vruntime.  Bounded above by saturating add
+    /// so a long-running niced process can never wrap.
+    fn charge_running_vruntime(&mut self) {
+        let mut pm = PROCESS_MANAGER.lock();
+        if let Some(pid) = pm.current_pid {
+            if let Some(p) = pm.get_process_mut(pid) {
+                p.vruntime = p.vruntime.saturating_add(vtick_for_nice(p.nice));
+            }
         }
     }
 
@@ -198,25 +277,26 @@ impl Scheduler {
         drop(pm);
     }
 
-    /// Schedule next user process to run.
-    /// Sets current_pid and quantum. The actual TrapFrame switch happens in
-    /// timer_preempt_handler which reads the new current process's trap_frame.
+    /// Schedule next user process to run.  Sets current_pid and the
+    /// CFS slice.  The actual TrapFrame switch happens in
+    /// timer_preempt_handler which reads the new current process's
+    /// trap_frame.
     fn schedule_user(&mut self) {
         let next_pid = match self.next_process() {
             Some(pid) => pid,
             None => return,
         };
+        let runnable = self.ready_queue.len() + 1; // +1 for the picked one
+        let slice = slice_for(runnable);
 
         let mut pm = PROCESS_MANAGER.lock();
-
         self.quantum_counter = 0;
         if let Some(next) = pm.get_process_mut(next_pid) {
             next.state = ProcessState::Running;
-            self.quantum = quantum_from_nice(next.nice);
         }
         pm.current_pid = Some(next_pid);
-
         drop(pm);
+        self.quantum = slice;
     }
 
     /// Schedule next process for kernel cooperative switching
@@ -242,9 +322,10 @@ impl Scheduler {
 
         if let Some(next) = pm.get_process_mut(next_pid) {
             next.state = ProcessState::Running;
-            self.quantum = quantum_from_nice(next.nice);
         }
         pm.current_pid = Some(next_pid);
+        let runnable = self.ready_queue.len() + 1;
+        self.quantum = slice_for(runnable);
 
         if let Some(curr_pid) = current_pid {
             let current_ctx = pm.get_process_mut(curr_pid)

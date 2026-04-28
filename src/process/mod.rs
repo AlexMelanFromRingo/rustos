@@ -89,6 +89,13 @@ pub struct Process {
     pub cap_effective: u64,
     /// Permitted set: maximum the process can ever raise effective to.
     pub cap_permitted: u64,
+
+    /// CFS virtual runtime — accumulated normalised CPU time.  The
+    /// scheduler always picks the runnable process with the smallest
+    /// vruntime, which guarantees long-term fairness regardless of
+    /// arrival order.  See `crate::process::scheduler::Scheduler::tick`
+    /// for the increment formula.
+    pub vruntime: u64,
 }
 
 impl Process {
@@ -124,6 +131,7 @@ impl Process {
             sigactions: [0u64; 32],
             cap_effective: u64::MAX, // kernel processes default to full caps
             cap_permitted: u64::MAX,
+            vruntime: 0,
         }
     }
 
@@ -167,6 +175,7 @@ impl Process {
             sigactions: [0u64; 32],
             cap_effective: u64::MAX, // kernel processes default to full caps
             cap_permitted: u64::MAX,
+            vruntime: 0,
         }
     }
 
@@ -205,6 +214,7 @@ impl Process {
             sigactions: self.sigactions, // and signal handlers
             cap_effective: self.cap_effective, // and capability sets
             cap_permitted: self.cap_permitted,
+            vruntime: self.vruntime,
         }
     }
 }
