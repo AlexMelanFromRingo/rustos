@@ -80,13 +80,71 @@ pub struct Writer {
     column_position: usize,
     color_code: ColorCode,
     buffer: &'static mut Buffer,
+    /// ANSI escape parser state: when we hit ESC (0x1B) we transition
+    /// from None → SeenEsc → InCsi(buf) and accumulate parameters into
+    /// `csi_buf` until a final byte (0x40..=0x7E) terminates the
+    /// sequence.  See ECMA-48 §5.4 and `console_codes(4)`.
+    ansi_state: AnsiState,
+    csi_buf: [u8; 16],
+    csi_len: usize,
+    /// Saved fg/bg so a single SGR sequence can change one without
+    /// destroying the other.
+    fg: Color,
+    bg: Color,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnsiState {
+    None,
+    SeenEsc,
+    InCsi,
 }
 
 impl Writer {
     pub fn write_byte(&mut self, byte: u8) {
+        // ----- ANSI / VT100 escape state machine -----------------------
+        // We accept the SGR + cursor + erase subset of ECMA-48 so callers
+        // can emit standard `\x1b[...m` color codes and they show up in
+        // VGA hardware colors instead of as literal "[31m" gibberish.
+        match self.ansi_state {
+            AnsiState::SeenEsc => {
+                if byte == b'[' {
+                    self.ansi_state = AnsiState::InCsi;
+                    self.csi_len = 0;
+                    return;
+                } else {
+                    // Unknown ESC sequence — drop the escape, fall back
+                    // to printing the next byte literally.
+                    self.ansi_state = AnsiState::None;
+                    // intentional fall-through to default handling below
+                }
+            }
+            AnsiState::InCsi => {
+                // Final bytes are 0x40..=0x7E (`@`..`~`).  Parameters
+                // are digits and `;`.  Anything else aborts the escape.
+                let final_byte = (0x40..=0x7E).contains(&byte);
+                if !final_byte {
+                    if self.csi_len < self.csi_buf.len() {
+                        self.csi_buf[self.csi_len] = byte;
+                        self.csi_len += 1;
+                    }
+                    return;
+                }
+                self.ansi_state = AnsiState::None;
+                self.handle_csi(byte);
+                return;
+            }
+            AnsiState::None => {}
+        }
+        if byte == 0x1B {
+            self.ansi_state = AnsiState::SeenEsc;
+            return;
+        }
+
         match byte {
             b'\n' => self.new_line(),
             0x08 => self.backspace(), // Backspace
+            b'\r' => { self.column_position = 0; self.update_cursor(); }
             byte => {
                 if self.column_position >= BUFFER_WIDTH {
                     self.new_line();
@@ -102,6 +160,153 @@ impl Writer {
                 });
                 self.column_position += 1;
                 self.update_cursor();
+            }
+        }
+    }
+
+    /// Handle a complete CSI sequence (ESC [ params final_byte).
+    /// Implements:
+    ///   * `<n>;<m>m`   — SGR (Select Graphic Rendition): colors + reset
+    ///   * `2J` / `0J`  — Erase in Display (clear screen)
+    ///   * `K`          — Erase in Line (rest of current row)
+    ///   * `<n>;<m>H`   — Cursor Position (1-based)
+    ///   * `<n>A/B/C/D` — Cursor up/down/forward/back
+    fn handle_csi(&mut self, final_byte: u8) {
+        // Parse `;`-separated decimal parameters out of csi_buf.
+        let mut params = [0u32; 8];
+        let mut np = 0usize;
+        let mut cur = 0u32;
+        let mut have_digit = false;
+        for &b in &self.csi_buf[..self.csi_len] {
+            if b.is_ascii_digit() {
+                cur = cur * 10 + (b - b'0') as u32;
+                have_digit = true;
+            } else if b == b';' {
+                if np < 8 { params[np] = cur; np += 1; }
+                cur = 0;
+                have_digit = false;
+            }
+            // Other intermediate bytes (e.g. '?') are ignored — we
+            // don't yet implement private DEC modes.
+        }
+        if have_digit && np < 8 { params[np] = cur; np += 1; }
+
+        match final_byte {
+            b'm' => {
+                // SGR.  No params == reset.
+                if np == 0 { self.sgr_reset(); return; }
+                for i in 0..np { self.apply_sgr(params[i]); }
+            }
+            b'J' => {
+                // Erase in Display.  We honour 2 (entire screen) and
+                // 0/missing (cursor → end).  1 (start → cursor) is
+                // approximated as 2.
+                let mode = if np == 0 { 0 } else { params[0] };
+                self.erase_in_display(mode);
+            }
+            b'K' => {
+                // Erase in Line: 0 = cursor → end of line.
+                let row = BUFFER_HEIGHT - 1;
+                let blank = ScreenChar { ascii_character: b' ',
+                                         color_code: self.color_code };
+                for col in self.column_position..BUFFER_WIDTH {
+                    self.buffer.chars[row][col].write(blank);
+                }
+            }
+            b'H' | b'f' => {
+                // CUP — only the column matters in our 1-row writer.
+                let col = if np >= 2 { params[1] } else { 1 };
+                let target = (col.saturating_sub(1) as usize).min(BUFFER_WIDTH - 1);
+                self.column_position = target;
+                self.update_cursor();
+            }
+            b'C' => {
+                let n = if np == 0 { 1 } else { params[0] as usize };
+                self.column_position = (self.column_position + n).min(BUFFER_WIDTH - 1);
+                self.update_cursor();
+            }
+            b'D' => {
+                let n = if np == 0 { 1 } else { params[0] as usize };
+                self.column_position = self.column_position.saturating_sub(n);
+                self.update_cursor();
+            }
+            // 'A' (cursor up) / 'B' (cursor down) are no-ops: the only
+            // writable row is the bottom one.
+            _ => {}
+        }
+    }
+
+    fn sgr_reset(&mut self) {
+        self.fg = Color::Yellow;
+        self.bg = Color::Black;
+        self.color_code = ColorCode::new(self.fg, self.bg);
+    }
+
+    /// Apply one SGR parameter.  Intentionally minimal — we cover the
+    /// 30-37 / 40-47 normal-intensity range plus 90-97 / 100-107
+    /// bright variants and the 0 reset.  Bold (1) maps to bright fg
+    /// because our hardware colors already encode brightness.
+    fn apply_sgr(&mut self, p: u32) {
+        match p {
+            0 => self.sgr_reset(),
+            1 => {
+                // Bold ⇒ bright fg.  Convert the existing fg to its
+                // bright variant (8..15).
+                let v = self.fg as u8;
+                if v < 8 { self.fg = Color::from_u8(v + 8); }
+                self.color_code = ColorCode::new(self.fg, self.bg);
+            }
+            22 => {
+                let v = self.fg as u8;
+                if v >= 8 { self.fg = Color::from_u8(v - 8); }
+                self.color_code = ColorCode::new(self.fg, self.bg);
+            }
+            30..=37 => {
+                self.fg = ansi_fg(p - 30);
+                self.color_code = ColorCode::new(self.fg, self.bg);
+            }
+            39 => {
+                self.fg = Color::Yellow; // default
+                self.color_code = ColorCode::new(self.fg, self.bg);
+            }
+            40..=47 => {
+                self.bg = ansi_fg(p - 40);
+                self.color_code = ColorCode::new(self.fg, self.bg);
+            }
+            49 => {
+                self.bg = Color::Black;
+                self.color_code = ColorCode::new(self.fg, self.bg);
+            }
+            90..=97 => {
+                self.fg = ansi_bright(p - 90);
+                self.color_code = ColorCode::new(self.fg, self.bg);
+            }
+            100..=107 => {
+                self.bg = ansi_bright(p - 100);
+                self.color_code = ColorCode::new(self.fg, self.bg);
+            }
+            _ => {}
+        }
+    }
+
+    fn erase_in_display(&mut self, mode: u32) {
+        let blank = ScreenChar { ascii_character: b' ', color_code: self.color_code };
+        match mode {
+            2 | 1 => {
+                for r in 0..BUFFER_HEIGHT {
+                    for c in 0..BUFFER_WIDTH {
+                        self.buffer.chars[r][c].write(blank);
+                    }
+                }
+                self.column_position = 0;
+                self.update_cursor();
+            }
+            _ => {
+                // 0 — current line cursor → end + every line below
+                let row = BUFFER_HEIGHT - 1;
+                for col in self.column_position..BUFFER_WIDTH {
+                    self.buffer.chars[row][col].write(blank);
+                }
             }
         }
     }
@@ -169,12 +374,12 @@ impl Writer {
 
     pub fn write_string(&mut self, s: &str) {
         for byte in s.bytes() {
+            // ESC (0x1B) and CR (0x0D) need to reach the state machine
+            // directly; they used to be replaced with the placeholder
+            // glyph, which broke ANSI colors and bare \r prompts.
             match byte {
-                // printable ASCII byte, newline, or backspace
-                0x20..=0x7e | b'\n' | 0x08 => self.write_byte(byte),
-                // Extended ASCII (box drawing, symbols, etc.)
+                0x20..=0x7e | b'\n' | 0x08 | 0x1B | b'\r' => self.write_byte(byte),
                 0x80..=0xff => self.write_byte(byte),
-                // not part of printable range
                 _ => self.write_byte(0xfe),
             }
         }
@@ -229,6 +434,38 @@ impl Writer {
     /// Reset to default colors (Yellow on Black)
     pub fn reset_color(&mut self) {
         self.color_code = ColorCode::new(Color::Yellow, Color::Black);
+        self.fg = Color::Yellow;
+        self.bg = Color::Black;
+    }
+}
+
+/// Map ANSI 30-37 / 40-47 indices to our hardware Color enum.
+fn ansi_fg(idx: u32) -> Color {
+    match idx {
+        0 => Color::Black,
+        1 => Color::Red,
+        2 => Color::Green,
+        3 => Color::Brown,        // ANSI yellow on dim is actually brown on VGA
+        4 => Color::Blue,
+        5 => Color::Magenta,
+        6 => Color::Cyan,
+        7 => Color::LightGray,
+        _ => Color::White,
+    }
+}
+
+/// Map ANSI 90-97 / 100-107 to bright variants.
+fn ansi_bright(idx: u32) -> Color {
+    match idx {
+        0 => Color::DarkGray,
+        1 => Color::LightRed,
+        2 => Color::LightGreen,
+        3 => Color::Yellow,
+        4 => Color::LightBlue,
+        5 => Color::Pink,
+        6 => Color::LightCyan,
+        7 => Color::White,
+        _ => Color::White,
     }
 }
 
@@ -245,6 +482,11 @@ lazy_static! {
             column_position: 0,
             color_code: ColorCode::new(Color::Yellow, Color::Black),
             buffer: unsafe { &mut *(0xb8000 as *mut Buffer) },
+            ansi_state: AnsiState::None,
+            csi_buf: [0u8; 16],
+            csi_len: 0,
+            fg: Color::Yellow,
+            bg: Color::Black,
         };
         writer.update_cursor();
         Mutex::new(writer)

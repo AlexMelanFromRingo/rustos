@@ -75,15 +75,8 @@ pub fn read_proc(path: &str) -> Option<Vec<u8>> {
         }
 
         "cpuinfo" => {
-            let mut s = String::new();
-            s.push_str("processor\t: 0\n");
-            s.push_str("vendor_id\t: GenuineIntel\n");
-            s.push_str("model name\t: QEMU Virtual CPU\n");
-            s.push_str("cpu MHz\t\t: 0.000\n");
-            s.push_str("cache size\t: 0 KB\n");
-            s.push_str("flags\t\t: fpu de pse tsc msr pae mce cx8 apic\n");
-            s.push_str("bogomips\t: 0.00\n");
-            Some(s.into_bytes())
+            // CPUID-driven block per logical CPU.  Single CPU until SMP.
+            Some(crate::cpuid::proc_cpuinfo_block(0).into_bytes())
         }
 
         "kmsg" => {

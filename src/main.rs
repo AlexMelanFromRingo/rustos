@@ -96,6 +96,36 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // a warning and the global stays None.
     rustos::drivers::pci::scan();
 
+    // Discover ACPI tables (RSDP → RSDT/XSDT) — purely informational
+    // for now; the MADT consumer will read these to retire the PIC.
+    rustos::acpi::init();
+    if let Some(t) = rustos::acpi::ACPI.lock().as_ref() {
+        println!("acpi: RSDP @ {:#x}, {} table(s)", t.rsdp_phys, t.sdt_phys.len());
+    } else {
+        println!("acpi: not found");
+    }
+
+    // Symbol-table smoke test: pick an address from the running kernel
+    // (the address of kernel_main itself) and ask `symbols::lookup`
+    // what it covers.  Demonstrates that the build.rs-emitted table is
+    // wired up and gives readable names instead of raw hex.
+    {
+        let probe_addr = kernel_main as *const () as u64;
+        match rustos::symbols::lookup(probe_addr) {
+            Some((name, off)) => println!(
+                "symbols: {} entries; probe {:#x} → {}+{:#x}",
+                rustos::symbols::count(),
+                probe_addr,
+                rustos::symbols::pretty_name(name),
+                off,
+            ),
+            None => println!(
+                "symbols: {} entries; probe {:#x} → (no match)",
+                rustos::symbols::count(), probe_addr,
+            ),
+        }
+    }
+
     // Bring up LAPIC + IOAPIC infrastructure.  We don't yet retire the
     // legacy 8259 PIC — that requires re-routing every existing IRQ
     // through the IOAPIC and switching all EOI calls to apic::eoi().

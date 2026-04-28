@@ -45,7 +45,16 @@ pub struct PciDevice {
     pub interrupt_pin:  u8,
     pub subsys_vendor:  u16,
     pub subsys_id:      u16,
+    /// Offset (in PCI config space) of the MSI capability, or 0 if absent.
+    pub msi_cap:    u8,
+    /// Offset of the MSI-X capability, or 0 if absent.
+    pub msix_cap:   u8,
 }
+
+/// PCI capability IDs (PCI Local Bus 3.0 Appendix H).
+pub const CAP_ID_MSI:  u8 = 0x05;
+pub const CAP_ID_MSIX: u8 = 0x11;
+pub const CAP_ID_VENDOR: u8 = 0x09;
 
 unsafe fn config_read32(addr: PciAddr, off: u8) -> u32 {
     unsafe {
@@ -96,10 +105,44 @@ fn read_device(addr: PciAddr) -> Option<PciDevice> {
     let interrupt_line = unsafe { config_read8(addr, 0x3C) };
     let interrupt_pin  = unsafe { config_read8(addr, 0x3D) };
 
+    let (msi_cap, msix_cap) = walk_capabilities(addr, header_type);
+
     Some(PciDevice {
         addr, vendor_id, device_id, class_code, subclass, prog_if, revision,
         header_type, bars, interrupt_line, interrupt_pin, subsys_vendor, subsys_id,
+        msi_cap, msix_cap,
     })
+}
+
+/// Walk the PCI capability list rooted at config offset 0x34 (header
+/// type 0 / 1; type 2 PCI cardbus has it at 0x14 but we don't see those
+/// on QEMU).  Each capability is `<id:u8> <next:u8> ...`; chain ends
+/// when next == 0.  Returns (msi_offset, msix_offset), 0 if absent.
+///
+/// Note: header status register bit 4 (Capabilities List) must be set
+/// for this list to exist.  We check it; otherwise return zeros.
+fn walk_capabilities(addr: PciAddr, header_type: u8) -> (u8, u8) {
+    let status = unsafe { config_read16(addr, 0x06) };
+    if status & 0x10 == 0 { return (0, 0); } // No capabilities list
+    if header_type > 1 { return (0, 0); }
+
+    let mut cur = unsafe { config_read8(addr, 0x34) } & 0xFC;
+    let mut msi: u8 = 0;
+    let mut msix: u8 = 0;
+    let mut hops = 0;
+    while cur != 0 && hops < 48 {
+        let id   = unsafe { config_read8(addr, cur) };
+        let next = unsafe { config_read8(addr, cur + 1) } & 0xFC;
+        match id {
+            CAP_ID_MSI  => msi = cur,
+            CAP_ID_MSIX => msix = cur,
+            _ => {}
+        }
+        if next == cur { break; } // self-loop guard
+        cur = next;
+        hops += 1;
+    }
+    (msi, msix)
 }
 
 static DEVICES: Mutex<Vec<PciDevice>> = Mutex::new(Vec::new());
@@ -128,10 +171,14 @@ pub fn scan() {
 
     crate::klog_info!("PCI: enumerated {} device(s) on bus 0/1", found.len());
     for d in &found {
+        let mut caps = alloc::string::String::new();
+        if d.msi_cap  != 0 { caps.push_str(" msi"); }
+        if d.msix_cap != 0 { caps.push_str(" msix"); }
         crate::klog_info!(
-            "  {:02x}:{:02x}.{}  vendor={:04x} device={:04x} class={:02x}.{:02x}.{:02x}",
+            "  {:02x}:{:02x}.{}  vendor={:04x} device={:04x} class={:02x}.{:02x}.{:02x}{}",
             d.addr.bus, d.addr.dev, d.addr.func,
             d.vendor_id, d.device_id, d.class_code, d.subclass, d.prog_if,
+            caps,
         );
     }
     *DEVICES.lock() = found;

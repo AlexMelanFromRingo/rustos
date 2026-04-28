@@ -52,13 +52,21 @@ pub fn print_panic(info: &core::panic::PanicInfo) {
     }
 
     crate::serial_println!("KERNEL PANIC: {}", info);
-    crate::serial_println!("Backtrace:");
+    crate::serial_println!("Backtrace ({} symbols loaded):", crate::symbols::count());
     let frames = capture(32);
     if frames.is_empty() {
         crate::serial_println!("  (no frames — frame pointers may be disabled)");
     } else {
         for (i, addr) in frames.iter().enumerate() {
-            crate::serial_println!("  #{:<2} {:#018x}", i, addr);
+            match crate::symbols::lookup(*addr) {
+                Some((name, off)) => {
+                    crate::serial_println!("  #{:<2} {:#018x}  {}+{:#x}",
+                        i, addr, crate::symbols::pretty_name(name), off);
+                }
+                None => {
+                    crate::serial_println!("  #{:<2} {:#018x}", i, addr);
+                }
+            }
         }
     }
 }

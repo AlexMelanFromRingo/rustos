@@ -51,6 +51,9 @@ pub mod hardening;
 pub mod futex;
 pub mod backtrace;
 pub mod apic;
+pub mod cpuid;
+pub mod acpi;
+pub mod symbols;
 
 pub fn init() {
     gdt::init();
