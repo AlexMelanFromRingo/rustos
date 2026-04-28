@@ -768,6 +768,9 @@ impl Shell {
             "hpet" => self.cmd_hpet(),
             "futex" => self.cmd_futex(args),
             "panic-test" => self.cmd_panic_test(),
+            "ext2" => self.cmd_ext2(args),
+            "lspci" => self.cmd_lspci(),
+            "nicstat" => self.cmd_nicstat(),
             "httptest" => self.cmd_httptest(args),
             "unixtest" => self.cmd_unixtest(args),
             "wget" | "curl" => self.cmd_wget(args),
@@ -5437,6 +5440,123 @@ impl Shell {
 
         let _ = close(client);
         let _ = close(server);
+    }
+
+    /// lspci: list every device the PCI scanner found at boot.
+    fn cmd_lspci(&self) {
+        let devs = crate::drivers::pci::list();
+        if devs.is_empty() {
+            println!("lspci: no PCI devices enumerated");
+            return;
+        }
+        println!("addr      vendor  device  class  subclass  prog_if  IRQ");
+        for d in devs {
+            println!("{:02x}:{:02x}.{}   {:#06x}  {:#06x}   {:02x}     {:02x}        {:02x}      {}",
+                d.addr.bus, d.addr.dev, d.addr.func,
+                d.vendor_id, d.device_id,
+                d.class_code, d.subclass, d.prog_if,
+                d.interrupt_line);
+        }
+    }
+
+    /// nicstat: virtio-net status (MAC, RX/TX packet counts).
+    fn cmd_nicstat(&self) {
+        if !crate::drivers::virtio_net::is_available() {
+            println!("virtio-net: not available (no -device virtio-net-pci?)");
+            return;
+        }
+        let g = crate::drivers::virtio_net::VIRTIO_NET.lock();
+        if let Some(nic) = g.as_ref() {
+            println!("virtio-net:");
+            let mac = nic.mac;
+            println!("  MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+            println!("  RX packets: {}", nic.rx_packets());
+            println!("  TX packets: {}", nic.tx_packets());
+        }
+    }
+
+    /// ext2: mount the synthetic demo image, list root, read a file.
+    ///   ext2 mount             : install the demo image into EXT2 slot
+    ///   ext2 ls                : list root directory
+    ///   ext2 cat <path>        : read file content
+    ///   ext2 super             : print superblock summary
+    fn cmd_ext2(&self, args: &[&str]) {
+        if args.is_empty() {
+            println!("Usage: ext2 [mount | ls | cat PATH | super]");
+            return;
+        }
+        match args[0] {
+            "mount" => {
+                let img = crate::fs::ext2::synthesise_demo_image();
+                match crate::fs::ext2::Ext2Fs::mount(img) {
+                    Ok(fs) => {
+                        let groups = fs.bgdt.len();
+                        let bs = fs.sb.block_size();
+                        *crate::fs::ext2::EXT2.lock() = Some(fs);
+                        println!("ext2: mounted demo image — {} groups, block size {}", groups, bs);
+                    }
+                    Err(e) => println!("ext2: mount failed: {}", e),
+                }
+            }
+            "super" => {
+                let g = crate::fs::ext2::EXT2.lock();
+                match g.as_ref() {
+                    Some(fs) => {
+                        println!("Magic:           {:#06x}", fs.sb.magic);
+                        println!("Block size:      {}", fs.sb.block_size());
+                        println!("Inode size:      {}", fs.sb.inode_size);
+                        println!("Inodes total:    {}", fs.sb.inodes_count);
+                        println!("Blocks total:    {}", fs.sb.blocks_count);
+                        println!("Free inodes:     {}", fs.sb.free_inodes_count);
+                        println!("Free blocks:     {}", fs.sb.free_blocks_count);
+                        println!("Blocks/group:    {}", fs.sb.blocks_per_group);
+                        println!("Inodes/group:    {}", fs.sb.inodes_per_group);
+                        println!("First data:      {}", fs.sb.first_data_block);
+                        println!("Groups:          {}", fs.bgdt.len());
+                    }
+                    None => println!("ext2: not mounted (run `ext2 mount`)"),
+                }
+            }
+            "ls" => {
+                let g = crate::fs::ext2::EXT2.lock();
+                let fs = match g.as_ref() {
+                    Some(f) => f,
+                    None => { println!("ext2: not mounted"); return; }
+                };
+                let root = match fs.read_inode(2) { Ok(i) => i, Err(e) => { println!("ext2: {}", e); return; } };
+                let entries = match fs.read_dir(&root) { Ok(e) => e, Err(e) => { println!("ext2: {}", e); return; } };
+                println!("ino   type  name");
+                for e in entries {
+                    let kind = match e.file_type {
+                        1 => "f",
+                        2 => "d",
+                        7 => "l",
+                        _ => "?",
+                    };
+                    println!("{:5}  {}     {}", e.inode, kind, e.name);
+                }
+            }
+            "cat" if args.len() >= 2 => {
+                let g = crate::fs::ext2::EXT2.lock();
+                let fs = match g.as_ref() {
+                    Some(f) => f,
+                    None => { println!("ext2: not mounted"); return; }
+                };
+                match fs.read_file(args[1]) {
+                    Ok(d) => {
+                        if let Ok(s) = core::str::from_utf8(&d) {
+                            print!("{}", s);
+                            if !s.ends_with('\n') { println!(); }
+                        } else {
+                            println!("ext2: {} is not UTF-8 ({} bytes)", args[1], d.len());
+                        }
+                    }
+                    Err(e) => println!("ext2: {}", e),
+                }
+            }
+            _ => println!("Usage: ext2 [mount | ls | cat PATH | super]"),
+        }
     }
 
     /// panic-test: deliberately panic to exercise the backtrace printer.

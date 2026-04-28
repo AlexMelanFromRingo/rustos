@@ -6,3 +6,4 @@ pub mod devfs;
 pub mod sysfs;
 pub mod tmpfs;
 pub mod inode;
+pub mod ext2;

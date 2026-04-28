@@ -91,6 +91,12 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     rustos::drivers::mouse::init();
     rustos::drivers::hpet::init();
 
+    // PCI bus scan + virtio-net probe.  If no virtio-net device is
+    // attached (run without `-device virtio-net-pci`), the probe logs
+    // a warning and the global stays None.
+    rustos::drivers::pci::scan();
+    rustos::drivers::virtio_net::init();
+
     // Initialize syscall support (after heap and GDT)
     rustos::init_syscall();
     klog_info!("SYSCALL/SYSRET support initialized");

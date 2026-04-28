@@ -1,0 +1,504 @@
+//! Ext2 read-only filesystem implementation.
+//!
+//! Layout (Ext2 spec §2):
+//!   * Boot sector (1024 bytes)
+//!   * Superblock at offset 1024 (1024 bytes)
+//!   * One block group descriptor table per group, starting on the
+//!     first block after the superblock
+//!   * Each group has its own inode table, block bitmap, inode bitmap,
+//!     and data blocks
+//!
+//! We support:
+//!   * Block sizes 1 KiB, 2 KiB, 4 KiB
+//!   * Direct blocks (12 entries), single-indirect, double-indirect,
+//!     triple-indirect (recursive)
+//!   * Files, directories, symlinks (inline + indirect content)
+//!   * Reading inodes by path through directory walk
+//!
+//! No write support, no journalling (Ext3+), no extents (Ext4 only).
+
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use spin::Mutex;
+
+pub const SUPERBLOCK_OFFSET: u64 = 1024;
+pub const SUPERBLOCK_SIZE:   u64 = 1024;
+pub const EXT2_MAGIC: u16 = 0xEF53;
+
+/// File-type bits in inode.i_mode (top nibble).
+pub const IFMT:    u16 = 0xF000;
+pub const IFSOCK:  u16 = 0xC000;
+pub const IFLNK:   u16 = 0xA000;
+pub const IFREG:   u16 = 0x8000;
+pub const IFBLK:   u16 = 0x6000;
+pub const IFDIR:   u16 = 0x4000;
+pub const IFCHR:   u16 = 0x2000;
+pub const IFIFO:   u16 = 0x1000;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct Superblock {
+    pub inodes_count: u32,
+    pub blocks_count: u32,
+    pub r_blocks_count: u32,
+    pub free_blocks_count: u32,
+    pub free_inodes_count: u32,
+    pub first_data_block: u32,
+    pub log_block_size: u32,
+    pub log_frag_size: u32,
+    pub blocks_per_group: u32,
+    pub frags_per_group: u32,
+    pub inodes_per_group: u32,
+    pub mtime: u32,
+    pub wtime: u32,
+    pub mnt_count: u16,
+    pub max_mnt_count: u16,
+    pub magic: u16,
+    pub state: u16,
+    pub errors: u16,
+    pub minor_rev_level: u16,
+    pub lastcheck: u32,
+    pub checkinterval: u32,
+    pub creator_os: u32,
+    pub rev_level: u32,
+    pub def_resuid: u16,
+    pub def_resgid: u16,
+    pub first_ino: u32,
+    pub inode_size: u16,
+}
+
+impl Superblock {
+    pub fn parse(buf: &[u8]) -> Result<Self, &'static str> {
+        if buf.len() < 88 { return Err("short superblock"); }
+        let magic = u16::from_le_bytes([buf[56], buf[57]]);
+        if magic != EXT2_MAGIC { return Err("bad ext2 magic"); }
+        Ok(Superblock {
+            inodes_count:        le32(&buf[0..]),
+            blocks_count:        le32(&buf[4..]),
+            r_blocks_count:      le32(&buf[8..]),
+            free_blocks_count:   le32(&buf[12..]),
+            free_inodes_count:   le32(&buf[16..]),
+            first_data_block:    le32(&buf[20..]),
+            log_block_size:      le32(&buf[24..]),
+            log_frag_size:       le32(&buf[28..]),
+            blocks_per_group:    le32(&buf[32..]),
+            frags_per_group:     le32(&buf[36..]),
+            inodes_per_group:    le32(&buf[40..]),
+            mtime:               le32(&buf[44..]),
+            wtime:               le32(&buf[48..]),
+            mnt_count:           le16(&buf[52..]),
+            max_mnt_count:       le16(&buf[54..]),
+            magic,
+            state:               le16(&buf[58..]),
+            errors:              le16(&buf[60..]),
+            minor_rev_level:     le16(&buf[62..]),
+            lastcheck:           le32(&buf[64..]),
+            checkinterval:       le32(&buf[68..]),
+            creator_os:          le32(&buf[72..]),
+            rev_level:           le32(&buf[76..]),
+            def_resuid:          le16(&buf[80..]),
+            def_resgid:          le16(&buf[82..]),
+            first_ino:           if le32(&buf[76..]) >= 1 && buf.len() >= 88 { le32(&buf[84..]) } else { 11 },
+            inode_size:          if le32(&buf[76..]) >= 1 && buf.len() >= 90 { le16(&buf[88..]) } else { 128 },
+        })
+    }
+
+    pub fn block_size(&self) -> u32 { 1024u32 << self.log_block_size }
+    pub fn num_groups(&self) -> u32 {
+        (self.blocks_count + self.blocks_per_group - 1) / self.blocks_per_group
+    }
+}
+
+/// One block-group descriptor (32 bytes).
+#[derive(Debug, Clone, Copy)]
+pub struct GroupDesc {
+    pub block_bitmap: u32,
+    pub inode_bitmap: u32,
+    pub inode_table:  u32,
+    pub free_blocks_count: u16,
+    pub free_inodes_count: u16,
+    pub used_dirs_count: u16,
+}
+
+impl GroupDesc {
+    pub fn parse(buf: &[u8]) -> Self {
+        GroupDesc {
+            block_bitmap:        le32(&buf[0..]),
+            inode_bitmap:        le32(&buf[4..]),
+            inode_table:         le32(&buf[8..]),
+            free_blocks_count:   le16(&buf[12..]),
+            free_inodes_count:   le16(&buf[14..]),
+            used_dirs_count:     le16(&buf[16..]),
+        }
+    }
+}
+
+/// On-disk inode (128-byte rev-0 layout).
+#[derive(Debug, Clone, Copy)]
+pub struct Inode {
+    pub mode:   u16,
+    pub uid:    u16,
+    pub size:   u32,
+    pub atime:  u32,
+    pub ctime:  u32,
+    pub mtime:  u32,
+    pub dtime:  u32,
+    pub gid:    u16,
+    pub links_count: u16,
+    pub blocks: u32,
+    pub flags:  u32,
+    pub osd1:   u32,
+    pub block:  [u32; 15],
+    pub generation: u32,
+}
+
+impl Inode {
+    pub fn parse(buf: &[u8]) -> Self {
+        let mut block = [0u32; 15];
+        for i in 0..15 {
+            block[i] = le32(&buf[40 + i * 4..]);
+        }
+        Inode {
+            mode:        le16(&buf[0..]),
+            uid:         le16(&buf[2..]),
+            size:        le32(&buf[4..]),
+            atime:       le32(&buf[8..]),
+            ctime:       le32(&buf[12..]),
+            mtime:       le32(&buf[16..]),
+            dtime:       le32(&buf[20..]),
+            gid:         le16(&buf[24..]),
+            links_count: le16(&buf[26..]),
+            blocks:      le32(&buf[28..]),
+            flags:       le32(&buf[32..]),
+            osd1:        le32(&buf[36..]),
+            block,
+            generation:  le32(&buf[100..]),
+        }
+    }
+
+    pub fn file_type(&self) -> u16 { self.mode & IFMT }
+    pub fn is_dir(&self) -> bool { self.file_type() == IFDIR }
+    pub fn is_reg(&self) -> bool { self.file_type() == IFREG }
+    pub fn is_symlink(&self) -> bool { self.file_type() == IFLNK }
+}
+
+/// One directory entry from a directory inode's data.
+#[derive(Debug, Clone)]
+pub struct DirEntry {
+    pub inode:  u32,
+    pub name:   String,
+    pub file_type: u8,
+}
+
+/// A trait for a block-device source the FS reads from.  A wrapper
+/// around an in-memory image is provided for self-tests without an
+/// actual disk.
+pub trait BlockSource {
+    fn read_block(&self, block: u64, buf: &mut [u8]) -> Result<(), &'static str>;
+    fn block_size(&self) -> u32;
+}
+
+pub struct MemoryImage {
+    data: Vec<u8>,
+    block_size: u32,
+}
+
+impl MemoryImage {
+    pub fn new(data: Vec<u8>, block_size: u32) -> Self {
+        MemoryImage { data, block_size }
+    }
+}
+
+impl BlockSource for MemoryImage {
+    fn read_block(&self, block: u64, buf: &mut [u8]) -> Result<(), &'static str> {
+        let start = block as usize * self.block_size as usize;
+        let end = start + self.block_size as usize;
+        if end > self.data.len() { return Err("read past end"); }
+        if buf.len() < self.block_size as usize { return Err("buf too small"); }
+        buf[..self.block_size as usize].copy_from_slice(&self.data[start..end]);
+        Ok(())
+    }
+    fn block_size(&self) -> u32 { self.block_size }
+}
+
+/// In-memory mounted Ext2 filesystem.
+pub struct Ext2Fs {
+    pub source: alloc::boxed::Box<dyn BlockSource + Send>,
+    pub sb:     Superblock,
+    pub bgdt:   Vec<GroupDesc>,
+}
+
+impl Ext2Fs {
+    pub fn mount(source: alloc::boxed::Box<dyn BlockSource + Send>) -> Result<Self, &'static str> {
+        // Read the superblock from offset 1024.
+        let bs = source.block_size();
+        let sb_block = SUPERBLOCK_OFFSET / bs as u64;
+        let sb_off   = (SUPERBLOCK_OFFSET % bs as u64) as usize;
+        let mut blk = alloc::vec![0u8; bs as usize];
+        source.read_block(sb_block, &mut blk)?;
+        let sb_bytes = if sb_off + 1024 <= bs as usize {
+            blk[sb_off..sb_off + 1024].to_vec()
+        } else {
+            // Spans multiple blocks (block_size 1024, off 0): read just one block.
+            blk[sb_off..].to_vec()
+        };
+        let sb = Superblock::parse(&sb_bytes)?;
+        if sb.block_size() != bs { return Err("block size mismatch"); }
+
+        // Read block-group descriptor table.
+        let groups = sb.num_groups();
+        let bgdt_block = if sb.first_data_block == 0 { 1 } else { sb.first_data_block } + 1;
+        let entries_per_block = bs / 32;
+        let bgdt_blocks = (groups + entries_per_block - 1) / entries_per_block;
+        let mut bgdt = Vec::with_capacity(groups as usize);
+        for i in 0..bgdt_blocks {
+            let mut blk = alloc::vec![0u8; bs as usize];
+            source.read_block((bgdt_block + i) as u64, &mut blk)?;
+            for j in 0..entries_per_block {
+                if (i * entries_per_block + j) >= groups { break; }
+                let off = (j as usize) * 32;
+                bgdt.push(GroupDesc::parse(&blk[off..off + 32]));
+            }
+        }
+
+        Ok(Ext2Fs { source, sb, bgdt })
+    }
+
+    pub fn read_inode(&self, ino: u32) -> Result<Inode, &'static str> {
+        if ino == 0 { return Err("invalid inode 0"); }
+        let bs = self.sb.block_size();
+        let group = (ino - 1) / self.sb.inodes_per_group;
+        let index = (ino - 1) % self.sb.inodes_per_group;
+        let gd = self.bgdt.get(group as usize).ok_or("group out of range")?;
+        let inode_size = self.sb.inode_size as u32;
+        let table_byte_off = gd.inode_table as u64 * bs as u64
+            + index as u64 * inode_size as u64;
+        let block = table_byte_off / bs as u64;
+        let off = (table_byte_off % bs as u64) as usize;
+        let mut blk = alloc::vec![0u8; bs as usize];
+        self.source.read_block(block, &mut blk)?;
+        Ok(Inode::parse(&blk[off..]))
+    }
+
+    /// Read all data of an inode into a Vec.  Walks direct, single,
+    /// double, and triple indirect block pointers.
+    pub fn read_inode_data(&self, ino: &Inode) -> Result<Vec<u8>, &'static str> {
+        let bs = self.sb.block_size() as usize;
+        let mut out = Vec::with_capacity(ino.size as usize);
+        let total = ino.size as usize;
+
+        // 12 direct blocks.
+        for &bn in &ino.block[..12] {
+            if out.len() >= total { break; }
+            self.append_block(bn, bs, total, &mut out)?;
+        }
+        // Single indirect (block 12).
+        if out.len() < total && ino.block[12] != 0 {
+            self.append_indirect(ino.block[12], 1, bs, total, &mut out)?;
+        }
+        // Double indirect (block 13).
+        if out.len() < total && ino.block[13] != 0 {
+            self.append_indirect(ino.block[13], 2, bs, total, &mut out)?;
+        }
+        // Triple indirect (block 14).
+        if out.len() < total && ino.block[14] != 0 {
+            self.append_indirect(ino.block[14], 3, bs, total, &mut out)?;
+        }
+
+        out.truncate(total);
+        Ok(out)
+    }
+
+    fn append_block(&self, block_no: u32, bs: usize, total: usize, out: &mut Vec<u8>)
+        -> Result<(), &'static str>
+    {
+        let mut blk = alloc::vec![0u8; bs];
+        if block_no == 0 {
+            // Sparse hole — read as zeros.
+        } else {
+            self.source.read_block(block_no as u64, &mut blk)?;
+        }
+        let take = (total - out.len()).min(bs);
+        out.extend_from_slice(&blk[..take]);
+        Ok(())
+    }
+
+    fn append_indirect(&self, block_no: u32, depth: u8, bs: usize, total: usize,
+                       out: &mut Vec<u8>) -> Result<(), &'static str>
+    {
+        if block_no == 0 || out.len() >= total { return Ok(()); }
+        let mut blk = alloc::vec![0u8; bs];
+        self.source.read_block(block_no as u64, &mut blk)?;
+        let entries_per_block = bs / 4;
+        for i in 0..entries_per_block {
+            if out.len() >= total { break; }
+            let bn = u32::from_le_bytes([
+                blk[i * 4], blk[i * 4 + 1], blk[i * 4 + 2], blk[i * 4 + 3],
+            ]);
+            if depth == 1 {
+                self.append_block(bn, bs, total, out)?;
+            } else {
+                self.append_indirect(bn, depth - 1, bs, total, out)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Walk a directory inode's data, decoding the variable-length entries.
+    pub fn read_dir(&self, dir_ino: &Inode) -> Result<Vec<DirEntry>, &'static str> {
+        let data = self.read_inode_data(dir_ino)?;
+        let mut out = Vec::new();
+        let mut pos = 0usize;
+        while pos + 8 <= data.len() {
+            let inode = u32::from_le_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]);
+            let rec_len = u16::from_le_bytes([data[pos+4], data[pos+5]]) as usize;
+            let name_len = data[pos + 6] as usize;
+            let file_type = data[pos + 7];
+            if rec_len == 0 || pos + rec_len > data.len() { break; }
+            if inode != 0 && pos + 8 + name_len <= data.len() {
+                if let Ok(name) = core::str::from_utf8(&data[pos+8..pos+8+name_len]) {
+                    out.push(DirEntry { inode, name: name.to_string(), file_type });
+                }
+            }
+            pos += rec_len;
+        }
+        Ok(out)
+    }
+
+    /// Resolve a slash-separated path to an inode number, starting at /.
+    pub fn lookup(&self, path: &str) -> Result<u32, &'static str> {
+        let mut cur_ino = 2u32; // / is always inode 2
+        for component in path.split('/').filter(|s| !s.is_empty()) {
+            let inode = self.read_inode(cur_ino)?;
+            if !inode.is_dir() { return Err("not a directory"); }
+            let entries = self.read_dir(&inode)?;
+            let found = entries.iter().find(|e| e.name == component);
+            cur_ino = found.ok_or("path component not found")?.inode;
+        }
+        Ok(cur_ino)
+    }
+
+    /// Read a file at `path` to a Vec.
+    pub fn read_file(&self, path: &str) -> Result<Vec<u8>, &'static str> {
+        let ino_no = self.lookup(path)?;
+        let inode = self.read_inode(ino_no)?;
+        if inode.is_symlink() && inode.size <= 60 {
+            // Inline symlink target: stored in inode.block[].
+            let mut bytes = [0u8; 60];
+            for (i, &b) in inode.block.iter().enumerate() {
+                bytes[i * 4..(i + 1) * 4].copy_from_slice(&b.to_le_bytes());
+            }
+            return Ok(bytes[..inode.size as usize].to_vec());
+        }
+        if !inode.is_reg() && !inode.is_symlink() {
+            return Err("not a regular file");
+        }
+        self.read_inode_data(&inode)
+    }
+}
+
+// --- helpers ---
+
+fn le16(b: &[u8]) -> u16 { u16::from_le_bytes([b[0], b[1]]) }
+fn le32(b: &[u8]) -> u32 { u32::from_le_bytes([b[0], b[1], b[2], b[3]]) }
+
+/// Global mountpoint for a mounted Ext2 image, if any.
+pub static EXT2: Mutex<Option<Ext2Fs>> = Mutex::new(None);
+
+/// Build a tiny in-memory ext2 image for the self-test path.  The image
+/// hand-crafts a 64 KiB filesystem with a 1 KiB block size, one block
+/// group, two regular files, and a directory containing them.
+pub fn synthesise_demo_image() -> alloc::boxed::Box<MemoryImage> {
+    let bs = 1024u32;
+    let blocks = 64u32;
+    let inodes_per_group = 16u32;
+    let blocks_per_group = blocks - 1;
+    let mut img = alloc::vec![0u8; (bs * blocks) as usize];
+
+    // ---- Superblock at byte 1024 ----
+    let sb_off = 1024usize;
+    write_le32(&mut img[sb_off..], inodes_per_group);     // s_inodes_count (group total)
+    write_le32(&mut img[sb_off + 4..], blocks);           // s_blocks_count
+    write_le32(&mut img[sb_off + 8..], 0);                // s_r_blocks_count
+    write_le32(&mut img[sb_off + 12..], 50);              // s_free_blocks_count
+    write_le32(&mut img[sb_off + 16..], inodes_per_group - 5);
+    write_le32(&mut img[sb_off + 20..], 1);               // s_first_data_block
+    write_le32(&mut img[sb_off + 24..], 0);               // log_block_size = 0 (1K)
+    write_le32(&mut img[sb_off + 28..], 0);               // log_frag_size
+    write_le32(&mut img[sb_off + 32..], blocks_per_group);
+    write_le32(&mut img[sb_off + 36..], blocks_per_group);
+    write_le32(&mut img[sb_off + 40..], inodes_per_group);
+    write_le16(&mut img[sb_off + 56..], EXT2_MAGIC);
+    write_le16(&mut img[sb_off + 58..], 1);               // s_state = clean
+    write_le32(&mut img[sb_off + 76..], 0);               // s_rev_level = good_old
+    write_le16(&mut img[sb_off + 88..], 128);             // s_inode_size
+
+    // ---- Block group descriptor at block 2 (since first_data_block=1, BGDT at 1+1=2) ----
+    let bgdt_off = (bs * 2) as usize;
+    write_le32(&mut img[bgdt_off..], 3);    // block bitmap
+    write_le32(&mut img[bgdt_off + 4..], 4); // inode bitmap
+    write_le32(&mut img[bgdt_off + 8..], 5); // inode table
+    write_le16(&mut img[bgdt_off + 12..], 50);
+    write_le16(&mut img[bgdt_off + 14..], (inodes_per_group - 5) as u16);
+    write_le16(&mut img[bgdt_off + 16..], 1);
+
+    // ---- Inode table at block 5: inode_size=128, 16 inodes => 2 KiB → 2 blocks ----
+    // Inode 2 = root directory, points to data block 10.
+    // Inode 12 = file "hello.txt", points to data block 11.
+    let inode_table_off = (bs * 5) as usize;
+
+    // Inode 2 (root dir).  Index = 1, byte offset = 1 * 128.
+    let i2 = inode_table_off + 1 * 128;
+    write_le16(&mut img[i2..], IFDIR | 0o755);                // mode
+    write_le16(&mut img[i2 + 2..], 0);                        // uid
+    write_le32(&mut img[i2 + 4..], bs);                       // size = 1 block
+    write_le16(&mut img[i2 + 26..], 3);                       // links_count (.,.., hello.txt)
+    write_le32(&mut img[i2 + 40..], 10);                      // i_block[0] = 10
+
+    // Inode 12 (hello.txt).  Index = 11.
+    let i12 = inode_table_off + 11 * 128;
+    let body = b"Hello from RustOS ext2!\n";
+    write_le16(&mut img[i12..], IFREG | 0o644);
+    write_le32(&mut img[i12 + 4..], body.len() as u32);
+    write_le16(&mut img[i12 + 26..], 1);
+    write_le32(&mut img[i12 + 40..], 11);                     // i_block[0] = 11
+
+    // ---- Block 10 = root dir contents ----
+    let dir_off = (bs * 10) as usize;
+    let mut p = 0usize;
+
+    // Entry "." → inode 2, name_len=1, file_type=2 (DIR), padded to 12 bytes.
+    write_le32(&mut img[dir_off + p..], 2);
+    write_le16(&mut img[dir_off + p + 4..], 12);
+    img[dir_off + p + 6] = 1;
+    img[dir_off + p + 7] = 2;
+    img[dir_off + p + 8] = b'.';
+    p += 12;
+
+    // Entry ".." → inode 2, name_len=2, file_type=2, padded to 12 bytes.
+    write_le32(&mut img[dir_off + p..], 2);
+    write_le16(&mut img[dir_off + p + 4..], 12);
+    img[dir_off + p + 6] = 2;
+    img[dir_off + p + 7] = 2;
+    img[dir_off + p + 8] = b'.';
+    img[dir_off + p + 9] = b'.';
+    p += 12;
+
+    // Entry "hello.txt" → inode 12, name_len=9, file_type=1 (FILE).
+    // rec_len pads to end of block: 1024 - 24 = 1000.
+    let rec_len = (bs as usize) - p;
+    write_le32(&mut img[dir_off + p..], 12);
+    write_le16(&mut img[dir_off + p + 4..], rec_len as u16);
+    img[dir_off + p + 6] = 9;
+    img[dir_off + p + 7] = 1;
+    img[dir_off + p + 8..dir_off + p + 17].copy_from_slice(b"hello.txt");
+
+    // ---- Block 11 = file "hello.txt" contents ----
+    let body_off = (bs * 11) as usize;
+    img[body_off..body_off + body.len()].copy_from_slice(body);
+
+    alloc::boxed::Box::new(MemoryImage::new(img, bs))
+}
+
+fn write_le16(buf: &mut [u8], v: u16) { buf[..2].copy_from_slice(&v.to_le_bytes()); }
+fn write_le32(buf: &mut [u8], v: u32) { buf[..4].copy_from_slice(&v.to_le_bytes()); }

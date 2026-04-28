@@ -206,6 +206,11 @@ pub struct Fat32 {
     total_sectors: u32,
     /// Total clusters (data area)
     total_clusters: u32,
+    /// Number of FAT copies (BPB num_fats; usually 2).  We mirror writes
+    /// across all of them so a recovery tool sees consistent data.
+    num_fats: u8,
+    /// FSInfo sector LBA (BPB fs_info; usually 1).
+    fs_info_sector: u32,
 }
 
 impl Fat32 {
@@ -278,6 +283,8 @@ impl Fat32 {
             sectors_per_fat: fat_size,
             total_sectors,
             total_clusters,
+            num_fats: bpb.num_fats,
+            fs_info_sector: ebr.fs_info as u32,
         })
     }
 
@@ -396,43 +403,126 @@ impl Fat32 {
 
     /// Read directory entries from a cluster
     fn read_directory(&self, cluster: u32) -> Result<Vec<DirectoryEntry>, &'static str> {
+        // Same as read_directory_with_lfn but discards the long-name
+        // strings; existing callers that index by short name keep working.
+        Ok(self.read_directory_with_lfn(cluster)?
+            .into_iter()
+            .map(|(e, _)| e)
+            .collect())
+    }
+
+    /// Walk a directory's data, returning each short-name `DirectoryEntry`
+    /// paired with its decoded VFAT long filename (if any).  Implements
+    /// the on-disk LFN format (Microsoft FAT 3.5+):
+    ///   * LFN entries precede the short entry in reverse order
+    ///   * each LFN slot holds 13 UTF-16LE chars at offsets 1..11, 14..26, 28..32
+    ///   * sequence number in byte 0 with bit 6 marking the *first*
+    ///     written (i.e. the *last* logically) entry; bits 0..4 are the
+    ///     position counted from 1
+    ///   * checksum at byte 13 must match the SFN's checksum
+    fn read_directory_with_lfn(&self, cluster: u32)
+        -> Result<Vec<(DirectoryEntry, Option<String>)>, &'static str>
+    {
         let data = self.read_cluster_chain(cluster)?;
         let entry_size = mem::size_of::<DirectoryEntry>();
         let num_entries = data.len() / entry_size;
 
-        let mut entries = Vec::new();
+        let mut out = Vec::new();
+        // Slot accumulator: chunks of 13 UTF-16 chars indexed by ord-1.
+        let mut lfn_parts: alloc::vec::Vec<(u8, [u16; 13])> = alloc::vec::Vec::new();
+        let mut lfn_checksum: u8 = 0;
 
         for i in 0..num_entries {
             let offset = i * entry_size;
-            let entry = unsafe {
-                &*(data.as_ptr().add(offset) as *const DirectoryEntry)
+            let raw = &data[offset..offset + entry_size];
+            let entry = unsafe { &*(raw.as_ptr() as *const DirectoryEntry) };
+
+            if entry.is_last() { break; }
+            if entry.is_free() {
+                lfn_parts.clear();
+                continue;
+            }
+            if entry.is_long_name() {
+                // Re-interpret the slot as an LFN entry.
+                let ord = raw[0];
+                let chk = raw[13];
+                let mut chars = [0u16; 13];
+                // chars[0..5] at offsets 1..11
+                for j in 0..5 {
+                    chars[j] = u16::from_le_bytes([raw[1 + j * 2], raw[2 + j * 2]]);
+                }
+                // chars[5..11] at offsets 14..26
+                for j in 0..6 {
+                    chars[5 + j] = u16::from_le_bytes([raw[14 + j * 2], raw[15 + j * 2]]);
+                }
+                // chars[11..13] at offsets 28..32
+                for j in 0..2 {
+                    chars[11 + j] = u16::from_le_bytes([raw[28 + j * 2], raw[29 + j * 2]]);
+                }
+                let pos = (ord & 0x1F).saturating_sub(1);
+                lfn_parts.push((pos, chars));
+                lfn_checksum = chk;
+                continue;
+            }
+            if entry.is_volume_label() {
+                lfn_parts.clear();
+                continue;
+            }
+
+            // We're at a short-name entry.  Try to assemble the LFN chain
+            // collected for it.
+            let lfn = if !lfn_parts.is_empty() {
+                let want_chk = lfn_checksum;
+                if Self::sfn_checksum(&entry.name) == want_chk {
+                    lfn_parts.sort_by_key(|(ord, _)| *ord);
+                    let mut s = String::new();
+                    for (_, chunk) in &lfn_parts {
+                        for &ch in chunk.iter() {
+                            if ch == 0 || ch == 0xFFFF { break; }
+                            if let Some(c) = char::from_u32(ch as u32) { s.push(c); }
+                        }
+                    }
+                    if s.is_empty() { None } else { Some(s) }
+                } else {
+                    None
+                }
+            } else {
+                None
             };
 
-            if entry.is_last() {
-                break;
-            }
-
-            if !entry.is_free() && !entry.is_long_name() && !entry.is_volume_label() {
-                entries.push(*entry);
-            }
+            out.push((*entry, lfn));
+            lfn_parts.clear();
         }
+        Ok(out)
+    }
 
-        Ok(entries)
+    /// Microsoft VFAT short-name checksum (Microsoft FAT spec §7.2):
+    /// rotate-right + add for each of the 11 SFN bytes.
+    fn sfn_checksum(name: &[u8; 11]) -> u8 {
+        let mut sum: u8 = 0;
+        for &b in name.iter() {
+            sum = (sum.rotate_right(1)).wrapping_add(b);
+        }
+        sum
     }
 
     /// Find a file in a directory
     fn find_file_in_directory(&self, dir_cluster: u32, filename: &str) -> Result<Option<DirectoryEntry>, &'static str> {
-        let entries = self.read_directory(dir_cluster)?;
+        let entries = self.read_directory_with_lfn(dir_cluster)?;
+        let search_upper = filename.to_uppercase();
 
-        for entry in entries {
-            let entry_name = entry.get_name().to_uppercase();
-            let search_name = filename.to_uppercase();
-
-            if entry_name == search_name {
+        for (entry, lfn) in entries {
+            // Match by long filename (case-sensitive, then case-insensitive)
+            if let Some(name) = &lfn {
+                if name == filename || name.to_uppercase() == search_upper {
+                    return Ok(Some(entry));
+                }
+            }
+            // Match by short filename (always case-insensitive)
+            if entry.get_name().to_uppercase() == search_upper {
                 return Ok(Some(entry));
             }
         }
-
         Ok(None)
     }
 
@@ -552,27 +642,69 @@ impl Fat32 {
         Ok(None)
     }
 
-    /// Write a FAT entry for a given cluster
+    /// Write a FAT entry for a given cluster.  Mirrors the update across
+    /// every FAT copy declared in the BPB (Microsoft FAT spec §4: all
+    /// FATs MUST be kept identical so chkdsk-class tools can use any of
+    /// them as a recovery source).
     fn write_fat_entry(&mut self, cluster: u32, value: u32) -> Result<(), &'static str> {
         let fat_offset = cluster * 4;
-        let fat_sector = self.first_fat_sector + (fat_offset / self.bytes_per_sector);
         let entry_offset = (fat_offset % self.bytes_per_sector) as usize;
-
-        // Read the sector containing this FAT entry
-        let mut sector_buffer = [0u8; SECTOR_SIZE];
-        let mut drive = ATA_DRIVE.lock();
-        drive.read_sector(fat_sector, &mut sector_buffer)?;
-
-        // Update the FAT entry (preserve top 4 bits)
         let masked_value = value & 0x0FFFFFFF;
-        sector_buffer[entry_offset..entry_offset + 4].copy_from_slice(&masked_value.to_le_bytes());
 
-        // Write back to disk
-        // Note: In a real implementation, we should write to ALL FAT copies
-        // For now, we'll just write to the first FAT
-        drive.write_sector(fat_sector, &sector_buffer)?;
+        let mut drive = ATA_DRIVE.lock();
+        for fat_idx in 0..self.num_fats as u32 {
+            let fat_base = self.first_fat_sector + fat_idx * self.sectors_per_fat;
+            let fat_sector = fat_base + (fat_offset / self.bytes_per_sector);
+            let mut sector_buffer = [0u8; SECTOR_SIZE];
+            drive.read_sector(fat_sector, &mut sector_buffer)?;
+
+            // Preserve the top 4 reserved bits of the existing entry.
+            let existing = u32::from_le_bytes([
+                sector_buffer[entry_offset],
+                sector_buffer[entry_offset + 1],
+                sector_buffer[entry_offset + 2],
+                sector_buffer[entry_offset + 3],
+            ]);
+            let merged = (existing & 0xF000_0000) | masked_value;
+            sector_buffer[entry_offset..entry_offset + 4].copy_from_slice(&merged.to_le_bytes());
+
+            drive.write_sector(fat_sector, &sector_buffer)?;
+        }
         drop(drive);
 
+        Ok(())
+    }
+
+    /// FSInfo (Microsoft FAT spec §5.1) is a 512-byte sector with two
+    /// hint fields: free cluster count and last-allocated cluster.  Update
+    /// both so OSes that use the hint converge faster.  Signatures live
+    /// at offsets 0, 484, 508; we recompute neither — only the data.
+    fn update_fsinfo(&mut self, free_count_delta: i32, last_alloc_hint: u32) -> Result<(), &'static str> {
+        if self.fs_info_sector == 0 || self.fs_info_sector == 0xFFFF {
+            return Ok(()); // FSInfo not present
+        }
+        let mut drive = ATA_DRIVE.lock();
+        let mut buf = [0u8; SECTOR_SIZE];
+        drive.read_sector(self.fs_info_sector, &mut buf)?;
+        // Verify lead signature 0x41615252 at offset 0.
+        let sig = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        if sig != 0x41615252 { return Ok(()); }
+
+        // Free cluster count at offset 488; last-allocated at 492.  0xFFFFFFFF
+        // means "unknown" — leave alone if so when only adjusting by delta.
+        let cur_free = u32::from_le_bytes([buf[488], buf[489], buf[490], buf[491]]);
+        if cur_free != 0xFFFF_FFFF {
+            let new_free = if free_count_delta < 0 {
+                cur_free.saturating_sub((-free_count_delta) as u32)
+            } else {
+                cur_free.saturating_add(free_count_delta as u32)
+            };
+            buf[488..492].copy_from_slice(&new_free.to_le_bytes());
+        }
+        if last_alloc_hint != 0 {
+            buf[492..496].copy_from_slice(&last_alloc_hint.to_le_bytes());
+        }
+        drive.write_sector(self.fs_info_sector, &buf)?;
         Ok(())
     }
 
@@ -632,20 +764,63 @@ impl Fat32 {
     /// Free a cluster chain
     fn free_cluster_chain(&mut self, start_cluster: u32) -> Result<(), &'static str> {
         let mut current_cluster = start_cluster;
-
+        let mut freed = 0i32;
         loop {
             let next_cluster = self.get_next_cluster(current_cluster)?;
-
-            // Mark current cluster as free
             self.write_fat_entry(current_cluster, 0x00000000)?;
-
+            freed += 1;
             match next_cluster {
                 Some(next) => current_cluster = next,
                 None => break,
             }
         }
-
+        // Update FSInfo's free-cluster hint.
+        let _ = self.update_fsinfo(freed, 0);
         Ok(())
+    }
+
+    /// Truncate a cluster chain to `keep_clusters` clusters: free everything
+    /// past that point and patch the FAT to mark `keep_clusters - 1` as
+    /// end-of-chain.  Returns the number of clusters freed.
+    pub fn truncate_chain(&mut self, start_cluster: u32, keep_clusters: u32)
+        -> Result<u32, &'static str>
+    {
+        if keep_clusters == 0 {
+            // Free entire chain.
+            self.free_cluster_chain(start_cluster)?;
+            return Ok(u32::MAX); // unknown count returned to caller
+        }
+
+        // Walk the chain to find the cluster at index keep_clusters-1.
+        let mut current = start_cluster;
+        let mut idx = 0u32;
+        while idx + 1 < keep_clusters {
+            let next = self.get_next_cluster(current)?
+                .ok_or("chain shorter than keep_clusters")?;
+            current = next;
+            idx += 1;
+        }
+
+        // Tail starts at the cluster *after* `current`.
+        let tail = self.get_next_cluster(current)?;
+        // Mark our cluster as the new end-of-chain.
+        self.write_fat_entry(current, 0x0FFFFFFF)?;
+
+        // Free the tail.
+        if let Some(t) = tail {
+            let mut freed = 0u32;
+            let mut cur = t;
+            loop {
+                let n = self.get_next_cluster(cur)?;
+                self.write_fat_entry(cur, 0x00000000)?;
+                freed += 1;
+                match n { Some(nn) => cur = nn, None => break }
+            }
+            let _ = self.update_fsinfo(freed as i32, 0);
+            Ok(freed)
+        } else {
+            Ok(0)
+        }
     }
 
     /// Create a new file entry in root directory

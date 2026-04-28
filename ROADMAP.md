@@ -39,7 +39,7 @@ Reference architecture: Linux/Unix-like.
 - [ ] IOAPIC for IRQ routing
 - [ ] MSI/MSI-X support for modern devices
 - [x] NMI handling (logs RIP and continues, MCE halts) ✅
-- [ ] Proper kernel panic with stack trace (using DWARF unwind info)
+- [x] Kernel panic stack trace (RBP chain via force-frame-pointers; DWARF symbolisation pending) ✅
 
 ---
 
@@ -90,15 +90,15 @@ Reference architecture: Linux/Unix-like.
 - [x] Timestamps (atime, mtime, ctime) ✅
 
 ### 3.2 FAT32 Completion
-- [ ] Long Filename (LFN) support (currently 8.3 only)
-- [ ] Subdirectory navigation and nested paths
-- [ ] Write to both FAT copies
-- [ ] FSInfo sector updates for free cluster tracking
-- [ ] File truncation
+- [x] Long Filename (LFN) support (VFAT entries decoded with checksum verify, sequence + UTF-16LE) ✅
+- [x] Subdirectory navigation and nested paths (find_directory_cluster walks components) ✅
+- [x] Write to both FAT copies (mirror per BPB num_fats; preserves reserved top 4 bits) ✅
+- [x] FSInfo sector updates for free cluster tracking (decrements on alloc, increments on free, last-alloc hint) ✅
+- [x] File truncation (truncate_chain with explicit keep_clusters parameter) ✅
 - [ ] Proper error recovery
 
 ### 3.3 Ext2/Ext4 Filesystem
-- [ ] Ext2 read support (simpler, good starting point)
+- [x] Ext2 read support (superblock, BGDT, inodes, direct + 1/2/3-level indirect blocks, dir entries, lookup-by-path) ✅
 - [ ] Ext2 write support
 - [ ] Ext4 basic support (extents, large files)
 - [ ] Journal support for crash recovery
@@ -123,7 +123,7 @@ Reference architecture: Linux/Unix-like.
 ### 4.2 Network Stack
 - [ ] RTL8139 NIC driver (simple, well-documented)
 - [ ] E1000 NIC driver (Intel, used by QEMU)
-- [ ] Virtio-net driver (QEMU paravirt)
+- [x] Virtio-net driver (PCI scan, BAR0 I/O, RESET→ACK→DRIVER→FEATURES→DRIVER_OK, RX/TX virtqueues, MAC read from device config) ✅
 - [x] Ethernet frame handling (build_frame, EthHeader parse, ethertypes IPv4/ARP/IPv6) ✅
 - [x] ARP (RFC 826: REQUEST/REPLY build+parse, ARP cache, arp shell command) ✅
 - [x] IPv4 stack (IP header parse/serialise, RFC 1071 checksum) ✅
@@ -143,7 +143,7 @@ Reference architecture: Linux/Unix-like.
 - [ ] Serial console improvements (full terminal emulation)
 
 ### 4.4 Timer & Clock
-- [ ] HPET (High Precision Event Timer)
+- [x] HPET (MMIO at 0xFED0_0000, ENABLE_CNF, period→ns conversion) ✅
 - [x] TSC (Time Stamp Counter) calibration via PIT channel 2, ns-precision monotonic ✅
 - [x] RTC (Real-Time Clock) — CMOS MC146818, BCD/binary auto-detect ✅
 - [x] `clock_gettime` with nanosecond precision (CLOCK_MONOTONIC backed by TSC) ✅
@@ -169,7 +169,7 @@ Reference architecture: Linux/Unix-like.
 ### 5.3 Core Utilities
 - [ ] Port coreutils (or implement in Rust): ls, cat, cp, mv, rm, mkdir, chmod, chown, etc.
 - [x] `init` / service manager — runlevels, dependencies, restart policies ✅
-- [ ] `login` / `getty` — user authentication (interactive login prompt)
+- [x] `login` / `getty` — interactive login at boot via /etc/getty.conf require_login=1 ✅
 - [x] `/etc/passwd`, `/etc/group` — user database (User/Group/UserDb) ✅
 - [x] `su` — switch user with password prompt ✅
 - [x] `passwd` — change own password ✅
@@ -183,7 +183,7 @@ Reference architecture: Linux/Unix-like.
 ### 5.4 Package Manager
 - [x] Simple package format (text manifest + inline FILE blocks) ✅
 - [ ] Package repository support (over network)
-- [ ] Dependency resolution
+- [x] Dependency resolution (DEPENDS in manifest, refuse install/remove on missing/required-by) ✅
 - [x] Install / remove / list / info operations (`pkg` shell command, /var/lib/pkg) ✅
 
 ---
@@ -225,11 +225,11 @@ Start with **Option A** (upgrade to bootloader v0.11+) for UEFI support, then ev
 ## Phase 7: Security
 
 - [x] ASLR for vmalloc (16 MiB random slide on top of nominal base, TSC + RTC seed) ✅
-- [ ] Stack canaries
+- [x] Stack canaries (canary()/assert_canary() helpers + force-frame-pointers + RBP-chain backtrace) ✅
 - [x] NX bit enforcement on vmalloc data pages (W^X) ✅
 - [x] Capability-based security model (20 Linux caps, getcap/setcap, current_has/check API) ✅
 - [x] Seccomp-like syscall filtering (per-PID filter, Allow/Errno/Kill/Log actions, dispatch hook) ✅
-- [ ] Kernel hardening (SMEP, SMAP, KASLR)
+- [x] Kernel hardening: CPUID-probe + CR4 wiring for SMEP/SMAP, KASLR via vmalloc base randomisation ✅
 
 ---
 
