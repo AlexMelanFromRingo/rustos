@@ -96,6 +96,14 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // a warning and the global stays None.
     rustos::drivers::pci::scan();
     rustos::drivers::virtio_net::init();
+    rustos::drivers::virtio_blk::init();
+
+    if rustos::drivers::virtio_blk::is_available() {
+        println!("virtio-blk: present");
+        rustos::drivers::virtio_blk::self_test();
+    } else {
+        println!("virtio-blk: not available (no -drive if=virtio)");
+    }
 
     // Initialize syscall support (after heap and GDT)
     rustos::init_syscall();

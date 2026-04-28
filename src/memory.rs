@@ -273,3 +273,94 @@ pub fn free_memory() -> u64 {
     let (total, allocated, _) = memory_stats();
     (total.saturating_sub(allocated)) as u64 * 4096
 }
+
+// =============================================================================
+// DMA support
+// =============================================================================
+//
+// Hardware that performs DMA (virtio, AHCI, NIC ring buffers) needs *physical*
+// addresses, and often requires multiple pages to be physically contiguous.
+// The kernel heap gives us physically scattered frames stitched into a
+// contiguous virtual range, so DMA buffers cannot live there unsafely.
+//
+// `alloc_dma_contig(size)` allocates `ceil(size/4096)` frames in one
+// physically-contiguous run from the bitmap allocator and returns
+// (virtual pointer, physical address).  The virtual address is the kernel's
+// direct-map view (PHYS_MEM_OFFSET + phys), so the caller can read/write
+// the region via the returned pointer while feeding the physical address to
+// hardware.
+//
+// `virt_to_phys(va)` walks the active page table — useful when an existing
+// buffer (e.g. heap-allocated) needs to be handed to a device.
+
+/// Translate a kernel virtual address to a physical address by walking
+/// the active page table.
+pub fn virt_to_phys(va: u64) -> Option<u64> {
+    use x86_64::structures::paging::Translate;
+    let mapper = unsafe { get_mapper() };
+    mapper.translate_addr(VirtAddr::new(va)).map(|p| p.as_u64())
+}
+
+impl BitmapFrameAllocator {
+    /// Allocate `n` *physically contiguous* 4 KiB frames.  Returns the
+    /// physical start address.  O(num_frames) worst-case scan, but the
+    /// bitmap is small (128 KiB for 4 GiB RAM) so this is fine for the
+    /// rare DMA-region path.
+    pub fn allocate_contiguous_frames(&mut self, n: usize) -> Option<u64> {
+        if n == 0 { return None; }
+        let bitmap = unsafe { &*FRAME_BITMAP.0.get() };
+        let mut run_start: Option<usize> = None;
+        let mut run_len = 0usize;
+        for frame_idx in 0..self.num_frames {
+            let used = (bitmap[frame_idx / 8] >> (frame_idx % 8)) & 1 != 0;
+            if used {
+                run_start = None;
+                run_len = 0;
+            } else {
+                if run_start.is_none() { run_start = Some(frame_idx); }
+                run_len += 1;
+                if run_len == n {
+                    let start = run_start.unwrap();
+                    for i in 0..n { self.mark_used(start + i); }
+                    ALLOCATED_FRAMES.fetch_add(n, Ordering::Relaxed);
+                    self.next_free = start + n;
+                    return Some((start as u64) * 4096);
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Allocate a physically-contiguous DMA region of at least `size` bytes,
+/// rounded up to whole pages.  Returns (virtual pointer, physical address).
+/// The region is zeroed before return.
+///
+/// The virtual pointer is in the bootloader's direct physical map, so the
+/// kernel can read/write through it freely.
+pub fn alloc_dma_contig(size: usize) -> Option<(*mut u8, u64)> {
+    let pages = (size + 4095) / 4096;
+    let phys = with_frame_allocator(|fa| fa.allocate_contiguous_frames(pages))??;
+    let virt = PHYS_MEM_OFFSET.load(Ordering::Relaxed) + phys;
+    let ptr = virt as *mut u8;
+    unsafe { core::ptr::write_bytes(ptr, 0, pages * 4096); }
+    Some((ptr, phys))
+}
+
+/// Free a DMA region previously returned by `alloc_dma_contig`.
+///
+/// # Safety
+/// `phys` must come from a prior successful call with the same `size`,
+/// and no outstanding references to the region may exist (in particular,
+/// no device must still be DMA-ing into it).
+pub unsafe fn dealloc_dma_contig(phys: u64, size: usize) {
+    let pages = (size + 4095) / 4096;
+    let start_frame = (phys / 4096) as usize;
+    with_frame_allocator(|fa| {
+        for i in 0..pages {
+            fa.mark_free(start_frame + i);
+        }
+        ALLOCATED_FRAMES.fetch_sub(pages, Ordering::Relaxed);
+        if start_frame < fa.next_free { fa.next_free = start_frame; }
+    });
+}

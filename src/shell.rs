@@ -771,6 +771,7 @@ impl Shell {
             "ext2" => self.cmd_ext2(args),
             "lspci" => self.cmd_lspci(),
             "nicstat" => self.cmd_nicstat(),
+            "vblk" => self.cmd_vblk(args),
             "httptest" => self.cmd_httptest(args),
             "unixtest" => self.cmd_unixtest(args),
             "wget" | "curl" => self.cmd_wget(args),
@@ -5440,6 +5441,76 @@ impl Shell {
 
         let _ = close(client);
         let _ = close(server);
+    }
+
+    /// vblk: virtio-blk diagnostics.
+    ///   vblk info        : capacity
+    ///   vblk read LBA    : read sector LBA, hex-dump first 64 bytes
+    ///   vblk test        : write a marker pattern to LBA 0 then read it back
+    fn cmd_vblk(&self, args: &[&str]) {
+        if !crate::drivers::virtio_blk::is_available() {
+            println!("virtio-blk: not available (no -drive id=disk,if=virtio?)");
+            return;
+        }
+        let action = args.first().copied().unwrap_or("info");
+        match action {
+            "info" => {
+                let g = crate::drivers::virtio_blk::VIRTIO_BLK.lock();
+                if let Some(d) = g.as_ref() {
+                    let cap = d.capacity_sectors;
+                    println!("virtio-blk: {} sectors ({} MiB)",
+                        cap, (cap * 512) / (1024 * 1024));
+                }
+            }
+            "read" if args.len() >= 2 => {
+                let lba: u64 = args[1].parse().unwrap_or(0);
+                let mut buf = [0u8; 512];
+                let mut g = crate::drivers::virtio_blk::VIRTIO_BLK.lock();
+                let dev = match g.as_mut() {
+                    Some(d) => d,
+                    None => { println!("vblk: not initialised"); return; }
+                };
+                match dev.read_sector(lba, &mut buf) {
+                    Ok(()) => {
+                        println!("vblk: read LBA {} (first 64 bytes):", lba);
+                        for i in 0..4 {
+                            print!("  {:04x}: ", i * 16);
+                            for j in 0..16 {
+                                print!("{:02x} ", buf[i * 16 + j]);
+                            }
+                            println!();
+                        }
+                    }
+                    Err(e) => println!("vblk: {}", e),
+                }
+            }
+            "test" => {
+                let mut g = crate::drivers::virtio_blk::VIRTIO_BLK.lock();
+                let dev = match g.as_mut() {
+                    Some(d) => d,
+                    None => { println!("vblk: not initialised"); return; }
+                };
+                let mut payload = [0u8; 512];
+                let marker = b"RUSTOS-VIRTIO-BLK-TEST!";
+                payload[..marker.len()].copy_from_slice(marker);
+                match dev.write_sector(1024, &payload) {
+                    Ok(()) => println!("vblk: wrote LBA 1024"),
+                    Err(e) => { println!("vblk: write: {}", e); return; }
+                }
+                let mut readback = [0u8; 512];
+                match dev.read_sector(1024, &mut readback) {
+                    Ok(()) => {
+                        if &readback[..marker.len()] == marker {
+                            println!("vblk: round-trip ok ({} bytes match)", marker.len());
+                        } else {
+                            println!("vblk: round-trip MISMATCH");
+                        }
+                    }
+                    Err(e) => println!("vblk: read: {}", e),
+                }
+            }
+            _ => println!("Usage: vblk [info | read LBA | test]"),
+        }
     }
 
     /// lspci: list every device the PCI scanner found at boot.

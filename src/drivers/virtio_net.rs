@@ -55,6 +55,12 @@ struct VirtqDesc {
 const VIRTQ_DESC_F_NEXT:  u16 = 1;
 const VIRTQ_DESC_F_WRITE: u16 = 2;
 
+/// Avail-ring flag: ask the device not to fire an interrupt for new
+/// completions on this queue (virtio 1.0 §2.6.7).  We poll in
+/// `poll_rx`; without this bit the device's INTx line would fire and
+/// the kernel has no IDT vector for it, causing a #NP → double fault.
+const VIRTQ_AVAIL_F_NO_INTERRUPT: u16 = 1;
+
 #[repr(C, align(2))]
 struct VirtqAvail {
     flags: u16,
@@ -101,7 +107,7 @@ impl Virtqueue {
         desc[255].next = 0xFFFF;
 
         let avail = Box::new(VirtqAvail {
-            flags: 0, idx: 0, ring: [0; 256], used_event: 0,
+            flags: VIRTQ_AVAIL_F_NO_INTERRUPT, idx: 0, ring: [0; 256], used_event: 0,
         });
         let used = Box::new(VirtqUsed {
             flags: 0, idx: 0,

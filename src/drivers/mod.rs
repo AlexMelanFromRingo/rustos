@@ -5,3 +5,4 @@ pub mod mouse;
 pub mod hpet;
 pub mod pci;
 pub mod virtio_net;
+pub mod virtio_blk;
