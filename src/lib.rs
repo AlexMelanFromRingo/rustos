@@ -50,6 +50,7 @@ pub mod pkg;
 pub mod hardening;
 pub mod futex;
 pub mod backtrace;
+pub mod apic;
 
 pub fn init() {
     gdt::init();

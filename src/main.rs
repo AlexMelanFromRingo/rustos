@@ -95,6 +95,18 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // attached (run without `-device virtio-net-pci`), the probe logs
     // a warning and the global stays None.
     rustos::drivers::pci::scan();
+
+    // Bring up LAPIC + IOAPIC infrastructure.  We don't yet retire the
+    // legacy 8259 PIC — that requires re-routing every existing IRQ
+    // through the IOAPIC and switching all EOI calls to apic::eoi().
+    // For now the APIC is just available, useful for SMP / MSI later.
+    match rustos::apic::init() {
+        Ok(()) => println!("apic: LAPIC id={} ready ({} IOAPIC pins)",
+            rustos::apic::lapic_id(),
+            rustos::apic::ioapic_max_entries()),
+        Err(e) => println!("apic: not available ({})", e),
+    }
+
     rustos::drivers::virtio_net::init();
     rustos::drivers::virtio_blk::init();
     rustos::drivers::rtl8139::init();

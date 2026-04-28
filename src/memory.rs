@@ -293,6 +293,12 @@ pub fn free_memory() -> u64 {
 // `virt_to_phys(va)` walks the active page table — useful when an existing
 // buffer (e.g. heap-allocated) needs to be handed to a device.
 
+/// Bootloader-supplied direct-map offset: virtual = `phys_offset()` + physical.
+/// Returns 0 before `init` runs.
+pub fn phys_offset() -> u64 {
+    PHYS_MEM_OFFSET.load(Ordering::Relaxed)
+}
+
 /// Translate a kernel virtual address to a physical address by walking
 /// the active page table.
 pub fn virt_to_phys(va: u64) -> Option<u64> {
