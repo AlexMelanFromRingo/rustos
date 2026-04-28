@@ -199,20 +199,36 @@ fn source_ip_for(dst: Ipv4Addr, _table: &SocketTable) -> Option<Ipv4Addr> {
     None
 }
 
-/// `recvfrom(sock, buf)`.  Returns (bytes_read, source_addr).
-pub fn recvfrom(h: SocketHandle, buf: &mut [u8]) -> Result<(usize, SocketAddrV4), SocketError> {
+/// `recvfrom(sock, buf, flags)`.  Returns (bytes_read, source_addr,
+/// flags_out) where `flags_out` may include [`MSG_TRUNC`] if the original
+/// datagram was longer than `buf`.  Linux semantics: returning the
+/// (truncated) byte count is Ok, the caller is expected to check the
+/// flags-out for truncation rather than treat it as an error.
+pub fn recvfrom_flags(h: SocketHandle, buf: &mut [u8])
+    -> Result<(usize, SocketAddrV4, u32), SocketError>
+{
     let mut t = SOCKETS.lock();
     let s = t.get_mut(h).ok_or(SocketError::InvalidHandle)?;
     let dgram = s.rx.pop_front().ok_or(SocketError::NotBound)?;
     let n = dgram.data.len().min(buf.len());
     buf[..n].copy_from_slice(&dgram.data[..n]);
-    if n < dgram.data.len() {
-        // Datagram truncated — Linux returns the truncated length as Ok and
-        // sets MSG_TRUNC.  We simplify to BufferTooSmall.
+    let flags_out = if n < dgram.data.len() { MSG_TRUNC } else { 0 };
+    Ok((n, dgram.from, flags_out))
+}
+
+/// Backwards-compatible wrapper that mirrors the older 2-tuple API and
+/// returns BufferTooSmall on truncation, for callers that haven't been
+/// migrated to consume the flags.
+pub fn recvfrom(h: SocketHandle, buf: &mut [u8]) -> Result<(usize, SocketAddrV4), SocketError> {
+    let (n, from, fl) = recvfrom_flags(h, buf)?;
+    if fl & MSG_TRUNC != 0 {
         return Err(SocketError::BufferTooSmall);
     }
-    Ok((n, dgram.from))
+    Ok((n, from))
 }
+
+/// MSG_TRUNC bit in flags-out — original datagram was longer than buf.
+pub const MSG_TRUNC: u32 = 0x20;
 
 /// True if there is at least one datagram queued for this socket.
 pub fn has_pending(h: SocketHandle) -> bool {

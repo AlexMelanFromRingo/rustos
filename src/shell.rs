@@ -764,6 +764,9 @@ impl Shell {
             "tcpinfo" => self.cmd_tcpinfo(),
             "inode" => self.cmd_inode(args),
             "sha256" | "sha256sum" => self.cmd_sha256(args),
+            "mouse" => self.cmd_mouse(),
+            "hpet" => self.cmd_hpet(),
+            "futex" => self.cmd_futex(args),
             "httptest" => self.cmd_httptest(args),
             "unixtest" => self.cmd_unixtest(args),
             "wget" | "curl" => self.cmd_wget(args),
@@ -4610,15 +4613,36 @@ impl Shell {
                 }
             }
             "remove" if args.len() >= 2 => {
-                match crate::pkg::remove(args[1]) {
+                let force = args.contains(&"--force") || args.contains(&"-f");
+                match crate::pkg::remove_with(args[1], force) {
                     Ok(n) => println!("pkg: removed {} ({} files unlinked)", args[1], n),
                     Err(e) => println!("pkg: {}", e),
                 }
             }
             "info" if args.len() >= 2 => {
                 match crate::pkg::info(args[1]) {
-                    Some((n, v, d)) => println!("Name: {}\nVersion: {}\nDescription: {}", n, v, d),
+                    Some((n, v, d)) => {
+                        println!("Name: {}\nVersion: {}\nDescription: {}", n, v, d);
+                        let deps = crate::pkg::dependencies_of(args[1]);
+                        if !deps.is_empty() {
+                            println!("Depends: {}", deps.join(", "));
+                        }
+                        let rdeps = crate::pkg::reverse_dependencies(args[1]);
+                        if !rdeps.is_empty() {
+                            println!("Required by: {}", rdeps.join(", "));
+                        }
+                    }
                     None => println!("pkg: {} not installed", args[1]),
+                }
+            }
+            "deps" if args.len() >= 2 => {
+                let deps = crate::pkg::dependencies_of(args[1]);
+                let rdeps = crate::pkg::reverse_dependencies(args[1]);
+                if deps.is_empty() && rdeps.is_empty() {
+                    println!("(no dependency edges)");
+                } else {
+                    println!("Depends:     {:?}", deps);
+                    println!("Required by: {:?}", rdeps);
                 }
             }
             "sample" => {
@@ -5412,6 +5436,61 @@ impl Shell {
 
         let _ = close(client);
         let _ = close(server);
+    }
+
+    /// futex: list active wait queues, or run a wake self-test.
+    ///   futex            : list addresses with parked waiters
+    ///   futex test       : park 0 waiters, wake them — verifies wake counts
+    fn cmd_futex(&self, args: &[&str]) {
+        if args.first() == Some(&"test") {
+            // Run wake on a fresh address; should report 0 woken because
+            // no one is parked.  Real wait() needs a separate task; this
+            // exercises the wake path.
+            let dummy: i32 = 1;
+            let woken = crate::futex::wake(&dummy as *const i32, 4);
+            println!("futex test: wake on empty queue → {} woken", woken);
+            return;
+        }
+        let snap = crate::futex::snapshot();
+        if snap.is_empty() {
+            println!("(no active futex wait queues)");
+            return;
+        }
+        println!("addr               waiters");
+        for (addr, waiters) in snap {
+            println!("{:#018x}  {:?}", addr, waiters);
+        }
+    }
+
+    /// mouse: print current cursor position and button state.
+    fn cmd_mouse(&self) {
+        let s = crate::drivers::mouse::snapshot();
+        let lb = if s.buttons & 0x01 != 0 { "L" } else { "-" };
+        let rb = if s.buttons & 0x02 != 0 { "R" } else { "-" };
+        let mb = if s.buttons & 0x04 != 0 { "M" } else { "-" };
+        println!("Mouse: x={} y={} buttons={}{}{} packets={}",
+            s.x, s.y, lb, rb, mb, s.packets);
+    }
+
+    /// hpet: print HPET counter, period, and derived frequency.
+    fn cmd_hpet(&self) {
+        if !crate::drivers::hpet::is_available() {
+            println!("HPET: not available");
+            return;
+        }
+        let period = crate::drivers::hpet::period_fs();
+        let freq = if period > 0 { 1_000_000_000_000_000u64 / period } else { 0 };
+        let counter1 = crate::drivers::hpet::read_counter();
+        let ns1 = crate::drivers::hpet::counter_to_ns(counter1);
+        // Take a second sample after a brief delay.
+        for _ in 0..1_000_000 { core::hint::spin_loop(); }
+        let counter2 = crate::drivers::hpet::read_counter();
+        let elapsed = counter2.wrapping_sub(counter1);
+        let elapsed_ns = crate::drivers::hpet::counter_to_ns(elapsed);
+        println!("HPET: period={} fs (~{} Hz)", period, freq);
+        println!("  counter sample 1: {}  (~{} ns since boot)", counter1, ns1);
+        println!("  counter sample 2: {}", counter2);
+        println!("  ~{} ns elapsed in spin loop", elapsed_ns);
     }
 
     /// sha256 / sha256sum: hash a file or stdin (heredoc).

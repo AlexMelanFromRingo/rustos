@@ -61,6 +61,8 @@ pub enum SyscallNumber {
     SetSid = 112,
     RtSigaction = 13,
     Signal = 48, // not the linux number but close enough; treated as compat alias
+    Clone = 56,
+    Futex = 202,
 }
 
 impl SyscallNumber {
@@ -111,6 +113,8 @@ impl SyscallNumber {
             112 => Some(SyscallNumber::SetSid),
             13 => Some(SyscallNumber::RtSigaction),
             48 => Some(SyscallNumber::Signal),
+            56 => Some(SyscallNumber::Clone),
+            202 => Some(SyscallNumber::Futex),
             _ => None,
         }
     }
@@ -253,5 +257,7 @@ pub fn syscall_dispatcher(
         SyscallNumber::SetSid => handler::sys_setsid(),
         SyscallNumber::RtSigaction => handler::sys_rt_sigaction(arg1 as u32, arg2, arg3),
         SyscallNumber::Signal => handler::sys_signal(arg1 as u32, arg2 as u64),
+        SyscallNumber::Clone => handler::sys_clone(arg1, arg2, arg3, arg4, arg5),
+        SyscallNumber::Futex => handler::sys_futex(arg1, arg2 as i32, arg3 as i32, arg4 as u64),
     }
 }

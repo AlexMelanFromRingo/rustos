@@ -86,6 +86,10 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     rustos::drivers::ata::init();
     klog_info!("ATA driver initialized");
 
+    // PS/2 mouse + HPET register-only timer.
+    rustos::drivers::mouse::init();
+    rustos::drivers::hpet::init();
+
     // Initialize syscall support (after heap and GDT)
     rustos::init_syscall();
     klog_info!("SYSCALL/SYSRET support initialized");
@@ -153,6 +157,15 @@ Type 'help' to list available shell commands.\n\
         let _ = VfsContext::write("/etc/motd", motd.as_bytes().to_vec());
         let _ = VfsContext::write("/etc/issue",
             b"RustOS 0.1.0 \\n \\l\n".to_vec());
+        // /etc/getty.conf — uncomment require_login=1 to force a login
+        // prompt at boot; the default leaves auto-root on (matching the
+        // historical behaviour).  /etc/securetty lists the TTYs root may
+        // log in on directly.
+        let _ = VfsContext::write("/etc/getty.conf",
+            b"# require_login=1   # uncomment to require login at boot\n\
+              terminal=tty0\n".to_vec());
+        let _ = VfsContext::write("/etc/securetty",
+            b"console\ntty0\nttyS0\n".to_vec());
         let _ = VfsContext::mkdir("/var");
         let _ = VfsContext::mkdir("/var/log");
         let _ = VfsContext::write("/etc/hosts",
@@ -362,8 +375,34 @@ async fn keyboard_task() {
 
     let mut shell = Shell::new();
 
-    // Display the message of the day at boot (Ubuntu Server style).
-    if let Ok(motd) = rustos::fs::vfs::VfsContext::read("/etc/motd") {
+    // Display /etc/issue then /etc/motd at boot (Ubuntu Server style).
+    if let Ok(issue) = rustos::fs::vfs::VfsContext::read("/etc/issue") {
+        if let Ok(s) = core::str::from_utf8(&issue) {
+            let host = "rustos";
+            let kern = "x86_64-rustos";
+            print!("{}", s.replace("\\n", host).replace("\\l", kern));
+        }
+    }
+
+    // Optional getty-style login.  If /etc/getty.conf contains a line
+    // `require_login=1`, ask for credentials before dropping to the shell.
+    let require_login = match rustos::fs::vfs::VfsContext::read("/etc/getty.conf") {
+        Ok(d) => core::str::from_utf8(&d)
+            .map(|s| s.lines().any(|l| l.trim() == "require_login=1"))
+            .unwrap_or(false),
+        Err(_) => false,
+    };
+    if require_login {
+        // Cycle until login succeeds.  cmd_login() prints "Login incorrect"
+        // on failure but doesn't loop, so we re-invoke until CURRENT_CREDS
+        // shows a non-65534 (non-guest) uid.
+        loop {
+            shell.set_buffer_for("login");
+            shell.execute();
+            let euid = rustos::users::CURRENT_CREDS.lock().euid;
+            if euid != 65534 { break; }
+        }
+    } else if let Ok(motd) = rustos::fs::vfs::VfsContext::read("/etc/motd") {
         if let Ok(s) = core::str::from_utf8(&motd) {
             print!("{}", s);
         }

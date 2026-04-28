@@ -1147,14 +1147,53 @@ pub fn sys_ioctl(fd: usize, request: usize, _arg: usize) -> isize {
             0
         }
 
-        TCGETS | TCSETS => {
-            // Terminal attributes — return success (stub)
-            // Real implementation would manage terminal modes (raw, cooked, etc.)
-            if fd <= 2 {
-                0 // Success for stdin/stdout/stderr
-            } else {
-                SyscallError::InvalidArgument.as_isize()
+        TCGETS => {
+            if fd > 2 { return SyscallError::InvalidArgument.as_isize(); }
+            if _arg == 0 { return SyscallError::InvalidArgument.as_isize(); }
+            // Linux struct termios is 36 bytes (c_iflag, c_oflag, c_cflag,
+            // c_lflag, c_line, c_cc[19]).  We surface a tiny subset matching
+            // our actual TTY state.
+            let tty = crate::tty::TTY0.lock();
+            let mut t = [0u32; 9]; // 36 bytes
+            // c_iflag (offset 0): ICRNL=0x0100 if cr_translate
+            t[0] = if tty.termios.cr_translate { 0x0100 } else { 0 };
+            // c_oflag (offset 4): leave 0
+            // c_cflag (offset 8): CREAD=0x80 | CS8=0x30 | B38400=0xF
+            t[2] = 0x80 | 0x30 | 0x0F;
+            // c_lflag (offset 12): ICANON=0x02 if canonical, ECHO=0x08 if echo,
+            // ISIG=0x01 if signals.
+            let mut lflag: u32 = 0;
+            if tty.termios.canonical { lflag |= 0x02; }
+            if tty.termios.echo      { lflag |= 0x08; }
+            if tty.termios.signals   { lflag |= 0x01; }
+            t[3] = lflag;
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    t.as_ptr() as *const u8,
+                    _arg as *mut u8,
+                    36,
+                );
             }
+            0
+        }
+        TCSETS => {
+            if fd > 2 { return SyscallError::InvalidArgument.as_isize(); }
+            if _arg == 0 { return SyscallError::InvalidArgument.as_isize(); }
+            // Read the same 36-byte struct back into TTY state.
+            let mut t = [0u32; 9];
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    _arg as *const u8,
+                    t.as_mut_ptr() as *mut u8,
+                    36,
+                );
+            }
+            let mut tty = crate::tty::TTY0.lock();
+            tty.termios.cr_translate = t[0] & 0x0100 != 0;
+            tty.termios.canonical    = t[3] & 0x02 != 0;
+            tty.termios.echo         = t[3] & 0x08 != 0;
+            tty.termios.signals      = t[3] & 0x01 != 0;
+            0
         }
 
         FIONREAD => {
@@ -1178,6 +1217,52 @@ pub fn sys_ioctl(fd: usize, request: usize, _arg: usize) -> isize {
             // Unknown ioctl — return ENOTTY for non-terminal fds
             SyscallError::NotImplemented.as_isize()
         }
+    }
+}
+
+/// clone(flags, child_stack, parent_tid, child_tid, tls).
+///
+/// We delegate to the existing fork() machinery for the basic case
+/// (CLONE_THREAD not yet implemented — flag is recorded but the child
+/// gets its own pid, mirroring fork).  Returns the child pid on success,
+/// 0 in the would-be-child path is not implemented yet.
+pub fn sys_clone(flags: usize, _child_stack: usize, _parent_tid: usize,
+                 _child_tid: usize, _tls: usize) -> isize {
+    let mut pm = crate::process::PROCESS_MANAGER.lock();
+    let parent_pid = match pm.current_pid {
+        Some(p) => p,
+        None => return SyscallError::FileNotFound.as_isize(),
+    };
+    match pm.fork(parent_pid) {
+        Ok(child_pid) => {
+            // Record clone flags for diagnostics; CLONE_THREAD/VM/FS/FILES
+            // would normally cause the child to share state, but we
+            // currently always make a copy.
+            crate::syslog::log(
+                crate::syslog::Facility::Kern,
+                crate::syslog::Severity::Debug,
+                "clone",
+                alloc::format!("pid={} -> child={} flags={:#x}", parent_pid, child_pid, flags),
+            );
+            child_pid as isize
+        }
+        Err(_) => SyscallError::OutOfMemory.as_isize(),
+    }
+}
+
+/// futex(uaddr, op, val, timeout_ticks).  Op = 0 (FUTEX_WAIT) or 1 (FUTEX_WAKE).
+pub fn sys_futex(uaddr: usize, op: i32, val: i32, timeout_ticks: u64) -> isize {
+    if uaddr == 0 { return SyscallError::InvalidArgument.as_isize(); }
+    let ptr = uaddr as *const i32;
+    match op {
+        0 => match crate::futex::wait(ptr, val, timeout_ticks) {
+            Ok(()) => 0,
+            Err(crate::futex::FutexError::WouldBlock) => -11, // EAGAIN
+            Err(crate::futex::FutexError::TimedOut) => -110,  // ETIMEDOUT
+            Err(_) => SyscallError::InvalidArgument.as_isize(),
+        },
+        1 => crate::futex::wake(ptr, val.max(0) as usize) as isize,
+        _ => SyscallError::InvalidArgument.as_isize(),
     }
 }
 

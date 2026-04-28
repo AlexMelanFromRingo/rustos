@@ -48,6 +48,7 @@ pub mod capability;
 pub mod partition;
 pub mod pkg;
 pub mod hardening;
+pub mod futex;
 
 pub fn init() {
     gdt::init();

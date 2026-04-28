@@ -224,7 +224,16 @@ fn read_proc_pid(pid: usize, subpath: &str) -> Option<Vec<u8>> {
         }
 
         "stat" => {
-            // Linux /proc/[pid]/stat format (simplified)
+            // Linux /proc/[pid]/stat format (proc(5) man page).  Fields
+            // 1..52 are: pid, comm, state, ppid, pgrp, session, tty_nr,
+            // tpgid, flags, minflt, cminflt, majflt, cmajflt, utime,
+            // stime, cutime, cstime, priority, nice, num_threads,
+            // itrealvalue, starttime, vsize, rss, rsslim, startcode,
+            // endcode, startstack, kstkesp, kstkeip, signal, blocked,
+            // sigignore, sigcatch, wchan, nswap, cnswap, exit_signal,
+            // processor, rt_priority, policy, delayacct_blkio_ticks,
+            // guest_time, cguest_time, start_data, end_data, start_brk,
+            // arg_start, arg_end, env_start, env_end, exit_code.
             let state_char = match process.state {
                 crate::process::ProcessState::Running => 'R',
                 crate::process::ProcessState::Ready => 'R',
@@ -234,8 +243,34 @@ fn read_proc_pid(pid: usize, subpath: &str) -> Option<Vec<u8>> {
                 crate::process::ProcessState::Terminated => 'X',
             };
             let ppid = process.parent_pid.unwrap_or(0);
-            Some(format!("{} (process_{}) {} {} 0 0 0 0 0 0 0 0 0 0 0 0 {} 0\n",
-                pid, pid, state_char, ppid, process.nice).into_bytes())
+            let pgrp = process.pgid;
+            let session = process.sid;
+            let tty_nr = 0;
+            let tpgid = -1i32;
+            let flags = 0u64;
+            let priority = 20 + process.nice as i32;
+            let nice = process.nice as i32;
+            let num_threads = 1u32;
+            let starttime = 0u64;
+            let vsize = process.stack.len() as u64;
+            let rss_pages = (process.stack.len() as u64 + 4095) / 4096;
+            let rsslim = u64::MAX;
+            let kernel_stack = process.kernel_stack_top;
+            let entry = process.entry_point.unwrap_or(0);
+            let user_stack = process.user_stack_addr.unwrap_or(0);
+            let exit_code = process.exit_code.unwrap_or(0);
+            let blocked = process.signal_blocked;
+            let pending = process.pending_signals;
+
+            Some(format!(
+                "{} (rustos-{}) {} {} {} {} {} {} {} 0 0 0 0 0 0 0 0 {} {} {} 0 {} {} {} {} {:#x} {:#x} {:#x} {:#x} {:#x} {} {} 0 0 0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0 0 {}\n",
+                pid, pid, state_char, ppid, pgrp, session, tty_nr, tpgid, flags,
+                priority, nice, num_threads,
+                starttime, vsize, rss_pages, rsslim,
+                entry, entry, user_stack, kernel_stack, kernel_stack,
+                pending, blocked,
+                exit_code
+            ).into_bytes())
         }
 
         "maps" => {

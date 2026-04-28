@@ -20,6 +20,8 @@ pub enum InterruptIndex {
     Serial1 = PIC_1_OFFSET + 4,
     PrimaryATA = PIC_2_OFFSET + 6,
     SecondaryATA = PIC_2_OFFSET + 7,
+    /// PS/2 auxiliary device — mouse on IRQ 12 (slave PIC pin 4).
+    Mouse = PIC_2_OFFSET + 4,
 }
 
 impl InterruptIndex {
@@ -42,6 +44,8 @@ lazy_static! {
         }
         idt.general_protection_fault.set_handler_fn(general_protection_fault_handler);
         idt.page_fault.set_handler_fn(page_fault_handler);
+        idt.non_maskable_interrupt.set_handler_fn(nmi_handler);
+        idt.machine_check.set_handler_fn(machine_check_handler);
 
         // Timer: use naked handler for preemptive context switching
         unsafe {
@@ -57,6 +61,8 @@ lazy_static! {
             .set_handler_fn(primary_ata_interrupt_handler);
         idt[InterruptIndex::SecondaryATA.as_usize()]
             .set_handler_fn(secondary_ata_interrupt_handler);
+        idt[InterruptIndex::Mouse.as_usize()]
+            .set_handler_fn(mouse_interrupt_handler);
         idt
     };
 }
@@ -374,6 +380,39 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(
         PICS.lock()
             .notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8());
     }
+}
+
+/// PS/2 auxiliary (mouse) — IRQ 12.  Reads a byte from port 0x60 and
+/// hands it to the mouse packet-decoder state machine.
+extern "x86-interrupt" fn mouse_interrupt_handler(
+    _stack_frame: InterruptStackFrame)
+{
+    use x86_64::instructions::port::Port;
+    let mut port = Port::<u8>::new(0x60);
+    let byte: u8 = unsafe { port.read() };
+    crate::drivers::mouse::input_byte(byte);
+    unsafe {
+        PICS.lock()
+            .notify_end_of_interrupt(InterruptIndex::Mouse.as_u8());
+    }
+}
+
+/// Non-maskable interrupt — used by hardware to flag irrecoverable
+/// conditions (parity errors, watchdog timeouts, IPMI events).  We log
+/// and continue rather than halt, on the theory that whatever started
+/// the NMI also wanted us alive long enough to record it.
+extern "x86-interrupt" fn nmi_handler(stack_frame: InterruptStackFrame) {
+    crate::klog_warn!("NMI received at RIP={:#x}",
+        stack_frame.instruction_pointer.as_u64());
+}
+
+/// #MC — Machine Check Exception.  Indicates the CPU detected an
+/// uncorrectable hardware error.  Recovery on a one-shot kernel is not
+/// realistic: we record and halt.
+extern "x86-interrupt" fn machine_check_handler(stack_frame: InterruptStackFrame) -> ! {
+    crate::klog_err!("MCE at RIP={:#x} — halting",
+        stack_frame.instruction_pointer.as_u64());
+    loop { x86_64::instructions::hlt(); }
 }
 
 extern "x86-interrupt" fn serial1_interrupt_handler(
