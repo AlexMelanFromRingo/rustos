@@ -5570,6 +5570,12 @@ impl Shell {
                     Err(e) => println!("ext2: mount failed: {}", e),
                 }
             }
+            "mount-disk" | "mount_disk" => {
+                match crate::fs::ext2::try_auto_mount_disk() {
+                    Ok(bs) => println!("ext2: mounted from virtio-blk (block size {})", bs),
+                    Err(e) => println!("ext2: disk mount failed: {}", e),
+                }
+            }
             "super" => {
                 let g = crate::fs::ext2::EXT2.lock();
                 match g.as_ref() {
@@ -5626,7 +5632,7 @@ impl Shell {
                     Err(e) => println!("ext2: {}", e),
                 }
             }
-            _ => println!("Usage: ext2 [mount | ls | cat PATH | super]"),
+            _ => println!("Usage: ext2 [mount | mount-disk | ls | cat PATH | super]"),
         }
     }
 

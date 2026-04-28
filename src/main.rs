@@ -100,7 +100,31 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     if rustos::drivers::virtio_blk::is_available() {
         println!("virtio-blk: present");
-        rustos::drivers::virtio_blk::self_test();
+        // Try to mount an Ext2 filesystem.  If that fails (no Ext2 magic
+        // on the disk), fall back to the I/O round-trip self-test so we
+        // still verify the driver works end-to-end.
+        match rustos::fs::ext2::try_auto_mount_disk() {
+            Ok(bs) => {
+                println!("ext2: mounted from virtio-blk (block size {})", bs);
+                // Show the root directory listing so the boot log proves
+                // we can walk the filesystem.
+                let g = rustos::fs::ext2::EXT2.lock();
+                if let Some(fs) = g.as_ref() {
+                    if let Ok(root) = fs.read_inode(2) {
+                        if let Ok(entries) = fs.read_dir(&root) {
+                            print!("ext2: /:");
+                            for e in &entries {
+                                if e.name != "." && e.name != ".." {
+                                    print!(" {}", e.name);
+                                }
+                            }
+                            println!();
+                        }
+                    }
+                }
+            }
+            Err(_) => rustos::drivers::virtio_blk::self_test(),
+        }
     } else {
         println!("virtio-blk: not available (no -drive if=virtio)");
     }
