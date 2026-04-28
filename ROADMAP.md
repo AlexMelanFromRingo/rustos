@@ -30,7 +30,7 @@ Reference architecture: Linux/Unix-like.
 
 ### 1.3 Scheduler Improvements
 - [x] Priority-based scheduling (nice values -20..19, dynamic quantum) ✅
-- [ ] CFS (Completely Fair Scheduler) inspired design
+- [x] CFS (Completely Fair Scheduler) inspired design (vruntime + Linux nice weights) ✅
 - [x] Proper process blocking on I/O (sleep queues) ✅
 - [ ] Multi-core support (per-CPU run queues, SMP init)
 
@@ -99,6 +99,7 @@ Reference architecture: Linux/Unix-like.
 
 ### 3.3 Ext2/Ext4 Filesystem
 - [x] Ext2 read support (superblock, BGDT, inodes, direct + 1/2/3-level indirect blocks, dir entries, lookup-by-path) ✅
+- [x] Ext2 mount from disk via virtio-blk (VirtioBlkSource adapter, auto-mount on boot if magic at sector 2) ✅
 - [ ] Ext2 write support
 - [ ] Ext4 basic support (extents, large files)
 - [ ] Journal support for crash recovery
@@ -117,11 +118,11 @@ Reference architecture: Linux/Unix-like.
 ### 4.1 Storage
 - [ ] AHCI/SATA driver (replace PIO ATA with DMA)
 - [ ] NVMe driver for modern storage
-- [ ] Virtio-blk for QEMU performance
+- [x] Virtio-blk for QEMU performance (legacy I/O port layout, contiguous DMA, NO_INTERRUPT poll, ext2 mount on boot) ✅
 - [x] Partition table parsing (MBR; GPT detection via protective entry only) ✅
 
 ### 4.2 Network Stack
-- [ ] RTL8139 NIC driver (simple, well-documented)
+- [x] RTL8139 NIC driver (PCI 10ec:8139, 8K RX ring + 4 TX bounce buffers, polling, MAC read) ✅
 - [ ] E1000 NIC driver (Intel, used by QEMU)
 - [x] Virtio-net driver (PCI scan, BAR0 I/O, RESET→ACK→DRIVER→FEATURES→DRIVER_OK, RX/TX virtqueues, MAC read from device config) ✅
 - [x] Ethernet frame handling (build_frame, EthHeader parse, ethertypes IPv4/ARP/IPv6) ✅
