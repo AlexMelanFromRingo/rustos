@@ -235,6 +235,24 @@ fn run_all() {
     // LAPIC ID is 0 (the BSP), the test runs but skips with an
     // explanatory message.
     check!("smp-lm: real AP enters Rust ap_main",       { t_smp_lm_real_boot(); });
+
+    // Dynamic linker — exercised against real .so fixtures built via
+    // the host gcc (committed under tests/fixtures/).
+    check!("dynlink: PIE binary parses",                 { t_dyn_pie_parses(); });
+    check!("dynlink: needed_libraries lists DT_NEEDED",  { t_dyn_needed_libs(); });
+    check!("dynlink: soname matches DT_SONAME",          { t_dyn_soname(); });
+    check!("dynlink: dynamic_strtab readable",           { t_dyn_strtab(); });
+    check!("dynlink: SysV symtab spans full table",      { t_dyn_sysv_symtab_size(); });
+    check!("dynlink: GNU symtab spans full table",       { t_dyn_gnu_symtab_size(); });
+    check!("dynlink: linear lookup finds 'answer'",      { t_dyn_lookup_linear(); });
+    check!("dynlink: hashed lookup finds 'answer'",      { t_dyn_lookup_hashed(); });
+    check!("dynlink: hashed lookup misses unknown",      { t_dyn_lookup_miss(); });
+    check!("dynlink: my_global is OBJECT in dynsym",     { t_dyn_object_symbol(); });
+    check!("dynlink: elf_hash matches reference vec",    { t_dyn_elf_hash(); });
+    check!("dynlink: gnu_hash matches reference vec",    { t_dyn_gnu_hash(); });
+    check!("dynlink: MultiObjectResolver finds symbol",  { t_dyn_multiobj_resolver(); });
+    check!("dynlink: MultiObjectResolver misses unknown",{ t_dyn_multiobj_miss(); });
+    check!("dynlink: dependent .so lists its NEEDED",    { t_dyn_dependent_needed(); });
 }
 
 // ----------------------------------------------------------------------------
@@ -1422,6 +1440,170 @@ fn t_smp_pq_steal_threshold() {
     assert_eq!(rustos::smp::steal_from_peer(bsp), None,
         "thief must not steal from itself");
     let _ = slot.drain();
+}
+
+// ----------------------------------------------------------------------------
+// Dynamic linker: tests against host-built .so fixtures (committed under
+// tests/fixtures/).  Each fixture is a real shared object produced by gcc;
+// using real ELFs catches issues hand-crafted blobs would miss (alignment,
+// section ordering, hash table layout).
+// ----------------------------------------------------------------------------
+
+const LIBDYNTEST_SYSV: &[u8] = include_bytes!("fixtures/libdyntest_sysv.so");
+const LIBDYNTEST_GNU:  &[u8] = include_bytes!("fixtures/libdyntest_gnu.so");
+const LIBDYNTEST_BOTH: &[u8] = include_bytes!("fixtures/libdyntest_both.so");
+const LIBDEPNTEST:     &[u8] = include_bytes!("fixtures/libdepntest.so");
+
+fn loader(b: &[u8]) -> rustos::elf::ElfLoader<'_> {
+    rustos::elf::ElfLoader::new(b).expect("fixture must parse as ELF")
+}
+
+fn t_dyn_pie_parses() {
+    let l = loader(LIBDYNTEST_SYSV);
+    assert!(l.is_pie(), "test fixture is built -shared, must be ET_DYN");
+    assert!(l.dynamic_segment().is_some(), "must have PT_DYNAMIC");
+}
+
+fn t_dyn_needed_libs() {
+    // libdepntest links against -ldyntest_sysv, so it should NEED libdyntest.so.1.
+    let l = loader(LIBDEPNTEST);
+    let needed = l.needed_libraries();
+    assert!(!needed.is_empty(), "depntest must NEED at least one library");
+    let names: alloc::vec::Vec<&[u8]> = needed.iter().copied().collect();
+    assert!(names.iter().any(|n| *n == b"libdyntest.so.1"),
+        "expected libdyntest.so.1 in NEEDED list, got {:?}",
+        names.iter().map(|n| core::str::from_utf8(n).unwrap_or("?")).collect::<alloc::vec::Vec<_>>());
+}
+
+fn t_dyn_soname() {
+    let l = loader(LIBDYNTEST_SYSV);
+    let s = l.soname();
+    assert_eq!(s, Some(b"libdyntest.so.1" as &[u8]),
+        "expected DT_SONAME = libdyntest.so.1");
+}
+
+fn t_dyn_strtab() {
+    let l = loader(LIBDYNTEST_SYSV);
+    let s = l.dynamic_strtab().expect("strtab must exist");
+    assert!(!s.is_empty());
+    assert_eq!(s[0], 0, "ELF strtab convention: byte 0 is NUL");
+    // 'answer' must appear somewhere in the strtab.
+    let needle = b"answer";
+    assert!(s.windows(needle.len()).any(|w| w == needle),
+        "expected 'answer' in strtab");
+}
+
+fn t_dyn_sysv_symtab_size() {
+    let l = loader(LIBDYNTEST_SYSV);
+    let (sym, str_) = l.dynamic_symbols().expect("symtab+strtab via DT_HASH");
+    assert!(sym.len() % 24 == 0, "symtab must be multiple of 24 bytes");
+    assert!(sym.len() > 24, "more than just the null entry");
+    assert!(!str_.is_empty());
+}
+
+fn t_dyn_gnu_symtab_size() {
+    let l = loader(LIBDYNTEST_GNU);
+    let (sym, _) = l.dynamic_symbols().expect("symtab via DT_GNU_HASH");
+    assert!(sym.len() % 24 == 0);
+    assert!(sym.len() > 24);
+}
+
+fn t_dyn_lookup_linear() {
+    let l = loader(LIBDYNTEST_BOTH);
+    let v = l.lookup_symbol(b"answer").expect("answer must be defined");
+    assert!(v != 0, "answer's st_value should be non-zero (it's a function)");
+}
+
+fn t_dyn_lookup_hashed() {
+    let l = loader(LIBDYNTEST_BOTH);
+    let v = l.lookup_symbol_hashed(b"answer").expect("answer must be hashed-findable");
+    assert!(v != 0);
+    // Linear and hashed must agree.
+    assert_eq!(v, l.lookup_symbol(b"answer").unwrap());
+    let g = l.lookup_symbol_hashed(b"my_global").expect("my_global hashed");
+    assert!(g != 0);
+}
+
+fn t_dyn_lookup_miss() {
+    let l = loader(LIBDYNTEST_BOTH);
+    assert!(l.lookup_symbol_hashed(b"this_symbol_does_not_exist").is_none());
+    assert!(l.lookup_symbol(b"this_symbol_does_not_exist").is_none());
+}
+
+fn t_dyn_object_symbol() {
+    // Walk the symtab manually and check my_global is STT_OBJECT.
+    let l = loader(LIBDYNTEST_SYSV);
+    let (sym, str_) = l.dynamic_symbols().unwrap();
+    let mut found = false;
+    let mut pos = 0;
+    while pos + 24 <= sym.len() {
+        let s = rustos::elf::Elf64Sym::parse(&sym[pos..pos+24]).unwrap();
+        pos += 24;
+        let nm = s.st_name as usize;
+        if nm < str_.len() {
+            let nul = str_[nm..].iter().position(|&b| b == 0)
+                .map(|p| nm + p).unwrap_or(str_.len());
+            if &str_[nm..nul] == b"my_global" {
+                assert_eq!(s.ty(), rustos::elf::STT_OBJECT,
+                    "my_global must be STT_OBJECT");
+                assert!(!s.is_undefined());
+                found = true;
+                break;
+            }
+        }
+    }
+    assert!(found, "my_global must be in dynsym");
+}
+
+fn t_dyn_elf_hash() {
+    // Reference vector from the ELF spec §3.5: hash of "" is 0.
+    assert_eq!(rustos::elf::elf_hash(b""), 0);
+    // Reference vector: ELF spec gives h("printf") = 0x77905a6.
+    assert_eq!(rustos::elf::elf_hash(b"printf"), 0x77905a6);
+}
+
+fn t_dyn_gnu_hash() {
+    // GNU hash starts at 5381 (Bernstein's djb2 seed).
+    assert_eq!(rustos::elf::gnu_hash(b""), 5381);
+    // 'a' → 5381*33 + 97 = 177670
+    assert_eq!(rustos::elf::gnu_hash(b"a"), 177670);
+    // Cross-check against a known reference computed offline:
+    //   gnu_hash("answer") via 5381*33^6 + ...
+    // Use the function itself as the oracle; just ensure non-zero.
+    let h = rustos::elf::gnu_hash(b"answer");
+    assert!(h != 0);
+}
+
+fn t_dyn_multiobj_resolver() {
+    let l_a = loader(LIBDYNTEST_SYSV);
+    let l_b = loader(LIBDEPNTEST);
+    let mut r = rustos::elf::MultiObjectResolver::new();
+    r.push(0x1_0000, l_a);
+    r.push(0x2_0000, l_b);
+    // 'answer' is defined in libdyntest_sysv (image_base 0x1_0000).
+    let v = r.resolve(b"answer").expect("answer in libdyntest");
+    let local_off = loader(LIBDYNTEST_SYSV).lookup_symbol_hashed(b"answer").unwrap();
+    assert_eq!(v, 0x1_0000u64.wrapping_add(local_off),
+        "resolver must add image_base to st_value");
+}
+
+fn t_dyn_multiobj_miss() {
+    let l = loader(LIBDYNTEST_GNU);
+    let mut r = rustos::elf::MultiObjectResolver::new();
+    r.push(0, l);
+    assert!(r.resolve(b"definitely_not_a_symbol").is_none());
+}
+
+fn t_dyn_dependent_needed() {
+    // Round-trip property: depntest's NEEDED list contains libdyntest.so.1
+    // and the strtab entry it references actually parses to that name.
+    let l = loader(LIBDEPNTEST);
+    let needed = l.needed_libraries();
+    let strs: alloc::vec::Vec<alloc::string::String> = needed.iter()
+        .map(|n| core::str::from_utf8(n).unwrap().into())
+        .collect();
+    assert!(strs.iter().any(|s| s == "libdyntest.so.1"),
+        "got {:?}", strs);
 }
 
 // Suppress unused-imports lint for paths used only in a few tests.
