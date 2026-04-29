@@ -263,6 +263,27 @@ fn run_all() {
     check!("coreutils: 'echo' resolves by name",         { t_coreutils_find_echo(); });
     check!("coreutils: 'nope' returns None",             { t_coreutils_find_miss(); });
     check!("coreutils: every blob has executable PT_LOAD",{ t_coreutils_has_exec_load(); });
+
+    // USB stack — register layout, TD/QH bit packing, descriptor parsing,
+    // HID boot-protocol report parsing.  All pure data; no real USB hw.
+    check!("usb: UHCI register offsets match spec",     { t_usb_uhci_regs(); });
+    check!("usb: PORTSC decoder picks no/lo/full",      { t_usb_portsc_decode(); });
+    check!("usb: TD link bits bit-encoded",             { t_usb_td_link(); });
+    check!("usb: TD make_token has correct PID + EP",   { t_usb_td_token(); });
+    check!("usb: TD active flag round-trips",           { t_usb_td_active(); });
+    check!("usb: TD actual_length 0x7FF means 0",       { t_usb_td_actual_len(); });
+    check!("usb: device descriptor parses",             { t_usb_dev_desc(); });
+    check!("usb: config descriptor parses",             { t_usb_cfg_desc(); });
+    check!("usb: interface descriptor parses",          { t_usb_iface_desc(); });
+    check!("usb: endpoint descriptor parses",           { t_usb_ep_desc(); });
+    check!("usb: SETUP get_descriptor matches spec",    { t_usb_setup_get_desc(); });
+    check!("usb: SETUP set_address matches spec",       { t_usb_setup_set_addr(); });
+    check!("usb: HID boot keyboard 'A' parses",         { t_usb_hid_kbd_a(); });
+    check!("usb: HID boot keyboard rollover ignored",   { t_usb_hid_kbd_rollover(); });
+    check!("usb: HID keyboard diff finds press/release",{ t_usb_hid_kbd_diff(); });
+    check!("usb: HID usage_to_ascii basic + shift",     { t_usb_hid_ascii(); });
+    check!("usb: HID boot mouse parses + buttons",      { t_usb_hid_mouse(); });
+    check!("usb: HID boot mouse signed deltas",         { t_usb_hid_mouse_neg(); });
 }
 
 // ----------------------------------------------------------------------------
@@ -1665,6 +1686,210 @@ fn t_coreutils_has_exec_load() {
         }
         assert!(has_exec_load, "{}: must have at least one executable PT_LOAD", b.name);
     }
+}
+
+// ----------------------------------------------------------------------------
+// USB stack tests (no real hardware; pure data structures + parsers)
+// ----------------------------------------------------------------------------
+
+fn t_usb_uhci_regs() {
+    use rustos::drivers::usb::uhci::*;
+    // Verbatim from Intel UHCI Design Guide §2.1 Table 2-1.
+    assert_eq!(REG_USBCMD,     0x00);
+    assert_eq!(REG_USBSTS,     0x02);
+    assert_eq!(REG_USBINTR,    0x04);
+    assert_eq!(REG_FRNUM,      0x06);
+    assert_eq!(REG_FRBASEADD,  0x08);
+    assert_eq!(REG_SOFMOD,     0x0C);
+    assert_eq!(REG_PORTSC1,    0x10);
+    assert_eq!(REG_PORTSC2,    0x12);
+    assert_eq!(FRAME_LIST_LEN, 1024);
+}
+
+fn t_usb_portsc_decode() {
+    use rustos::drivers::usb::uhci::*;
+    assert_eq!(decode_port(0), PortStatus::NoDevice);
+    assert_eq!(decode_port(PORTSC_CCS), PortStatus::FullSpeed);
+    assert_eq!(decode_port(PORTSC_CCS | PORTSC_LSDA), PortStatus::LowSpeed);
+}
+
+fn t_usb_td_link() {
+    use rustos::drivers::usb::uhci::*;
+    let td = Td::empty();
+    assert!(td.link & LINK_T != 0, "empty TD must terminate");
+    assert_eq!(td.link & !LINK_T, 0);
+}
+
+fn t_usb_td_token() {
+    use rustos::drivers::usb::uhci::*;
+    // OUT to address 5, endpoint 2, data toggle 1, max_len 8.
+    let tok = Td::make_token(PID_OUT, 5, 2, true, 8);
+    assert_eq!(tok & 0xFF, PID_OUT as u32);
+    assert_eq!((tok >> 8) & 0x7F, 5);
+    assert_eq!((tok >> 15) & 0x0F, 2);
+    assert_eq!((tok >> 19) & 1, 1);
+    // length field = max_len-1
+    assert_eq!((tok >> 21) & 0x7FF, 7);
+    // max_len = 0 ⇒ field = 0x7FF (no data)
+    let tok0 = Td::make_token(PID_IN, 0, 0, false, 0);
+    assert_eq!((tok0 >> 21) & 0x7FF, 0x7FF);
+}
+
+fn t_usb_td_active() {
+    use rustos::drivers::usb::uhci::*;
+    let mut td = Td::empty();
+    assert!(!td.is_active());
+    td.control |= TD_CTRL_ACTIVE;
+    assert!(td.is_active());
+}
+
+fn t_usb_td_actual_len() {
+    use rustos::drivers::usb::uhci::*;
+    let mut td = Td::empty();
+    td.control = 0x7FF;
+    assert_eq!(td.actual_length(), 0, "0x7FF means zero bytes");
+    td.control = 9;
+    assert_eq!(td.actual_length(), 10, "0..0x7FE encodes len-1");
+}
+
+fn t_usb_dev_desc() {
+    use rustos::drivers::usb::*;
+    // Synthetic 18-byte device descriptor — typical USB 1.1 keyboard.
+    let bytes = [
+        0x12,                    // bLength
+        USB_DT_DEVICE,           // bDescriptorType
+        0x10, 0x01,              // bcdUSB = 1.10
+        0x00, 0x00, 0x00,        // class/sub/proto (HID via interface)
+        0x08,                    // bMaxPacketSize0
+        0x6D, 0x04,              // idVendor = 0x046D (Logitech)
+        0x21, 0xC0,              // idProduct = 0xC021
+        0x00, 0x01,              // bcdDevice
+        0x00, 0x00, 0x00,        // string indices
+        0x01,                    // numConfigurations
+    ];
+    let d = DeviceDescriptor::parse(&bytes).expect("must parse");
+    let v = d.id_vendor; let p = d.id_product;
+    assert_eq!(v, 0x046D);
+    assert_eq!(p, 0xC021);
+}
+
+fn t_usb_cfg_desc() {
+    use rustos::drivers::usb::*;
+    let bytes = [9, USB_DT_CONFIGURATION, 0x22, 0x00, 1, 1, 0, 0xA0, 50];
+    let c = ConfigurationDescriptor::parse(&bytes).expect("must parse");
+    let n = c.b_num_interfaces;
+    assert_eq!(n, 1);
+}
+
+fn t_usb_iface_desc() {
+    use rustos::drivers::usb::*;
+    // Interface 0, alt 0, 1 endpoint, HID class, boot subclass, keyboard proto.
+    let bytes = [9, USB_DT_INTERFACE, 0, 0, 1,
+        USB_CLASS_HID, USB_HID_SUBCLASS_BOOT, USB_HID_PROTO_KEYBOARD, 0];
+    let i = InterfaceDescriptor::parse(&bytes).expect("must parse");
+    assert_eq!(i.b_interface_class, USB_CLASS_HID);
+    assert_eq!(i.b_interface_protocol, USB_HID_PROTO_KEYBOARD);
+}
+
+fn t_usb_ep_desc() {
+    use rustos::drivers::usb::*;
+    // EP 1, IN, interrupt, 8 bytes, 10ms.
+    let bytes = [7, USB_DT_ENDPOINT, 0x81, 0x03, 0x08, 0x00, 10];
+    let e = EndpointDescriptor::parse(&bytes).expect("must parse");
+    assert_eq!(e.endpoint_number(), 1);
+    assert!(e.is_in());
+    assert_eq!(e.transfer_type(), 3, "interrupt = 11b");
+}
+
+fn t_usb_setup_get_desc() {
+    use rustos::drivers::usb::*;
+    let s = SetupPacket::get_descriptor(USB_DT_DEVICE, 0, 0, 18);
+    let bytes = s.as_bytes();
+    // bmRequestType: dir=IN(1) | type=STD(0) | recip=DEVICE(0) = 0x80
+    assert_eq!(bytes[0], 0x80);
+    assert_eq!(bytes[1], USB_REQ_GET_DESCRIPTOR);
+    // wValue = (DEVICE << 8) | 0
+    assert_eq!(bytes[2], 0x00);
+    assert_eq!(bytes[3], USB_DT_DEVICE);
+    assert_eq!(bytes[6], 18);
+    assert_eq!(bytes[7], 0);
+}
+
+fn t_usb_setup_set_addr() {
+    use rustos::drivers::usb::*;
+    let s = SetupPacket::set_address(7);
+    let bytes = s.as_bytes();
+    // bmRequestType: dir=OUT(0) | type=STD(0) | recip=DEVICE(0) = 0x00
+    assert_eq!(bytes[0], 0x00);
+    assert_eq!(bytes[1], USB_REQ_SET_ADDRESS);
+    assert_eq!(bytes[2], 7);
+}
+
+fn t_usb_hid_kbd_a() {
+    use rustos::drivers::usb::hid::*;
+    // Shift held, 'a' key (HID usage 0x04) pressed.
+    let bytes = [KMOD_LSHIFT, 0, 0x04, 0, 0, 0, 0, 0];
+    let r = KeyboardReport::parse(&bytes).expect("must parse");
+    assert!(r.shift_held());
+    assert!(r.is_pressed(0x04));
+    assert!(!r.is_pressed(0x05));
+    // Translate to ASCII: shift+a = 'A'.
+    assert_eq!(usage_to_ascii(0x04, true), b'A');
+    assert_eq!(usage_to_ascii(0x04, false), b'a');
+}
+
+fn t_usb_hid_kbd_rollover() {
+    use rustos::drivers::usb::hid::*;
+    // ErrorRollOver sentinel: every slot = 0x01.
+    let bytes = [0, 0, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01];
+    let r = KeyboardReport::parse(&bytes).unwrap();
+    assert!(!r.is_pressed(0x01), "rollover must be ignored");
+}
+
+fn t_usb_hid_kbd_diff() {
+    use rustos::drivers::usb::hid::*;
+    let p = KeyboardReport::parse(&[0,0, 0x04, 0,0,0,0,0]).unwrap();
+    let c = KeyboardReport::parse(&[0,0, 0x04, 0x05, 0,0,0,0]).unwrap();
+    let (down, up) = keyboard_diff(&p, &c);
+    assert_eq!(down, alloc::vec![0x05]);
+    assert!(up.is_empty());
+    let (down2, up2) = keyboard_diff(&c, &p);
+    assert!(down2.is_empty());
+    assert_eq!(up2, alloc::vec![0x05]);
+}
+
+fn t_usb_hid_ascii() {
+    use rustos::drivers::usb::hid::*;
+    assert_eq!(usage_to_ascii(0x04, false), b'a');
+    assert_eq!(usage_to_ascii(0x1D, false), b'z');
+    assert_eq!(usage_to_ascii(0x1D, true),  b'Z');
+    assert_eq!(usage_to_ascii(0x1E, false), b'1');
+    assert_eq!(usage_to_ascii(0x1E, true),  b'!');
+    assert_eq!(usage_to_ascii(0x27, false), b'0');
+    assert_eq!(usage_to_ascii(0x27, true),  b')');
+    assert_eq!(usage_to_ascii(0x2C, false), b' ');
+    assert_eq!(usage_to_ascii(0x28, false), b'\n');
+    assert_eq!(usage_to_ascii(0x29, false), 0x1B); // ESC
+}
+
+fn t_usb_hid_mouse() {
+    use rustos::drivers::usb::hid::*;
+    let bytes = [MBTN_LEFT | MBTN_MIDDLE, 5, 250];
+    let m = MouseReport::parse(&bytes).expect("must parse");
+    assert!(m.left());
+    assert!(!m.right());
+    assert!(m.middle());
+    assert_eq!(m.dx, 5);
+    // 250 as i8 is -6.
+    assert_eq!(m.dy, -6);
+}
+
+fn t_usb_hid_mouse_neg() {
+    use rustos::drivers::usb::hid::*;
+    let bytes = [0, 0xFF, 0xFF];
+    let m = MouseReport::parse(&bytes).unwrap();
+    assert_eq!(m.dx, -1);
+    assert_eq!(m.dy, -1);
 }
 
 // Suppress unused-imports lint for paths used only in a few tests.

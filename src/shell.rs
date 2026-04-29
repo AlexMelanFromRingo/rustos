@@ -753,6 +753,7 @@ impl Shell {
             "tsc" => self.cmd_tsc(),
             "smp" => self.cmd_smp(args),
             "coreutils" => self.cmd_coreutils(args),
+            "usb" => self.cmd_usb(args),
             "seccomp" => self.cmd_seccomp(args),
             "getcap" => self.cmd_getcap(args),
             "setcap" => self.cmd_setcap(args),
@@ -4752,6 +4753,54 @@ impl Shell {
                 println!("seccomp: pid={} sc={} -> {} ({:?})", pid, sc, label, dec);
             }
             _ => println!("Usage: seccomp [allowlist PID SC1,SC2,... ACTION | remove PID | test PID SC]"),
+        }
+    }
+
+    /// usb: probe / inspect / opt-in init the UHCI host controller.
+    ///
+    ///   usb info  — show controller availability + frame number
+    ///   usb init  — claim BAR4, reset HC, install frame list, run
+    ///   usb ports — decode root-hub port status registers
+    fn cmd_usb(&self, args: &[&str]) {
+        let sub = args.get(0).copied().unwrap_or("info");
+        match sub {
+            "info" => {
+                if !crate::drivers::usb::uhci::is_available() {
+                    println!("usb: controller not initialised — run `usb init`");
+                    return;
+                }
+                let iobase = crate::drivers::usb::uhci::iobase().unwrap_or(0);
+                let f1 = crate::drivers::usb::uhci::read_frnum();
+                // Two reads to confirm the HC is actually running.
+                let mut spin = 0u64;
+                let f2 = loop {
+                    let v = crate::drivers::usb::uhci::read_frnum();
+                    if v != f1 || spin > 1_000_000 { break v; }
+                    spin += 1;
+                };
+                println!("usb: UHCI iobase {:#x}", iobase);
+                println!("     frnum read 1 = {}, read 2 = {} (frame counter {})",
+                    f1, f2, if f1 != f2 { "running" } else { "stalled" });
+            }
+            "init" => {
+                match crate::drivers::usb::uhci::init() {
+                    Ok(()) => println!("usb: UHCI initialised"),
+                    Err(e) => println!("usb: init failed — {}", e),
+                }
+            }
+            "ports" => {
+                if !crate::drivers::usb::uhci::is_available() {
+                    println!("usb: controller not initialised — run `usb init`");
+                    return;
+                }
+                for port in 0u8..2 {
+                    match crate::drivers::usb::uhci::port_status(port) {
+                        Some(s) => println!("  port {}: {:?}", port, s),
+                        None    => println!("  port {}: <error>", port),
+                    }
+                }
+            }
+            _ => println!("Usage: usb [info | init | ports]"),
         }
     }
 

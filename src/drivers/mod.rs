@@ -10,3 +10,4 @@ pub mod rtl8139;
 pub mod e1000;
 pub mod ahci;
 pub mod nvme;
+pub mod usb;
