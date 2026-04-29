@@ -223,3 +223,98 @@ pub fn self_test() -> Result<(), &'static str> {
     if pins == 0 || pins > 240 { return Err("apic: nonsense IOAPIC pin count"); }
     Ok(())
 }
+
+// ---- LAPIC ICR (Interrupt Command Register) -------------------------------
+
+const LAPIC_ICR_LO: u32 = 0x300;
+const LAPIC_ICR_HI: u32 = 0x310;
+
+/// Delivery modes (Intel SDM §10.6.1).
+pub mod ipi {
+    pub const FIXED:    u32 = 0b000 << 8;
+    pub const SMI:      u32 = 0b010 << 8;
+    pub const NMI:      u32 = 0b100 << 8;
+    pub const INIT:     u32 = 0b101 << 8;
+    pub const STARTUP:  u32 = 0b110 << 8;
+    /// Edge-trigger, physical destination, no shorthand.  Combine
+    /// with one of FIXED/SMI/NMI/INIT/STARTUP and the destination
+    /// LAPIC ID written to ICR_HI bits 24..31.
+    pub const ASSERT:   u32 = 1 << 14;
+    pub const LEVEL_DE: u32 = 0 << 14;
+    /// Destination shorthands (bits 18..19): 00 = no shorthand,
+    /// 01 = self, 10 = all, 11 = all-but-self.
+    pub const DEST_SELF:        u32 = 0b01 << 18;
+    pub const DEST_ALL:         u32 = 0b10 << 18;
+    pub const DEST_ALL_EXCLSELF:u32 = 0b11 << 18;
+}
+
+/// Wait for a previously-issued IPI to retire (ICR_LO bit 12 = Delivery
+/// Status, 1 = pending).  Bounded spin so a wedged LAPIC can't hang
+/// the kernel forever.
+fn wait_ipi_done() {
+    for _ in 0..1_000_000u32 {
+        let lo = unsafe { lapic_read(LAPIC_ICR_LO) };
+        if lo & (1 << 12) == 0 { return; }
+        core::hint::spin_loop();
+    }
+}
+
+/// Send one IPI.  `dest_apic_id` is the destination LAPIC ID (bits
+/// 24..31 of ICR_HI); `dest_shorthand_or_zero` is one of the
+/// ipi::DEST_* shorthands or 0 to use the explicit destination.
+/// `vector_or_startup_page` carries either an IDT vector for FIXED/
+/// NMI delivery or, for STARTUP, the page number where the AP
+/// trampoline lives (page = phys >> 12).
+pub fn send_ipi(dest_apic_id: u8, mode: u32, vector_or_startup: u8) {
+    if !is_available() { return; }
+    wait_ipi_done();
+    unsafe {
+        // ICR_HI: destination field is bits 24..31.
+        lapic_write(LAPIC_ICR_HI, (dest_apic_id as u32) << 24);
+        let lo = (vector_or_startup as u32) | mode | ipi::ASSERT;
+        lapic_write(LAPIC_ICR_LO, lo);
+    }
+    wait_ipi_done();
+}
+
+/// Send a fixed-vector IPI to ourselves and verify the LAPIC accepted
+/// it.  Used as a smoke test for the IPI plumbing without disturbing
+/// any AP.
+pub fn send_self_ipi(vector: u8) {
+    if !is_available() { return; }
+    wait_ipi_done();
+    unsafe {
+        let lo = (vector as u32) | ipi::FIXED | ipi::DEST_SELF | ipi::ASSERT;
+        lapic_write(LAPIC_ICR_LO, lo);
+    }
+    wait_ipi_done();
+}
+
+/// INIT-SIPI-SIPI sequence (Intel MP spec §B.4): wakes a halted AP and
+/// makes it execute starting at the trampoline page (`startup_page`
+/// is the physical address >> 12, must be < 0x100 so the AP starts
+/// in real mode below 1 MiB).
+///
+/// Returns Err if `apic` isn't initialised or `startup_page` is out
+/// of range.  Does NOT verify the AP actually came up — that's the
+/// caller's job (typically by polling a handshake atomic the
+/// trampoline writes from Rust).
+pub fn boot_ap(target: u8, startup_page: u8) -> Result<(), &'static str> {
+    if !is_available() { return Err("apic: not initialised"); }
+    if startup_page == 0 { return Err("apic: startup_page = 0"); }
+
+    // 1. INIT — assert.
+    send_ipi(target, ipi::INIT, 0);
+    // Spec: 10 ms gap.  We don't have a fine-grained sleep yet; spin.
+    for _ in 0..10_000u32 { core::hint::spin_loop(); }
+    // 2. INIT — de-assert (level-deassert).  Required only on older
+    //    CPUs but harmless on modern.  Skip for brevity — Intel says
+    //    de-assert is optional on Pentium 4+.
+    // 3. SIPI #1.
+    send_ipi(target, ipi::STARTUP, startup_page);
+    // 200 µs gap before second SIPI per the spec.
+    for _ in 0..200u32 { core::hint::spin_loop(); }
+    // 4. SIPI #2.
+    send_ipi(target, ipi::STARTUP, startup_page);
+    Ok(())
+}

@@ -58,6 +58,7 @@ pub mod block;
 pub mod interrupt_stats;
 pub mod term;
 pub mod framebuffer;
+pub mod userlib;
 
 pub fn init() {
     gdt::init();

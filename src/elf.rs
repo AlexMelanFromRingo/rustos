@@ -22,18 +22,43 @@ const EV_CURRENT: u8 = 1;
 const ELFOSABI_SYSV: u8 = 0;  // System V ABI
 
 /// ELF type
-const ET_EXEC: u16 = 2;  // Executable file
+pub const ET_EXEC: u16 = 2;  // Statically-linked executable
+pub const ET_DYN:  u16 = 3;  // Position-independent (PIE) or shared object
 
 /// Machine type
 const EM_X86_64: u16 = 62;  // AMD x86-64
 
 /// Program header types
-const PT_LOAD: u32 = 1;  // Loadable segment
+pub const PT_LOAD:    u32 = 1;
+pub const PT_DYNAMIC: u32 = 2;
+pub const PT_INTERP:  u32 = 3;
+pub const PT_PHDR:    u32 = 6;
 
 /// Program header flags
 const _PF_X: u32 = 1;  // Executable
 const _PF_W: u32 = 2;  // Writable
 const _PF_R: u32 = 4;  // Readable
+
+// ---- Dynamic-section tags (subset, ELF gabi §5) ----
+pub const DT_NULL:     i64 = 0;
+pub const DT_PLTRELSZ: i64 = 2;
+pub const DT_STRTAB:   i64 = 5;
+pub const DT_SYMTAB:   i64 = 6;
+pub const DT_RELA:     i64 = 7;
+pub const DT_RELASZ:   i64 = 8;
+pub const DT_RELAENT:  i64 = 9;
+pub const DT_STRSZ:    i64 = 10;
+pub const DT_SYMENT:   i64 = 11;
+pub const DT_PLTGOT:   i64 = 3;
+pub const DT_JMPREL:   i64 = 23;
+pub const DT_PLTREL:   i64 = 20;
+
+// ---- Relocation types we apply (System V x86-64 ABI §4.4.1) ----
+pub const R_X86_64_NONE:     u32 = 0;
+pub const R_X86_64_64:       u32 = 1;
+pub const R_X86_64_GLOB_DAT: u32 = 6;
+pub const R_X86_64_JUMP_SLOT: u32 = 7;
+pub const R_X86_64_RELATIVE: u32 = 8;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -132,8 +157,11 @@ impl<'a> ElfLoader<'a> {
             return Err(ElfError::UnsupportedABI);
         }
 
-        // Check type (executable)
-        if header.e_type != ET_EXEC {
+        // Check type — accept both static executables (ET_EXEC) and
+        // position-independent / shared objects (ET_DYN).  ET_DYN
+        // covers PIE binaries which we relocate via the dynamic
+        // section's R_X86_64_RELATIVE entries (see `apply_pie_relocations`).
+        if header.e_type != ET_EXEC && header.e_type != ET_DYN {
             return Err(ElfError::NotExecutable);
         }
 
@@ -155,8 +183,13 @@ impl<'a> ElfLoader<'a> {
         self.header.e_entry
     }
 
-    /// Get program headers
-    fn program_headers(&self) -> &[ProgramHeader] {
+    /// Get program headers (public so the dynamic-section helpers can
+    /// walk PT_DYNAMIC).
+    pub fn program_headers(&self) -> &[ProgramHeader] {
+        self.program_headers_inner()
+    }
+
+    fn program_headers_inner(&self) -> &[ProgramHeader] {
         let offset = self.header.e_phoff as usize;
         let count = self.header.e_phnum as usize;
         let size = self.header.e_phentsize as usize;
@@ -177,7 +210,7 @@ impl<'a> ElfLoader<'a> {
     /// Load ELF into user space memory
     /// Returns (entry_point, lowest_addr, highest_addr)
     pub fn load(&self) -> Result<(VirtAddr, u64, u64), ElfError> {
-        let phdrs = self.program_headers();
+        let phdrs = self.program_headers_inner();
 
         if phdrs.is_empty() {
             return Err(ElfError::NoLoadableSegments);
@@ -272,6 +305,153 @@ impl<'a> ElfLoader<'a> {
         let entry_addr = base_addr.as_u64() + entry_offset;
 
         Ok((VirtAddr::new(entry_addr), lowest_addr, highest_addr))
+    }
+
+    /// Returns true iff this binary is position-independent (ET_DYN).
+    pub fn is_pie(&self) -> bool { self.header.e_type == ET_DYN }
+
+    /// Locate the PT_DYNAMIC segment, if any, and return the file
+    /// offset + size in bytes.  PIE binaries always have one; static
+    /// ET_EXEC may not.
+    pub fn dynamic_segment(&self) -> Option<(usize, usize)> {
+        for ph in self.program_headers_inner() {
+            if ph.p_type == PT_DYNAMIC {
+                return Some((ph.p_offset as usize, ph.p_filesz as usize));
+            }
+        }
+        None
+    }
+
+    /// Walk the dynamic section and return (tag, value) pairs.
+    /// Each entry is 16 bytes: i64 d_tag + u64 d_val/d_ptr.
+    pub fn dynamic_entries(&self) -> alloc::vec::Vec<(i64, u64)> {
+        let mut out = alloc::vec::Vec::new();
+        let (off, len) = match self.dynamic_segment() { Some(x) => x, None => return out };
+        if off + len > self.data.len() { return out; }
+        let body = &self.data[off..off + len];
+        let mut i = 0;
+        while i + 16 <= body.len() {
+            let tag = i64::from_le_bytes([
+                body[i], body[i+1], body[i+2], body[i+3],
+                body[i+4], body[i+5], body[i+6], body[i+7],
+            ]);
+            let val = u64::from_le_bytes([
+                body[i+8], body[i+9], body[i+10], body[i+11],
+                body[i+12], body[i+13], body[i+14], body[i+15],
+            ]);
+            out.push((tag, val));
+            if tag == DT_NULL { break; }
+            i += 16;
+        }
+        out
+    }
+
+    /// Apply a single Elf64_Rela entry.  `image_base` is where the
+    /// binary actually landed (relative to link address 0 for PIE).
+    /// `resolve` is a callback the caller provides to resolve named
+    /// symbols — invoked for GLOB_DAT and JUMP_SLOT.  Pass a no-op
+    /// closure if you don't yet have a symbol table; those relocs
+    /// will then return Err.
+    pub fn apply_rela_with<F: FnMut(u32) -> Option<u64>>(
+        image: &mut [u8], image_base: u64,
+        r_offset: u64, r_info: u64, r_addend: i64,
+        mut resolve: F,
+    ) -> Result<(), &'static str>
+    {
+        let r_type = (r_info & 0xFFFF_FFFF) as u32;
+        let r_sym  = (r_info >> 32) as u32;
+        let off = r_offset as usize;
+        if off + 8 > image.len() { return Err("rela: r_offset out of bounds"); }
+        match r_type {
+            R_X86_64_NONE => Ok(()),
+            R_X86_64_RELATIVE => {
+                // B + A
+                let val = (image_base as i64).wrapping_add(r_addend) as u64;
+                image[off..off + 8].copy_from_slice(&val.to_le_bytes());
+                Ok(())
+            }
+            R_X86_64_64 => {
+                // S + A.  When r_sym == 0 (self-relative) S is 0.
+                let s = if r_sym == 0 { 0 }
+                        else { resolve(r_sym).ok_or("rela: unresolved symbol")? };
+                let val = (s as i64).wrapping_add(r_addend) as u64;
+                image[off..off + 8].copy_from_slice(&val.to_le_bytes());
+                Ok(())
+            }
+            R_X86_64_GLOB_DAT | R_X86_64_JUMP_SLOT => {
+                // Word-sized: GOT slot ⟵ S.  PLT lazy-binding short-
+                // circuits this to immediate resolution since we don't
+                // implement PLT trampolines.  Addend is ignored.
+                let s = resolve(r_sym).ok_or("rela: unresolved symbol")?;
+                image[off..off + 8].copy_from_slice(&s.to_le_bytes());
+                Ok(())
+            }
+            _ => Err("rela: unsupported relocation type"),
+        }
+    }
+
+    /// Convenience wrapper used by tests + the PIE loader: applies a
+    /// relocation with no symbol resolver (suitable for RELATIVE and
+    /// self-referential R_X86_64_64).
+    pub fn apply_rela(image: &mut [u8], image_base: u64,
+                      r_offset: u64, r_info: u64, r_addend: i64)
+        -> Result<(), &'static str>
+    {
+        Self::apply_rela_with(image, image_base, r_offset, r_info, r_addend,
+                              |_| None)
+    }
+
+    /// Apply every R_X86_64_RELATIVE relocation found in the dynamic
+    /// section to the loaded image.  Returns the number of
+    /// relocations applied so the caller can log it.
+    pub fn apply_pie_relocations(&self, image: &mut [u8], image_base: u64)
+        -> Result<usize, &'static str>
+    {
+        let entries = self.dynamic_entries();
+        let mut rela_off: Option<u64> = None;
+        let mut rela_sz:  Option<u64> = None;
+        let mut rela_ent: Option<u64> = None;
+        for &(tag, val) in &entries {
+            match tag {
+                DT_RELA    => rela_off = Some(val),
+                DT_RELASZ  => rela_sz  = Some(val),
+                DT_RELAENT => rela_ent = Some(val),
+                _ => {}
+            }
+        }
+        let (rela_off, rela_sz, rela_ent) = match (rela_off, rela_sz, rela_ent) {
+            (Some(a), Some(b), Some(c)) => (a, b, c),
+            _ => return Ok(0), // No RELA table — nothing to do.
+        };
+        if rela_ent < 24 { return Err("rela: entry size < 24"); }
+
+        // The DT_RELA value is a virtual address (relative to link
+        // base = 0 for PIE).  Convert to image offset.
+        let mut count = 0usize;
+        let mut pos = rela_off as usize;
+        let end = (rela_off + rela_sz) as usize;
+        while pos + (rela_ent as usize) <= end && pos + 24 <= image.len() {
+            let r_offset = u64::from_le_bytes([
+                image[pos],   image[pos+1], image[pos+2],  image[pos+3],
+                image[pos+4], image[pos+5], image[pos+6],  image[pos+7],
+            ]);
+            let r_info = u64::from_le_bytes([
+                image[pos+8],  image[pos+9],  image[pos+10], image[pos+11],
+                image[pos+12], image[pos+13], image[pos+14], image[pos+15],
+            ]);
+            let r_addend = i64::from_le_bytes([
+                image[pos+16], image[pos+17], image[pos+18], image[pos+19],
+                image[pos+20], image[pos+21], image[pos+22], image[pos+23],
+            ]);
+            // Only apply RELATIVE here; other types belong to dyn-link.
+            let r_type = (r_info & 0xFFFFFFFF) as u32;
+            if r_type == R_X86_64_RELATIVE {
+                Self::apply_rela(image, image_base, r_offset, r_info, r_addend)?;
+                count += 1;
+            }
+            pos += rela_ent as usize;
+        }
+        Ok(count)
     }
 }
 
