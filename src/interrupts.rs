@@ -234,6 +234,7 @@ extern "C" fn timer_preempt_handler(frame: *mut crate::process::context::TrapFra
     crate::task::timer::tick();
 
     // Send EOI early so we don't miss the next timer tick.
+    crate::interrupt_stats::bump(0);
     eoi_for(InterruptIndex::Timer.as_u8());
 
     // Check if we interrupted a user-mode process (CS RPL=3)
@@ -444,6 +445,7 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(
     let scancode: u8 = unsafe { port.read() };
     crate::task::keyboard::add_scancode(scancode);
 
+    crate::interrupt_stats::bump(1);
     eoi_for(InterruptIndex::Keyboard.as_u8());
 }
 
@@ -456,6 +458,7 @@ extern "x86-interrupt" fn mouse_interrupt_handler(
     let mut port = Port::<u8>::new(0x60);
     let byte: u8 = unsafe { port.read() };
     crate::drivers::mouse::input_byte(byte);
+    crate::interrupt_stats::bump(12);
     eoi_for(InterruptIndex::Mouse.as_u8());
 }
 
@@ -486,18 +489,21 @@ extern "x86-interrupt" fn serial1_interrupt_handler(
     let byte: u8 = unsafe { port.read() };
     crate::task::keyboard::add_serial_byte(byte);
 
+    crate::interrupt_stats::bump(4);
     eoi_for(InterruptIndex::Serial1.as_u8());
 }
 
 extern "x86-interrupt" fn primary_ata_interrupt_handler(
     _stack_frame: InterruptStackFrame)
 {
+    crate::interrupt_stats::bump(14);
     eoi_for(InterruptIndex::PrimaryATA.as_u8());
 }
 
 extern "x86-interrupt" fn secondary_ata_interrupt_handler(
     _stack_frame: InterruptStackFrame)
 {
+    crate::interrupt_stats::bump(15);
     eoi_for(InterruptIndex::SecondaryATA.as_u8());
 }
 

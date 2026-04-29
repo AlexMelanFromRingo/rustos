@@ -54,6 +54,8 @@ pub mod apic;
 pub mod cpuid;
 pub mod acpi;
 pub mod symbols;
+pub mod block;
+pub mod interrupt_stats;
 
 pub fn init() {
     gdt::init();

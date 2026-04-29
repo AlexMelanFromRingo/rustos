@@ -269,6 +269,21 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         }
     }
 
+    // Build the generic block-device registry once every storage
+    // driver has had a chance to initialise.  Ext2's auto-mount walks
+    // the registry to find the first disk carrying the magic.
+    rustos::block::discover();
+    {
+        let snap = rustos::block::snapshot();
+        if !snap.is_empty() {
+            print!("block:");
+            for (name, sectors, _stats) in &snap {
+                print!(" {}={}MiB", name, sectors / 2048);
+            }
+            println!();
+        }
+    }
+
     if rustos::drivers::virtio_blk::is_available() {
         println!("virtio-blk: present");
         // Try to mount an Ext2 filesystem.  If that fails (no Ext2 magic

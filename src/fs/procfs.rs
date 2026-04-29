@@ -26,6 +26,11 @@ pub fn read_proc(path: &str) -> Option<Vec<u8>> {
             content.push_str("slabinfo\n");
             content.push_str("mounts\n");
             content.push_str("inodes\n");
+            content.push_str("interrupts\n");
+            content.push_str("diskstats\n");
+            content.push_str("swaps\n");
+            content.push_str("cmdline\n");
+            content.push_str("partitions\n");
 
             // Add per-process directories
             let pm = crate::process::PROCESS_MANAGER.lock();
@@ -299,7 +304,73 @@ fn read_proc_pid(pid: usize, subpath: &str) -> Option<Vec<u8>> {
             Some(s.into_bytes())
         }
 
-        _ => None,
+        "interrupts" => {
+            // Linux /proc/interrupts header: "CPU0 CPU1 ...".  We have
+            // exactly one CPU until SMP lands.
+            let mut s = String::new();
+            s.push_str("           CPU0\n");
+            for (irq, name, count) in crate::interrupt_stats::snapshot() {
+                s.push_str(&format!("{:>3}: {:>10}    {}\n", irq, count, name));
+            }
+            Some(s.into_bytes())
+        }
+
+        "diskstats" => {
+            // Linux format columns:
+            //   major minor name reads sectors_read time_read writes
+            //   sectors_written time_write iops_in_progress time_io
+            //   weighted_time
+            // We supply 0 for the timing fields we don't measure.
+            let mut s = String::new();
+            for (name, _sectors, (r, sr, w, sw)) in crate::block::snapshot() {
+                s.push_str(&format!(
+                    "  8    0 {:<10} {} {} 0 {} {} 0 0 0 0\n",
+                    name, r, sr, w, sw,
+                ));
+            }
+            Some(s.into_bytes())
+        }
+
+        "swaps" => {
+            // No swap support yet; emit just the header so userspace
+            // tools (`free -h`) don't trip over a missing file.
+            Some(b"Filename\t\t\t\tType\t\tSize\tUsed\tPriority\n".to_vec())
+        }
+
+        "cmdline" => {
+            // We don't yet parse a real cmdline; surface a synthetic
+            // one that names this build for fingerprinting.
+            Some(b"rustos quiet\n".to_vec())
+        }
+
+        "partitions" => {
+            // Linux: "major minor #blocks name".  One row per registered
+            // block device.  major 8 (sd*) for parity with Linux.
+            let mut s = String::new();
+            s.push_str("major minor  #blocks  name\n\n");
+            for (name, sectors, _) in crate::block::snapshot() {
+                let blocks = sectors / 2; // 1 block = 1 KiB = 2 sectors
+                s.push_str(&format!("   8     0  {}  {}\n", blocks, name));
+            }
+            Some(s.into_bytes())
+        }
+
+        other => {
+            // /proc/sys/kernel/{ostype,osrelease,version,hostname}
+            if let Some(sub) = other.strip_prefix("sys/kernel/") {
+                return match sub {
+                    "ostype"    => Some(b"RustOS\n".to_vec()),
+                    "osrelease" => Some(alloc::format!("{}\n",
+                        env!("CARGO_PKG_VERSION")).into_bytes()),
+                    "version"   => Some(alloc::format!(
+                        "RustOS {} x86_64\n",
+                        env!("CARGO_PKG_VERSION")).into_bytes()),
+                    "hostname"  => Some(b"rustos\n".to_vec()),
+                    _ => None,
+                };
+            }
+            None
+        }
     }
 }
 

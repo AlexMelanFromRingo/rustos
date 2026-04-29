@@ -1011,12 +1011,41 @@ fn le32(b: &[u8]) -> u32 { u32::from_le_bytes([b[0], b[1], b[2], b[3]]) }
 /// Global mountpoint for a mounted Ext2 image, if any.
 pub static EXT2: Mutex<Option<Ext2Fs>> = Mutex::new(None);
 
-/// `BlockSource` adapter that reads through the kernel's virtio-blk
-/// driver.  Sectors are 512 bytes; we read `block_size / 512` sectors
-/// per filesystem block.
-///
-/// Constructed by the shell `ext2 mount disk` command and the boot-time
-/// auto-mount probe in `try_auto_mount_disk`.
+/// `BlockSource` adapter on top of the generic `crate::block::BlockDevice`
+/// registry — works equally well over virtio-blk / AHCI / NVMe.  We
+/// look up the device by name on every read so mount survives even if
+/// the underlying driver is later replaced (live-migrate scenario).
+pub struct GenericBlockSource {
+    pub block_size: u32,
+    pub start_lba: u64,
+    pub device_name: alloc::string::String,
+}
+
+impl BlockSource for GenericBlockSource {
+    fn read_block(&self, block: u64, buf: &mut [u8]) -> Result<(), &'static str> {
+        if buf.len() < self.block_size as usize { return Err("buf too small"); }
+        let sectors_per_block = (self.block_size / 512) as u32;
+        let base_lba = self.start_lba + block * sectors_per_block as u64;
+        let g = crate::block::DEVICES.lock();
+        let dev = g.iter().find(|d| d.name() == self.device_name)
+            .ok_or("ext2: backing block device gone")?;
+        dev.read(base_lba, sectors_per_block, buf)
+    }
+    fn block_size(&self) -> u32 { self.block_size }
+    fn write_block(&mut self, block: u64, buf: &[u8]) -> Result<(), &'static str> {
+        if buf.len() < self.block_size as usize { return Err("buf too small"); }
+        let sectors_per_block = (self.block_size / 512) as u32;
+        let base_lba = self.start_lba + block * sectors_per_block as u64;
+        let g = crate::block::DEVICES.lock();
+        let dev = g.iter().find(|d| d.name() == self.device_name)
+            .ok_or("ext2: backing block device gone")?;
+        dev.write(base_lba, sectors_per_block, buf)
+    }
+}
+
+/// Legacy alias kept for callers that still type the virtio-specific
+/// name.  All it does now is delegate to the generic source bound to
+/// the "vblk0" device.
 pub struct VirtioBlkSource {
     /// Filesystem block size in bytes (≥ 512, multiple of 512).
     pub block_size: u32,
@@ -1060,44 +1089,45 @@ impl BlockSource for VirtioBlkSource {
     }
 }
 
-/// Probe sector 2 of the virtio-blk device for an Ext2 superblock and,
-/// if found, mount the filesystem.  Called once at boot.
-///
-/// The Ext2 superblock lives at byte offset 1024 from the start of the
-/// filesystem.  For a raw (unpartitioned) image with block size 1024,
-/// 2048, or 4096, this is sector 2 of the device.  We read sector 2's
-/// first 88 bytes (covering the superblock fields up to s_magic at
-/// byte 56) and check magic 0xEF53.
+/// Walk every registered block device and mount the first one whose
+/// sector 2 carries the Ext2 magic.  Returns (device_name, block_size)
+/// on success.  Block size is taken from the superblock (1024 / 2048
+/// / 4096 supported).
 pub fn try_auto_mount_disk() -> Result<u32, &'static str> {
-    if !crate::drivers::virtio_blk::is_available() {
-        return Err("virtio-blk not available");
+    let names: Vec<String> = {
+        let g = crate::block::DEVICES.lock();
+        g.iter().map(|d| d.name().to_string()).collect()
+    };
+    if names.is_empty() {
+        return Err("no block devices registered");
     }
-    let mut sector = [0u8; 512];
-    {
-        let mut g = crate::drivers::virtio_blk::VIRTIO_BLK.lock();
-        let blk = g.as_mut().ok_or("virtio-blk: device gone")?;
-        blk.read_sector(2, &mut sector)?;
+    for name in &names {
+        let mut sector = [0u8; 512];
+        let read_ok = {
+            let g = crate::block::DEVICES.lock();
+            match g.iter().find(|d| d.name() == name) {
+                Some(d) => d.read(2, 1, &mut sector).is_ok(),
+                None => false,
+            }
+        };
+        if !read_ok { continue; }
+        let magic = u16::from_le_bytes([sector[56], sector[57]]);
+        if magic != EXT2_MAGIC { continue; }
+        let log_block_size = u32::from_le_bytes(
+            [sector[24], sector[25], sector[26], sector[27]]);
+        let block_size = 1024u32 << log_block_size;
+        if block_size != 1024 && block_size != 2048 && block_size != 4096 { continue; }
+        let source = alloc::boxed::Box::new(GenericBlockSource {
+            block_size, start_lba: 0,
+            device_name: name.clone(),
+        });
+        let fs = Ext2Fs::mount(source)?;
+        let bs = fs.sb.block_size();
+        *EXT2.lock() = Some(fs);
+        crate::klog_info!("ext2: mounted from {} (block size {})", name, bs);
+        return Ok(bs);
     }
-    // Superblock starts at byte 1024 = sector 2 byte 0.  Magic is at
-    // offset 56 in the superblock (= byte 1080 from FS start).
-    let magic = u16::from_le_bytes([sector[56], sector[57]]);
-    if magic != EXT2_MAGIC {
-        return Err("no ext2 magic at sector 2");
-    }
-    // log_block_size is at superblock offset 24 → sector byte 24.
-    let log_block_size = u32::from_le_bytes([sector[24], sector[25], sector[26], sector[27]]);
-    let block_size = 1024u32 << log_block_size;
-    if block_size != 1024 && block_size != 2048 && block_size != 4096 {
-        return Err("unsupported block size");
-    }
-    let source = alloc::boxed::Box::new(VirtioBlkSource {
-        block_size,
-        start_lba: 0,
-    });
-    let fs = Ext2Fs::mount(source)?;
-    let bs = fs.sb.block_size();
-    *EXT2.lock() = Some(fs);
-    Ok(bs)
+    Err("no ext2 magic on any registered block device")
 }
 
 /// Build a tiny in-memory ext2 image for the self-test path.  The image
