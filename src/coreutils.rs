@@ -12,8 +12,8 @@
 //!   2. `crt.s` — minimal _start that unpacks argc/argv from the SysV
 //!      x86-64 stack-init protocol and calls `int main(int, char**)`.
 //!   3. `build.rs` builds each with
-//!         gcc -nostdlib -static -no-pie -ffreestanding -fno-builtin
-//!         -fno-stack-protector -O2 -Wl,--build-id=none -Wl,-z,noexecstack
+//!      gcc -nostdlib -static -no-pie -ffreestanding -fno-builtin
+//!      -fno-stack-protector -O2 -Wl,--build-id=none -Wl,-z,noexecstack
 //!      then embeds the ELF bytes via include_bytes!.
 //!   4. This module exposes them as a `&'static [CoreUtilBin]`; the
 //!      init path (see `crate::init` / `populate_bin`) writes each
@@ -55,7 +55,7 @@ pub fn audit() -> Result<usize, (&'static str, &'static str)> {
     for b in COREUTILS {
         if b.bytes.len() < 256 { return Err((b.name, "too small")); }
         if b.bytes.len() > 1 << 20 { return Err((b.name, "too large")); }
-        if b.bytes.len() < 4 || &b.bytes[..4] != &[0x7F, b'E', b'L', b'F'] {
+        if b.bytes.len() < 4 || b.bytes[..4] != [0x7F, b'E', b'L', b'F'] {
             return Err((b.name, "missing ELF magic"));
         }
         // ET_EXEC = 2, ET_DYN = 3.  All our coreutils are -no-pie =>

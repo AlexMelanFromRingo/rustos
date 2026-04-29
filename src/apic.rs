@@ -213,6 +213,34 @@ pub fn init() -> Result<(), &'static str> {
     Ok(())
 }
 
+/// Per-AP initialisation.  Called from `ap_main` once the AP is in long
+/// mode.  Mirrors `init()`'s LAPIC-side setup (MSR enable + SVR + TPR)
+/// without touching the IOAPIC (system-wide; BSP already programmed it)
+/// or `AVAILABLE` (still set by the BSP's `init()`).
+///
+/// Each CPU has its own LAPIC at the same physical base 0xFEE00000;
+/// the MMU translates that virt → same phys regardless of executing
+/// CPU, but the CPU's MMIO accesses go to its *own* LAPIC.  So the
+/// shared LAPIC_VIRT is correct for every AP.
+pub fn init_ap() -> Result<u8, &'static str> {
+    if !cpu_has_apic() { return Err("apic-ap: no on-chip APIC"); }
+    if !is_available()   { return Err("apic-ap: BSP init() must run first"); }
+
+    // Re-arm IA32_APIC_BASE_MSR.GLOBAL_ENABLE in case the AP came up
+    // with the bit cleared (firmware behaviour varies).
+    let mut msr = unsafe { Msr::new(IA32_APIC_BASE_MSR) };
+    let cur = unsafe { msr.read() };
+    unsafe { msr.write(cur | APIC_BASE_MSR_ENABLE); }
+
+    // Program this CPU's SVR + TPR.  Writes go to the executing CPU's
+    // LAPIC because LAPIC MMIO is CPU-local.
+    unsafe {
+        lapic_write(LAPIC_TPR, 0);
+        lapic_write(LAPIC_SVR, LAPIC_SVR_ENABLE | SPURIOUS_VECTOR as u32);
+    }
+    Ok(lapic_id())
+}
+
 /// Self-test: verify LAPIC ID is sensible and IOAPIC reports a non-zero
 /// number of pins.  Returns Err if the controllers don't look alive.
 pub fn self_test() -> Result<(), &'static str> {

@@ -241,6 +241,7 @@ fn run_all() {
     // LAPIC ID is 0 (the BSP), the test runs but skips with an
     // explanatory message.
     check!("smp-lm: real AP enters Rust ap_main",       { t_smp_lm_real_boot(); });
+    check!("smp-lm: AP loads IDT + inits LAPIC",        { t_smp_lm_ap_init(); });
 
     // Dynamic linker — exercised against real .so fixtures built via
     // the host gcc (committed under tests/fixtures/).
@@ -259,6 +260,7 @@ fn run_all() {
     check!("dynlink: MultiObjectResolver finds symbol",  { t_dyn_multiobj_resolver(); });
     check!("dynlink: MultiObjectResolver misses unknown",{ t_dyn_multiobj_miss(); });
     check!("dynlink: dependent .so lists its NEEDED",    { t_dyn_dependent_needed(); });
+    check!("dynlink: link() applies RELA+PLT relocs",    { t_dyn_link_eager(); });
 
     // In-tree coreutils — built as static x86-64 ELFs by gcc and
     // embedded by build.rs.  Each must pass an audit and parse via the
@@ -272,6 +274,8 @@ fn run_all() {
     check!("libc: wc binary present",                    { t_libc_wc_present(); });
     check!("libc: head binary present",                  { t_libc_head_present(); });
     check!("libc: wc references printf via libc",        { t_libc_wc_uses_printf(); });
+    check!("coreutils: /bin populated in RAMDISK",       { t_coreutils_bin_populated(); });
+    check!("coreutils: /bin/echo round-trips through VFS",{ t_coreutils_echo_in_bin(); });
 
     // Bootloader migration shim — verifies the shim accepts our current
     // bootloader-0.9 BootInfo and rejects nonsense values.
@@ -1517,6 +1521,26 @@ fn t_smp_lm_real_boot() {
     }
 }
 
+fn t_smp_lm_ap_init() {
+    // After t_smp_lm_real_boot has fired SIPI for AP id=1 (under
+    // -smp 2), ap_main() must have run interrupts::init_idt() and
+    // apic::init_ap() — which bump dedicated counters.  Both should
+    // be ≥ 1 under -smp 2; under -smp 1 the prior test skipped, so
+    // these counters legitimately stay 0 here.  We assert each is
+    // either both 0 (single-CPU box) or both non-zero (real AP boot).
+    let idt = rustos::smp::ap_idt_loaded();
+    let lap = rustos::smp::ap_lapic_ready();
+    let alive = rustos::smp::lm_alive();
+    if alive == 0 {
+        rustos::serial_println!("[no AP boot — single-CPU, skipping]");
+        return;
+    }
+    assert!(idt >= alive, "every AP that reached ap_main should load IDT \
+        (alive={} idt_loaded={})", alive, idt);
+    assert!(lap >= alive, "every AP that reached ap_main should init LAPIC \
+        (alive={} lapic_ready={})", alive, lap);
+}
+
 fn t_smp_lm_boot_rejects() {
     let bsp = rustos::apic::lapic_id();
     assert!(rustos::smp::boot_ap_long_mode(bsp).is_err(),
@@ -1691,6 +1715,57 @@ fn t_dyn_multiobj_miss() {
     assert!(r.resolve(b"definitely_not_a_symbol").is_none());
 }
 
+fn t_dyn_link_eager() {
+    // Build a 2-object scope (libdyntest + libdepntest) and run link()
+    // on libdepntest.  Production loaders mmap PT_LOAD segments to
+    // their virtual addresses then pass *that* buffer to link(); we
+    // simulate that here by allocating an image that covers the
+    // highest virtual address libdepntest's relocations touch and
+    // copying every PT_LOAD into its p_vaddr offset.
+    //
+    // Asserts:
+    //   * link() returns Ok (the loader walks every entry without
+    //     bailing on unresolved weaks)
+    //   * The 3 RELATIVE entries all apply (they need no resolver)
+    //   * The JUMP_SLOT for `answer` resolves into libdyntest's scope.
+    use rustos::elf::{ElfLoader, MultiObjectResolver, PT_LOAD};
+
+    let l_provider = ElfLoader::new(LIBDYNTEST_SYSV).unwrap();
+    let l_consumer = ElfLoader::new(LIBDEPNTEST).unwrap();
+    let mut resolver = MultiObjectResolver::new();
+    resolver.push(0x10_0000, l_provider);
+    let l_provider_dup = ElfLoader::new(LIBDYNTEST_SYSV).unwrap();
+    let _ = l_provider_dup;
+
+    // Determine the image size: highest p_vaddr + p_memsz across PT_LOAD.
+    let mut image_size: usize = 0;
+    for ph in l_consumer.program_headers() {
+        if ph.p_type == PT_LOAD {
+            let end = (ph.p_vaddr + ph.p_memsz) as usize;
+            if end > image_size { image_size = end; }
+        }
+    }
+    let mut image = alloc::vec![0u8; image_size + 64];
+    // Copy PT_LOAD segments to their virtual offsets.
+    for ph in l_consumer.program_headers() {
+        if ph.p_type != PT_LOAD { continue; }
+        let off = ph.p_offset as usize;
+        let len = ph.p_filesz as usize;
+        let va  = ph.p_vaddr as usize;
+        if off + len <= LIBDEPNTEST.len() && va + len <= image.len() {
+            image[va..va+len].copy_from_slice(&LIBDEPNTEST[off..off+len]);
+        }
+    }
+
+    let r = resolver.link(&l_consumer, &mut image, 0);
+    let (rela, plt) = r.expect("link must succeed");
+    // 3 RELATIVE entries should always apply.  1 JUMP_SLOT (answer)
+    // should resolve via libdyntest_sysv.  GLOB_DAT to __cxa_finalize
+    // etc. cannot resolve in our scope and are tolerantly skipped.
+    assert!(rela >= 3, "expected >=3 RELATIVE applied, got {}", rela);
+    assert!(plt  >= 1, "expected >=1 PLT (answer) applied, got {}", plt);
+}
+
 fn t_dyn_dependent_needed() {
     // Round-trip property: depntest's NEEDED list contains libdyntest.so.1
     // and the strtab entry it references actually parses to that name.
@@ -1798,6 +1873,34 @@ fn t_boot_info_zero_rejected() {
     };
     assert!(!bi2.is_phys_offset_sane(),
         "sub-4-GiB offset must be rejected");
+}
+
+fn t_coreutils_bin_populated() {
+    // populate_bin runs from init().  Verify we get the expected
+    // count installed; if init() didn't run (e.g., test path), call
+    // it explicitly so this test is self-contained.
+    let n = rustos::coreutils::populate_bin();
+    assert_eq!(n, rustos::coreutils::count(),
+        "every coreutil should install successfully (got {} of {})",
+        n, rustos::coreutils::count());
+}
+
+fn t_coreutils_echo_in_bin() {
+    use rustos::fs::ramdisk::RAMDISK;
+    use rustos::fs::vfs::FileSystem;
+    let _ = rustos::coreutils::populate_bin();
+    let data = RAMDISK.lock().read("/bin/echo")
+        .expect("/bin/echo must be readable after populate_bin");
+    // Check it's a real ELF — proves the round-trip through write_file
+    // → read preserved bytes.
+    assert_eq!(&data[..4], &[0x7F, b'E', b'L', b'F'],
+        "data at /bin/echo must start with ELF magic");
+    let embedded = rustos::coreutils::find("echo").expect("echo embedded blob").bytes;
+    assert_eq!(data.len(), embedded.len(),
+        "RAMDISK copy ({}) must match embedded blob ({})",
+        data.len(), embedded.len());
+    assert_eq!(&data[..], embedded,
+        "byte-for-byte match between embedded blob and RAMDISK copy");
 }
 
 fn t_libc_wc_uses_printf() {

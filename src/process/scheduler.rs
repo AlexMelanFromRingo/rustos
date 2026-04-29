@@ -122,10 +122,27 @@ impl Scheduler {
         }
         drop(pm);
         self.ready_queue.push_back(pid);
+        self.publish_load_to_smp();
     }
 
     pub fn dequeue(&mut self, pid: Pid) {
         self.ready_queue.retain(|&p| p != pid);
+        self.publish_load_to_smp();
+    }
+
+    /// Mirror the global ready-queue length into the BSP's `smp::CpuState`
+    /// run_queue_len atomic, so observers (`smp::total_runnable`,
+    /// `smp::least_loaded_cpu`, the `top` shell command) see reality.
+    /// This is a stepping stone toward real per-CPU run queues — once the
+    /// AP-side scheduler ticks fire from `ap_main`, this publish call will
+    /// be replaced by the AP's own enqueue/dequeue against its slot.
+    fn publish_load_to_smp(&self) {
+        if let Some(slot) = crate::smp::cpu_state(crate::apic::lapic_id()) {
+            slot.run_queue_len.store(
+                self.ready_queue.len(),
+                core::sync::atomic::Ordering::Release,
+            );
+        }
     }
 
     /// Pick the runnable PID with the smallest vruntime, given an

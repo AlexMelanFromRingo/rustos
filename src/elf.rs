@@ -806,6 +806,102 @@ impl<'a> MultiObjectResolver<'a> {
         }
         None
     }
+
+    /// Apply every dynamic relocation in `image` (already loaded at
+    /// `image_base`) using this resolver as the symbol oracle.  Walks
+    /// DT_RELA + DT_RELASZ + DT_RELAENT, plus DT_JMPREL + DT_PLTRELSZ
+    /// for the PLT.
+    ///
+    /// Returns the count of (rela_applied, plt_applied).  This is the
+    /// "eager" path — equivalent to `LD_BIND_NOW=1` in glibc.  Lazy
+    /// PLT resolution is the dynamic linker's job; an in-tree
+    /// implementation would patch JUMP_SLOT entries on first call,
+    /// which means trampoline pages, dl_runtime_resolve, and a real
+    /// thread-safety story.  For our coreutils we eager-resolve and
+    /// note that path explicitly.
+    pub fn link<'b>(
+        &self, loader: &ElfLoader<'b>, image: &mut [u8], image_base: u64,
+    ) -> Result<(usize, usize), &'static str> {
+        let entries = loader.dynamic_entries();
+        let mut rela_off = None; let mut rela_sz  = None; let mut rela_ent = None;
+        let mut jmprel_off = None; let mut pltrelsz = None;
+        for &(tag, val) in &entries {
+            match tag {
+                DT_RELA     => rela_off = Some(val),
+                DT_RELASZ   => rela_sz  = Some(val),
+                DT_RELAENT  => rela_ent = Some(val),
+                DT_JMPREL   => jmprel_off = Some(val),
+                DT_PLTRELSZ => pltrelsz = Some(val),
+                _ => {}
+            }
+        }
+        let strtab = loader.dynamic_strtab().ok_or("link: no DT_STRTAB")?;
+        let symtab_addr = entries.iter().find_map(|&(t, v)|
+            if t == DT_SYMTAB { Some(v as usize) } else { None })
+            .ok_or("link: no DT_SYMTAB")?;
+
+        let mut rela_applied = 0;
+        let mut plt_applied  = 0;
+
+        // Build the symbol-resolver callback: given r_sym, look up
+        // the symbol's name in the loader's string table, then ask
+        // `self` (the multi-object scope chain) for its absolute
+        // address.
+        let resolve_sym = |r_sym: u32| -> Option<u64> {
+            if r_sym == 0 { return None; }
+            let sym_off = symtab_addr + (r_sym as usize) * 24;
+            if sym_off + 24 > loader.data.len() { return None; }
+            let sym = Elf64Sym::parse(&loader.data[sym_off..sym_off+24])?;
+            let nm = sym.st_name as usize;
+            if nm >= strtab.len() { return None; }
+            let nul = strtab[nm..].iter().position(|&b| b == 0)
+                .map(|p| nm + p).unwrap_or(strtab.len());
+            self.resolve(&strtab[nm..nul])
+        };
+
+        // Apply DT_RELA entries.  Unresolved-symbol entries are
+        // treated as weak misses (slot left untouched / zero) — same
+        // semantics glibc applies to STB_WEAK undef refs.  This lets
+        // us link a real .so against a partial scope without aborting
+        // on every __cxa_finalize / _ITM_* that we don't yet provide.
+        if let (Some(off), Some(sz), Some(ent)) = (rela_off, rela_sz, rela_ent) {
+            let mut pos = off as usize;
+            let end = (off + sz) as usize;
+            while pos + (ent as usize) <= end && pos + 24 <= image.len() {
+                let r_offset = u64::from_le_bytes(image[pos..pos+8].try_into().unwrap());
+                let r_info   = u64::from_le_bytes(image[pos+8..pos+16].try_into().unwrap());
+                let r_addend = i64::from_le_bytes(image[pos+16..pos+24].try_into().unwrap());
+                if ElfLoader::apply_rela_with(
+                    image, image_base, r_offset, r_info, r_addend,
+                    resolve_sym,
+                ).is_ok() {
+                    rela_applied += 1;
+                }
+                pos += ent as usize;
+            }
+        }
+
+        // Apply PLT relocations (DT_JMPREL).  Same encoding as RELA
+        // with type=JUMP_SLOT.  Eager resolution: every PLT slot is
+        // populated up front.  Same weak-undef tolerance as above.
+        if let (Some(off), Some(sz)) = (jmprel_off, pltrelsz) {
+            let mut pos = off as usize;
+            let end = (off + sz) as usize;
+            while pos + 24 <= end && pos + 24 <= image.len() {
+                let r_offset = u64::from_le_bytes(image[pos..pos+8].try_into().unwrap());
+                let r_info   = u64::from_le_bytes(image[pos+8..pos+16].try_into().unwrap());
+                let r_addend = i64::from_le_bytes(image[pos+16..pos+24].try_into().unwrap());
+                if ElfLoader::apply_rela_with(
+                    image, image_base, r_offset, r_info, r_addend,
+                    resolve_sym,
+                ).is_ok() {
+                    plt_applied += 1;
+                }
+                pos += 24;
+            }
+        }
+        Ok((rela_applied, plt_applied))
+    }
 }
 
 impl<'a> Default for MultiObjectResolver<'a> { fn default() -> Self { Self::new() } }

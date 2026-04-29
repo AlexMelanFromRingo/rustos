@@ -2387,8 +2387,11 @@ impl Shell {
                 || s.starts_with("elif ") || s.starts_with("else\t")
         };
 
+        // Single-pass walk: each branch (then-body / else / elif) ends
+        // with `return` or recurses, so this never iterates twice.
+        // Use `if` to express that to clippy and to anyone reading.
         let mut idx = start;
-        while idx < parts.len() {
+        if idx < parts.len() {
             let cond = parts[idx].clone();
             idx += 1;
             if idx >= parts.len() { return; }
@@ -3859,13 +3862,22 @@ impl Shell {
             return;
         }
 
-        let filename = args[0];
-        println!("Loading ELF binary: {}", filename);
+        let raw = args[0];
+        // PATH resolution: if `raw` has no slash, prepend /bin/.  This
+        // makes `exec echo` find /bin/echo without each invocation
+        // typing the full path.  Matches POSIX exec*p() semantics for
+        // a fixed PATH=/bin (we don't yet honour $PATH from env).
+        let resolved: alloc::string::String = if raw.contains('/') {
+            raw.into()
+        } else {
+            alloc::format!("/bin/{}", raw)
+        };
+        println!("Loading ELF binary: {}", resolved);
 
         // Load and execute ELF
         // Execution magically continues here after user program calls exit()
         // and restore_kernel_context_and_return() restores our stack
-        crate::elf::load_and_exec(filename);
+        crate::elf::load_and_exec(&resolved);
 
         // We return here after user program exits!
         println!("\nProgram exited, returned to shell.");

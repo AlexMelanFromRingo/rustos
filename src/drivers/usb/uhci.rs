@@ -31,7 +31,6 @@
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
 use x86_64::instructions::port::Port;
-use crate::drivers::pci::PciDevice;
 
 // ---------------------------------------------------------------------------
 // PCI class
@@ -201,6 +200,10 @@ impl FrameList {
         // Empty by default (every entry terminates).
         Self([LINK_T; FRAME_LIST_LEN])
     }
+}
+
+impl Default for FrameList {
+    fn default() -> Self { Self::new() }
 }
 
 // ---------------------------------------------------------------------------

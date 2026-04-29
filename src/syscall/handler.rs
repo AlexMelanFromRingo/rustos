@@ -1255,7 +1255,7 @@ pub fn sys_futex(uaddr: usize, op: i32, val: i32, timeout_ticks: u64) -> isize {
     if uaddr == 0 { return SyscallError::InvalidArgument.as_isize(); }
     let ptr = uaddr as *const i32;
     match op {
-        0 => match crate::futex::wait(ptr, val, timeout_ticks) {
+        0 => match unsafe { crate::futex::wait(ptr, val, timeout_ticks) } {
             Ok(()) => 0,
             Err(crate::futex::FutexError::WouldBlock) => -11, // EAGAIN
             Err(crate::futex::FutexError::TimedOut) => -110,  // ETIMEDOUT

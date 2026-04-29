@@ -296,7 +296,7 @@ pub fn steal_from_peer(thief: u8) -> Option<Pid> {
             victim = Some(i as u8);
         }
     }
-    victim.and_then(|v| dequeue_on(v))
+    victim.and_then(dequeue_on)
 }
 
 // ---------------------------------------------------------------------------
@@ -391,8 +391,8 @@ pub fn test_install_and_readback(out: &mut [u8]) {
     let phys = (AP_TRAMPOLINE_PAGE as u64) << 12;
     let virt = phys_offset() + phys;
     let src = virt as *const u8;
-    for i in 0..len {
-        out[i] = unsafe { core::ptr::read_volatile(src.add(i)) };
+    for (i, slot) in out.iter_mut().enumerate().take(len) {
+        *slot = unsafe { core::ptr::read_volatile(src.add(i)) };
     }
 }
 
@@ -648,6 +648,17 @@ pub fn boot_ap_long_mode(target: u8) -> Result<bool, &'static str> {
     Ok(false)
 }
 
+/// Counter of APs that successfully completed `interrupts::init_idt()`
+/// (loaded the IDTR pointing at the kernel's global IDT) on themselves.
+static AP_IDT_LOADED: AtomicU32 = AtomicU32::new(0);
+
+/// Counter of APs that successfully completed `apic::init_ap()` (LAPIC
+/// software-enabled, SVR + TPR programmed) on themselves.
+static AP_LAPIC_READY: AtomicU32 = AtomicU32::new(0);
+
+pub fn ap_idt_loaded()  -> u32 { AP_IDT_LOADED.load(Ordering::Acquire) }
+pub fn ap_lapic_ready() -> u32 { AP_LAPIC_READY.load(Ordering::Acquire) }
+
 /// Rust entry point for an AP that completed the long-mode trampoline.
 ///
 /// Called as `extern "C" fn(u32) -> !` with `apic_id` in `%edi`.  At this
@@ -658,19 +669,42 @@ pub fn boot_ap_long_mode(target: u8) -> Result<bool, &'static str> {
 ///   * RSP points to the AP's freshly-allocated 64 KiB kernel stack.
 ///   * CR3 = BSP's page table (so all kernel symbols are visible).
 ///   * The handshake at phys 0x9000 has been written.
+///   * Interrupts are still masked (CLI from the trampoline).
 ///
-/// We bump the alive counter and HLT in a loop.  Per-CPU IDT load,
-/// LAPIC initialisation on the AP, and entry into the per-CPU
-/// scheduler tick happen here in subsequent commits.
+/// Bring-up sequence (per Intel SDM Vol. 3A §8.4.4 + the `lidt` /
+/// LAPIC SVR program order from the OSDev wiki "AP Startup" page):
+///
+///   1. Mark the per-CPU slot alive — visible to BSP via cpu_state(id).
+///   2. Load the kernel's global IDT (idempotent across CPUs).
+///   3. Program this CPU's LAPIC: enable + SVR + TPR.
+///   4. Spin in HLT.  We deliberately do NOT enable interrupts yet —
+///      the per-CPU scheduler tick is wired separately and that's
+///      what flips IF on.  Until then, an enabled IF would let the
+///      timer IRQ retire on this CPU before there's a runqueue to
+///      drive it from, breaking timing.
 #[unsafe(no_mangle)]
 pub extern "C" fn ap_main(apic_id: u32) -> ! {
     AP_LM_ALIVE.fetch_add(1, Ordering::AcqRel);
     if let Some(slot) = cpu_state(apic_id as u8) {
         slot.alive.store(true, Ordering::Release);
     }
-    // HLT loop with interrupts off — the AP isn't yet on the IPI route.
-    // Future work: load IDT, init LAPIC on this CPU, enable interrupts,
-    // enter the per-CPU scheduler.
+
+    // Step 2: load IDTR.  The IDT itself is a global static (lazy-
+    // initialised by the BSP); each CPU has its own IDTR.  This is a
+    // pure register write — no allocations, can't fail.
+    crate::interrupts::init_idt();
+    AP_IDT_LOADED.fetch_add(1, Ordering::AcqRel);
+
+    // Step 3: enable this CPU's LAPIC.  apic::init_ap requires the
+    // BSP's apic::init() to have run already (it shares the cached
+    // LAPIC virt-base).  If somehow it didn't, we just skip — the AP
+    // is harmless without LAPIC, just won't receive IPIs.
+    if crate::apic::init_ap().is_ok() {
+        AP_LAPIC_READY.fetch_add(1, Ordering::AcqRel);
+    }
+
+    // Step 4: HLT loop.  Interrupts off until the per-CPU scheduler
+    // is wired (TODO: enable IF + register a per-CPU timer tick).
     loop { unsafe { core::arch::asm!("hlt", options(nomem, nostack)); } }
 }
 
@@ -695,8 +729,8 @@ pub fn test_lm_install_and_readback(out: &mut [u8]) {
     let virt = phys_offset() + phys;
     let src = virt as *const u8;
     let len = out.len().min(AP_LM_TRAMPOLINE_LEN);
-    for i in 0..len {
-        out[i] = unsafe { core::ptr::read_volatile(src.add(i)) };
+    for (i, slot) in out.iter_mut().enumerate().take(len) {
+        *slot = unsafe { core::ptr::read_volatile(src.add(i)) };
     }
 }
 

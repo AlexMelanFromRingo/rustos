@@ -39,7 +39,12 @@ static WAITQUEUES: Mutex<BTreeMap<usize, WaitQueue>> = Mutex::new(BTreeMap::new(
 
 /// FUTEX_WAIT: park if `*uaddr == expected`.  `timeout_ticks == 0` means
 /// wait indefinitely.  Returns Err on mismatch / timeout.
-pub fn wait(uaddr: *const i32, expected: i32, timeout_ticks: u64) -> Result<(), FutexError> {
+///
+/// # Safety
+/// `uaddr` must point at a valid 4-byte word readable by the calling
+/// task (typically a user-space heap location).  The kernel reads it
+/// volatily under the queue lock, so concurrent writes are observed.
+pub unsafe fn wait(uaddr: *const i32, expected: i32, timeout_ticks: u64) -> Result<(), FutexError> {
     if uaddr.is_null() { return Err(FutexError::BadAddress); }
 
     // Atomic check + park under the queue lock so a concurrent wake

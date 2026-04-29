@@ -66,7 +66,7 @@ impl KeyboardReport {
         if usage == 0 { return false; }
         // Detect the rollover/error sentinels (all six slots = 0x01).
         if self.keys.iter().all(|&k| k == 0x01) { return false; }
-        self.keys.iter().any(|&k| k == usage)
+        self.keys.contains(&usage)
     }
 
     pub fn shift_held(&self) -> bool {
@@ -104,12 +104,12 @@ pub fn keyboard_diff(prev: &KeyboardReport, cur: &KeyboardReport) -> (alloc::vec
 /// Reference: HID Usage Tables 1.5 §10 Keyboard/Keypad Page (0x07).
 pub fn usage_to_ascii(usage: u8, shift: bool) -> u8 {
     // 0x04..0x1D: a..z
-    if usage >= 0x04 && usage <= 0x1D {
+    if (0x04..=0x1D).contains(&usage) {
         let lower = b'a' + (usage - 0x04);
         return if shift { lower - b'a' + b'A' } else { lower };
     }
     // 0x1E..0x27: 1 2 3 4 5 6 7 8 9 0  (Note: 0 is at 0x27)
-    if usage >= 0x1E && usage <= 0x26 {
+    if (0x1E..=0x26).contains(&usage) {
         let unshifted = b'1' + (usage - 0x1E);
         return if shift {
             // Shifted top row: !@#$%^&*(
