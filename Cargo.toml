@@ -37,15 +37,17 @@ test-args = [
 ]
 test-success-exit-code = 33  # (0x10 << 1) | 1
 
+[lib]
+test = false
+bench = false
+
 [[bin]]
 name = "rustos"
 test = false
 bench = false
 
-[[test]]
-name = "should_panic"
-harness = false
-
-[[test]]
-name = "vfs_test"
-harness = false
+[[bin]]
+name = "kernel_tests"
+path = "tests/kernel_tests.rs"
+test = false
+bench = false

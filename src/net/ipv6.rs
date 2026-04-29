@@ -68,8 +68,10 @@ impl Ipv6Addr {
         let mut i = 0;
         while i < 8 {
             if i == best_start && best_len >= 2 {
-                if i == 0 { s.push(':'); }
-                s.push(':');
+                // Push "::" — both colons land here so the next
+                // non-zero group's `:` prefix is suppressed by the
+                // ends_with(':') check below.
+                s.push_str("::");
                 i += best_len;
                 continue;
             }

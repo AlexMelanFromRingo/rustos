@@ -1,0 +1,43 @@
+name: kernel-tests
+
+# Build the bootable kernel + the test binary, then run the in-kernel
+# test runner under QEMU.  Exits non-zero if any assertion panics, so
+# regressions in SHA-256, IPv6, Ext2, BPF VM, shell parser, COW, etc.
+# fail the PR check.
+
+on:
+  push:
+    branches: [main, master, "claude/**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  qemu-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86
+
+      - name: Install Rust nightly + components
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src, llvm-tools-preview
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install bootimage
+        run: cargo install bootimage
+
+      - name: Run kernel test suite
+        run: scripts/run-tests.sh
