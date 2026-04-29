@@ -4774,6 +4774,8 @@ impl Shell {
                 println!("Handshake page: phys 0x{:x}", crate::smp::AP_HANDSHAKE_PHYS);
                 println!("Boot attempts : {}", crate::smp::boot_attempts());
                 println!("Boot successes: {}", crate::smp::boot_successes());
+                println!("LM alive (Rust): {}", crate::smp::lm_alive());
+                println!("LM tramp len  : {} bytes", crate::smp::AP_LM_TRAMPOLINE_LEN);
                 println!("Alive CPUs    : {}", crate::smp::alive_cpu_count());
                 println!("Total runnable: {}", crate::smp::total_runnable());
                 println!("Least loaded  : CPU {}", crate::smp::least_loaded_cpu());
@@ -4821,12 +4823,29 @@ impl Shell {
                     Ok(n) => n,
                     Err(_) => { println!("smp: invalid APIC ID '{}'", id_s); return; }
                 };
-                println!("smp: firing INIT-SIPI-SIPI at AP {}...", id);
+                println!("smp: firing INIT-SIPI-SIPI at AP {} (ping)...", id);
                 match crate::smp::boot_ap_ping(id) {
-                    Ok(true)  => println!("smp: AP {} responded with handshake", id),
+                    Ok(true)  => println!("smp: AP {} responded with ping handshake", id),
                     Ok(false) => println!("smp: AP {} did not respond within timeout", id),
                     Err(e)    => println!("smp: error: {}", e),
                 }
+            }
+            "boot-lm" => {
+                let id_s = match args.get(1) {
+                    Some(s) => *s,
+                    None => { println!("Usage: smp boot-lm APIC_ID"); return; }
+                };
+                let id: u8 = match id_s.parse() {
+                    Ok(n) => n,
+                    Err(_) => { println!("smp: invalid APIC ID '{}'", id_s); return; }
+                };
+                println!("smp: firing INIT-SIPI-SIPI at AP {} (long mode)...", id);
+                match crate::smp::boot_ap_long_mode(id) {
+                    Ok(true)  => println!("smp: AP {} reached long mode and ap_main", id),
+                    Ok(false) => println!("smp: AP {} did not reach long mode within timeout", id),
+                    Err(e)    => println!("smp: error: {}", e),
+                }
+                println!("smp: lm_alive (Rust ap_main entries): {}", crate::smp::lm_alive());
             }
             _ => {
                 println!("Usage: smp [info | selftest | boot APIC_ID]");

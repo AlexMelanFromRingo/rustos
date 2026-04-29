@@ -422,3 +422,307 @@ pub fn test_bounded_poll_times_out() -> bool {
     }
     true
 }
+
+// ===========================================================================
+// Long-mode AP startup
+// ===========================================================================
+//
+// The "ping" trampoline above proves SIPI delivery + AP code execution but
+// stays in 16-bit real mode and halts.  This section ships a *full*
+// real → protected → long-mode trampoline so an AP can call back into Rust
+// at `ap_main()` and start participating in the kernel.
+//
+// The trampoline binary is generated at build time by `build.rs` from
+// `src/smp_trampoline.s` (see commentary there).  We get a `&'static [u8;
+// 256]` blob plus four offsets where the BSP patches per-CPU parameters
+// before firing INIT-SIPI-SIPI.
+
+include!(concat!(env!("OUT_DIR"), "/smp_trampoline_data.rs"));
+
+/// Magic the long-mode trampoline writes at phys 0x9000 once it reaches
+/// 64-bit code.  Distinct from `AP_HANDSHAKE_MAGIC` (the ping trampoline's
+/// 32-bit value) so we can tell which path the AP took.
+pub const AP_LM_HANDSHAKE_MAGIC: u64 = 0xCAFE_BABE_DEAD_BEEF;
+
+/// Each AP gets this many bytes of kernel stack.  64 KiB is generous —
+/// matches the BSP's stack size from bootloader 0.9.
+pub const AP_KERNEL_STACK_BYTES: usize = 64 * 1024;
+
+/// Set once the long-mode trampoline path has installed identity mapping
+/// for the first 2 MiB of physical memory.  Stops `boot_ap_long_mode`
+/// from re-installing on every call (the mapping is leaked but harmless;
+/// only the trampoline page and handshake page within 0..2 MiB are ever
+/// touched by smp code).
+static AP_LOW_IDENTITY_INSTALLED: AtomicBool = AtomicBool::new(false);
+
+/// Number of APs that successfully entered `ap_main` (Rust side).  Read
+/// by `smp info` for diagnostics.
+static AP_LM_ALIVE: AtomicU32 = AtomicU32::new(0);
+
+/// Public accessor — counts APs that reached Rust code.
+pub fn lm_alive() -> u32 { AP_LM_ALIVE.load(Ordering::Acquire) }
+
+// ---- Page-table flags (Intel SDM Vol. 3A §4.5) ----
+const PTE_PRESENT: u64 = 1 << 0;
+const PTE_WRITE:   u64 = 1 << 1;
+const PTE_HUGE:    u64 = 1 << 7;   // PS bit on PD entry → 2 MiB page
+
+/// Ensure physical 0x0000_0000..0x0020_0000 is identity-mapped in the
+/// BSP's active page table.  The AP needs this so its instruction
+/// pointer (still 0x8000+offset) keeps fetching valid instructions
+/// after CR0.PG turns on.
+///
+/// Strategy: walk PML4[0]; if it's already populated (e.g. the
+/// bootloader left identity mapping in place), trust it and verify
+/// 0x8000 round-trips.  Otherwise allocate a PDPT + PD, install a
+/// single 2-MiB huge page covering 0..2 MiB, and patch PML4[0].
+///
+/// Idempotent — the AP_LOW_IDENTITY_INSTALLED flag short-circuits
+/// repeat calls.
+fn ensure_low_identity_mapping() -> Result<(), &'static str> {
+    if AP_LOW_IDENTITY_INSTALLED.load(Ordering::Acquire) { return Ok(()); }
+
+    // Fast path: already mapped.  This is the common case — bootloader
+    // 0.9 keeps identity mapping for the kernel itself.
+    if crate::memory::virt_to_phys(0x8000) == Some(0x8000)
+        && crate::memory::virt_to_phys(0x9000) == Some(0x9000)
+    {
+        AP_LOW_IDENTITY_INSTALLED.store(true, Ordering::Release);
+        return Ok(());
+    }
+
+    // Slow path: install our own.  Read PML4[0] and bail if the
+    // bootloader left a partial entry — overwriting could break its
+    // assumptions.  We don't try to merge.
+    let cr3 = read_cr3();
+    let pml4_virt = (phys_offset() + cr3) as *mut u64;
+    let pml4_0 = unsafe { core::ptr::read_volatile(pml4_virt) };
+    if pml4_0 != 0 {
+        // Already populated — trust the bootloader's mapping covers
+        // 0..2 MiB.  Mark installed; if it doesn't actually cover, the
+        // SIPI path will time out cleanly via the bounded poll.
+        AP_LOW_IDENTITY_INSTALLED.store(true, Ordering::Release);
+        return Ok(());
+    }
+
+    let pdpt = alloc_zeroed_frame().ok_or("smp: no frame for PDPT")?;
+    let pd   = alloc_zeroed_frame().ok_or("smp: no frame for PD")?;
+    unsafe {
+        // PD[0] = 2-MiB huge page covering phys 0..0x200000.
+        let pd_virt = (phys_offset() + pd) as *mut u64;
+        core::ptr::write_volatile(pd_virt, PTE_PRESENT | PTE_WRITE | PTE_HUGE);
+
+        // PDPT[0] -> PD.
+        let pdpt_virt = (phys_offset() + pdpt) as *mut u64;
+        core::ptr::write_volatile(pdpt_virt, pdpt_pte(pd));
+
+        // PML4[0] -> PDPT.  This is the visible mutation.
+        core::ptr::write_volatile(pml4_virt, pdpt_pte(pdpt));
+
+        // Flush TLB so the AP and BSP both see the new mapping.
+        x86_64::instructions::tlb::flush_all();
+    }
+    AP_LOW_IDENTITY_INSTALLED.store(true, Ordering::Release);
+    Ok(())
+}
+
+#[inline] fn pdpt_pte(child_phys: u64) -> u64 { child_phys | PTE_PRESENT | PTE_WRITE }
+
+/// Allocate a single zero-initialised 4 KiB frame.  Returns physical
+/// address.  `None` if the allocator is exhausted.
+fn alloc_zeroed_frame() -> Option<u64> {
+    use x86_64::structures::paging::FrameAllocator;
+    let frame = crate::memory::with_frame_allocator(|fa| fa.allocate_frame())??;
+    let phys = frame.start_address().as_u64();
+    let virt = phys_offset() + phys;
+    unsafe { core::ptr::write_bytes(virt as *mut u8, 0, 4096); }
+    Some(phys)
+}
+
+/// Read CR3, masking off the PCID/flag bits to get just the table phys.
+fn read_cr3() -> u64 {
+    let (frame, _flags) = x86_64::registers::control::Cr3::read();
+    frame.start_address().as_u64()
+}
+
+/// Allocate a kernel stack for an AP.  Returns the (top, bottom) pair —
+/// `top` is the initial RSP value (one past the highest byte), `bottom`
+/// is the lowest address (so the caller can free if needed).  The pages
+/// are heap-allocated via `vmalloc`-style direct mapping; not freed in
+/// this prototype.
+fn alloc_ap_stack() -> Option<u64> {
+    // Use the kernel heap — the existing allocator will give us a Box-
+    // like region.  64 KiB is on the heap-friendly side; if the heap is
+    // exhausted, allocation fails cleanly.
+    let layout = core::alloc::Layout::from_size_align(AP_KERNEL_STACK_BYTES, 16).unwrap();
+    let p = unsafe { alloc::alloc::alloc_zeroed(layout) };
+    if p.is_null() { return None; }
+    let top = p as u64 + AP_KERNEL_STACK_BYTES as u64;
+    Some(top)
+}
+
+/// Patch the trampoline blob with per-AP parameters and copy it to phys
+/// 0x8000.  All four parameter slots are 8-byte aligned per the .s file.
+unsafe fn install_long_mode_trampoline(
+    target_apic_id: u8,
+    cr3_phys: u64,
+    stack_top: u64,
+    entry: u64,
+) {
+    let phys = (AP_TRAMPOLINE_PAGE as u64) << 12;
+    let dst = (phys_offset() + phys) as *mut u8;
+
+    // 1. Copy the blob.
+    for (i, &b) in AP_LM_TRAMPOLINE.iter().enumerate() {
+        unsafe { core::ptr::write_volatile(dst.add(i), b); }
+    }
+    // 2. Patch the parameter slots.
+    unsafe {
+        write_at(dst, AP_LM_OFF_CR3, cr3_phys);
+        write_at(dst, AP_LM_OFF_STACK, stack_top);
+        write_at(dst, AP_LM_OFF_ENTRY, entry);
+        let cpu_ptr = dst.add(AP_LM_OFF_CPU_ID) as *mut u32;
+        core::ptr::write_volatile(cpu_ptr, target_apic_id as u32);
+    }
+}
+
+#[inline]
+unsafe fn write_at(base: *mut u8, off: usize, val: u64) {
+    let p = unsafe { base.add(off) as *mut u64 };
+    unsafe { core::ptr::write_volatile(p, val); }
+}
+
+/// Clear the 64-bit handshake word.
+unsafe fn clear_lm_handshake() {
+    let virt = phys_offset() + AP_HANDSHAKE_PHYS;
+    unsafe { core::ptr::write_volatile(virt as *mut u64, 0); }
+}
+
+unsafe fn read_lm_handshake() -> u64 {
+    let virt = phys_offset() + AP_HANDSHAKE_PHYS;
+    unsafe { core::ptr::read_volatile(virt as *const u64) }
+}
+
+/// Bring up an AP and have it execute Rust code at `ap_main`.  Returns:
+///
+///   `Ok(true)`  — AP wrote the long-mode handshake (made it past CR0.PG)
+///   `Ok(false)` — SIPI fired but no handshake within timeout
+///   `Err(...)`  — couldn't even prepare (no APIC, target = self, OOM)
+///
+/// Side effects: identity-maps the first 2 MiB if not already, allocates
+/// one 64 KiB AP stack, copies the trampoline to phys 0x8000.  All of
+/// these happen before the SIPI; if any fails, no INIT/SIPI is sent.
+pub fn boot_ap_long_mode(target: u8) -> Result<bool, &'static str> {
+    if !crate::apic::is_available() { return Err("smp: apic not initialised"); }
+    if target == crate::apic::lapic_id() { return Err("smp: cannot boot self"); }
+    if (target as usize) >= MAX_CPUS { return Err("smp: target apic id out of range"); }
+
+    ensure_low_identity_mapping()?;
+    let stack_top = alloc_ap_stack().ok_or("smp: failed to alloc AP stack")?;
+    let cr3 = read_cr3();
+    let entry = ap_main as *const () as u64;
+
+    AP_BOOT_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+
+    unsafe {
+        install_long_mode_trampoline(target, cr3, stack_top, entry);
+        clear_lm_handshake();
+    }
+    crate::apic::boot_ap(target, AP_TRAMPOLINE_PAGE)?;
+
+    // Bounded poll for the 64-bit handshake.  Trampoline writes it from
+    // long-mode code right before tail-calling Rust, so observing it
+    // means CR0.PE → CR0.PG → CS reload all completed.
+    for _ in 0..5_000_000u32 {
+        let v = unsafe { read_lm_handshake() };
+        if v == AP_LM_HANDSHAKE_MAGIC {
+            if let Some(slot) = cpu_state(target) {
+                slot.alive.store(true, Ordering::Release);
+                slot.kernel_stack_top.store(stack_top, Ordering::Release);
+            }
+            AP_BOOT_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+            return Ok(true);
+        }
+        core::hint::spin_loop();
+    }
+    Ok(false)
+}
+
+/// Rust entry point for an AP that completed the long-mode trampoline.
+///
+/// Called as `extern "C" fn(u32) -> !` with `apic_id` in `%edi`.  At this
+/// point:
+///
+///   * CR0 has PE+PG set, CR4 has PAE, EFER has LME+NXE.
+///   * CS = 0x18 (64-bit), data segs = 0x20.
+///   * RSP points to the AP's freshly-allocated 64 KiB kernel stack.
+///   * CR3 = BSP's page table (so all kernel symbols are visible).
+///   * The handshake at phys 0x9000 has been written.
+///
+/// We bump the alive counter and HLT in a loop.  Per-CPU IDT load,
+/// LAPIC initialisation on the AP, and entry into the per-CPU
+/// scheduler tick happen here in subsequent commits.
+#[unsafe(no_mangle)]
+pub extern "C" fn ap_main(apic_id: u32) -> ! {
+    AP_LM_ALIVE.fetch_add(1, Ordering::AcqRel);
+    if let Some(slot) = cpu_state(apic_id as u8) {
+        slot.alive.store(true, Ordering::Release);
+    }
+    // HLT loop with interrupts off — the AP isn't yet on the IPI route.
+    // Future work: load IDT, init LAPIC on this CPU, enable interrupts,
+    // enter the per-CPU scheduler.
+    loop { unsafe { core::arch::asm!("hlt", options(nomem, nostack)); } }
+}
+
+// ---------------------------------------------------------------------------
+// Test hooks for the long-mode path
+// ---------------------------------------------------------------------------
+
+/// Test-only: copy the long-mode trampoline blob to phys 0x8000 with a
+/// fixed parameter pattern, then read it back.  Validates that
+/// `install_long_mode_trampoline` writes exactly the bytes we expect at
+/// the patch offsets.
+pub fn test_lm_install_and_readback(out: &mut [u8]) {
+    unsafe {
+        install_long_mode_trampoline(
+            42,                   // cpu id
+            0xDEAD_C0DE_C0DE_0000, // cr3 (won't ever be loaded — just a marker)
+            0xCAFEFEED_FEEDC0DE,   // stack
+            0xC0FFEE00_BAADF00D,   // entry
+        );
+    }
+    let phys = (AP_TRAMPOLINE_PAGE as u64) << 12;
+    let virt = phys_offset() + phys;
+    let src = virt as *const u8;
+    let len = out.len().min(AP_LM_TRAMPOLINE_LEN);
+    for i in 0..len {
+        out[i] = unsafe { core::ptr::read_volatile(src.add(i)) };
+    }
+}
+
+/// Test-only: fetch the four patched fields back out of the trampoline
+/// after `install_long_mode_trampoline` has run.  Returns
+/// `(cr3, stack, entry, cpu_id)`.
+pub fn test_lm_read_params() -> (u64, u64, u64, u32) {
+    let phys = (AP_TRAMPOLINE_PAGE as u64) << 12;
+    let virt = phys_offset() + phys;
+    let base = virt as *const u8;
+    unsafe {
+        let cr3 = core::ptr::read_volatile(base.add(AP_LM_OFF_CR3) as *const u64);
+        let stk = core::ptr::read_volatile(base.add(AP_LM_OFF_STACK) as *const u64);
+        let ent = core::ptr::read_volatile(base.add(AP_LM_OFF_ENTRY) as *const u64);
+        let cpu = core::ptr::read_volatile(base.add(AP_LM_OFF_CPU_ID) as *const u32);
+        (cr3, stk, ent, cpu)
+    }
+}
+
+/// Test-only: round-trip the 64-bit handshake word through the same
+/// volatile-read path the production code uses.
+pub fn test_lm_handshake_round_trip() -> u64 {
+    unsafe {
+        clear_lm_handshake();
+        let virt = phys_offset() + AP_HANDSHAKE_PHYS;
+        core::ptr::write_volatile(virt as *mut u64, AP_LM_HANDSHAKE_MAGIC);
+        read_lm_handshake()
+    }
+}

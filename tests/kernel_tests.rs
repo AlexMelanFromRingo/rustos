@@ -220,6 +220,21 @@ fn run_all() {
     check!("smp: least_loaded picks emptiest CPU",      { t_smp_pq_least_loaded(); });
     check!("smp: enqueue_balanced routes to slot",      { t_smp_pq_balanced(); });
     check!("smp: steal_from_peer requires ≥ 2 PIDs",    { t_smp_pq_steal_threshold(); });
+
+    // Long-mode AP trampoline — structural + install round-trip.
+    check!("smp-lm: trampoline blob non-empty",         { t_smp_lm_blob_nonempty(); });
+    check!("smp-lm: param offsets within blob",         { t_smp_lm_offsets_in_range(); });
+    check!("smp-lm: install + readback round-trips",    { t_smp_lm_install(); });
+    check!("smp-lm: patched params readable back",      { t_smp_lm_params(); });
+    check!("smp-lm: 64-bit handshake round-trips",      { t_smp_lm_handshake(); });
+    check!("smp-lm: identity map covers 0x8000",        { t_smp_lm_identity(); });
+    check!("smp-lm: boot rejects self / oob",           { t_smp_lm_boot_rejects(); });
+
+    // Real SMP boot — only runs under qemu -smp 2+.  We probe ACPI MADT
+    // for an AP id and try to bring it up.  On qemu -smp 1 the only
+    // LAPIC ID is 0 (the BSP), the test runs but skips with an
+    // explanatory message.
+    check!("smp-lm: real AP enters Rust ap_main",       { t_smp_lm_real_boot(); });
 }
 
 // ----------------------------------------------------------------------------
@@ -1255,6 +1270,145 @@ fn t_smp_pq_balanced() {
     let cpu = rustos::smp::enqueue_balanced(42);
     assert_eq!(cpu, bsp);
     assert_eq!(slot.dequeue(), Some(42));
+}
+
+// ----------------------------------------------------------------------------
+// Long-mode AP trampoline tests.
+// ----------------------------------------------------------------------------
+
+fn t_smp_lm_blob_nonempty() {
+    // Trampoline must have content; arbitrarily require ≥ 64 bytes
+    // and a reasonable upper bound (we measured 256 bytes in build.rs).
+    let len = rustos::smp::AP_LM_TRAMPOLINE_LEN;
+    assert!(len >= 64, "trampoline too small: {}", len);
+    assert!(len <= 1024, "trampoline larger than expected: {}", len);
+    assert_eq!(len, rustos::smp::AP_LM_TRAMPOLINE.len());
+}
+
+fn t_smp_lm_offsets_in_range() {
+    // Patch offsets must point inside the blob and have room for
+    // their respective u64/u32 values.
+    let len = rustos::smp::AP_LM_TRAMPOLINE_LEN;
+    assert!(rustos::smp::AP_LM_OFF_CR3 + 8 <= len);
+    assert!(rustos::smp::AP_LM_OFF_STACK + 8 <= len);
+    assert!(rustos::smp::AP_LM_OFF_ENTRY + 8 <= len);
+    assert!(rustos::smp::AP_LM_OFF_CPU_ID + 4 <= len);
+    // Each parameter slot is at a distinct offset.
+    let offs = [
+        rustos::smp::AP_LM_OFF_CR3,
+        rustos::smp::AP_LM_OFF_STACK,
+        rustos::smp::AP_LM_OFF_ENTRY,
+        rustos::smp::AP_LM_OFF_CPU_ID,
+    ];
+    for i in 0..offs.len() {
+        for j in (i+1)..offs.len() {
+            assert_ne!(offs[i], offs[j],
+                "param offsets {} and {} collide", i, j);
+        }
+    }
+}
+
+fn t_smp_lm_install() {
+    // After install, the first byte must be the trampoline's first
+    // byte (CLI = 0xFA — same as the ping trampoline because both
+    // start with the same instruction).
+    let mut buf = [0u8; 320];
+    rustos::smp::test_lm_install_and_readback(&mut buf);
+    let len = rustos::smp::AP_LM_TRAMPOLINE_LEN;
+    // Compare every byte EXCEPT the patched parameter slots — those
+    // got our marker values, not the original 0s in the blob.
+    let cr3 = rustos::smp::AP_LM_OFF_CR3;
+    let stk = rustos::smp::AP_LM_OFF_STACK;
+    let ent = rustos::smp::AP_LM_OFF_ENTRY;
+    let cpu = rustos::smp::AP_LM_OFF_CPU_ID;
+    for i in 0..len {
+        if (i >= cr3 && i < cr3 + 8) ||
+           (i >= stk && i < stk + 8) ||
+           (i >= ent && i < ent + 8) ||
+           (i >= cpu && i < cpu + 4) {
+            continue;
+        }
+        assert_eq!(buf[i], rustos::smp::AP_LM_TRAMPOLINE[i],
+            "byte {} differs after install (non-patch region)", i);
+    }
+    assert_eq!(buf[0], 0xFA, "trampoline must start with CLI");
+}
+
+fn t_smp_lm_params() {
+    let (cr3, stk, ent, cpu) = rustos::smp::test_lm_read_params();
+    assert_eq!(cr3, 0xDEAD_C0DE_C0DE_0000);
+    assert_eq!(stk, 0xCAFEFEED_FEEDC0DE);
+    assert_eq!(ent, 0xC0FFEE00_BAADF00D);
+    assert_eq!(cpu, 42);
+}
+
+fn t_smp_lm_handshake() {
+    let v = rustos::smp::test_lm_handshake_round_trip();
+    assert_eq!(v, rustos::smp::AP_LM_HANDSHAKE_MAGIC);
+}
+
+fn t_smp_lm_identity() {
+    // Either bootloader 0.9 already identity-maps the first 2 MiB, or
+    // smp::boot_ap_long_mode's prep installs a fresh mapping.  We can
+    // test this by triggering identity-map ensure via test_lm_install
+    // and then walking the BSP page tables.
+    let mut buf = [0u8; 32];
+    rustos::smp::test_lm_install_and_readback(&mut buf);
+    // After this, virt 0x8000 must resolve to phys 0x8000 (we just
+    // wrote there via the phys map; if identity were absent this
+    // wouldn't matter for the test, but the AP would fault).
+    assert_eq!(rustos::memory::virt_to_phys(0x8000), Some(0x8000),
+        "identity mapping for trampoline page is required");
+}
+
+fn t_smp_lm_real_boot() {
+    use core::sync::atomic::Ordering;
+    let madt = match rustos::acpi::parse_madt() {
+        Some(m) => m,
+        None => {
+            rustos::serial_println!("[madt absent — single-CPU box, skipping]");
+            return;
+        }
+    };
+    let bsp = rustos::apic::lapic_id();
+    let mut target: Option<u8> = None;
+    for &id in &madt.lapic_ids {
+        if id != bsp {
+            target = Some(id);
+            break;
+        }
+    }
+    let target = match target {
+        Some(t) => t,
+        None => {
+            rustos::serial_println!("[only BSP in MADT — single-CPU box, skipping]");
+            return;
+        }
+    };
+    rustos::serial_print!("[booting AP id={}] ", target);
+    let before = rustos::smp::lm_alive();
+    let r = rustos::smp::boot_ap_long_mode(target);
+    let after = rustos::smp::lm_alive();
+    match r {
+        Ok(true) => {
+            assert!(after > before,
+                "ap_main should have incremented LM_ALIVE: before={} after={}",
+                before, after);
+            let slot = rustos::smp::cpu_state(target).expect("slot");
+            assert!(slot.alive.load(Ordering::Acquire));
+        }
+        Ok(false) => panic!("AP {} did not respond to long-mode SIPI", target),
+        Err(e)   => panic!("boot_ap_long_mode failed: {}", e),
+    }
+}
+
+fn t_smp_lm_boot_rejects() {
+    let bsp = rustos::apic::lapic_id();
+    assert!(rustos::smp::boot_ap_long_mode(bsp).is_err(),
+        "must reject self-boot");
+    let oob = rustos::smp::MAX_CPUS as u8;
+    assert!(rustos::smp::boot_ap_long_mode(oob).is_err(),
+        "must reject out-of-range APIC ID");
 }
 
 fn t_smp_pq_steal_threshold() {
