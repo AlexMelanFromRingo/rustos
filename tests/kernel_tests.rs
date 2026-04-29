@@ -188,6 +188,12 @@ fn run_all() {
     check!("userlib: format_signed handles i64::MIN",   { t_ul_signed_min(); });
     check!("userlib: format_unsigned base 10",          { t_ul_unsigned_dec(); });
     check!("userlib: format_unsigned base 16",          { t_ul_unsigned_hex(); });
+    check!("userlib: rs_strlen empty + with NUL",        { t_ul_strlen(); });
+    check!("userlib: rs_strcmp ordering",                { t_ul_strcmp(); });
+    check!("userlib: rs_strncmp bounded",                { t_ul_strncmp(); });
+    check!("userlib: rs_memchr finds + misses",          { t_ul_memchr(); });
+    check!("userlib: rs_memmove overlap forward+back",   { t_ul_memmove(); });
+    check!("userlib: rs_strtol decimal/hex/octal",       { t_ul_strtol(); });
 
     // SMP / IPI machinery — exercised on the BSP only.
     check!("smp: APIC initialises before IPI tests",    { t_smp_apic_ready(); });
@@ -257,12 +263,15 @@ fn run_all() {
     // In-tree coreutils — built as static x86-64 ELFs by gcc and
     // embedded by build.rs.  Each must pass an audit and parse via the
     // existing ElfLoader.
-    check!("coreutils: count is 6 utilities",            { t_coreutils_count(); });
+    check!("coreutils: count is 8 utilities",            { t_coreutils_count(); });
     check!("coreutils: audit passes for every blob",     { t_coreutils_audit(); });
     check!("coreutils: ElfLoader parses every blob",     { t_coreutils_elf_parse(); });
     check!("coreutils: 'echo' resolves by name",         { t_coreutils_find_echo(); });
     check!("coreutils: 'nope' returns None",             { t_coreutils_find_miss(); });
     check!("coreutils: every blob has executable PT_LOAD",{ t_coreutils_has_exec_load(); });
+    check!("libc: wc binary present",                    { t_libc_wc_present(); });
+    check!("libc: head binary present",                  { t_libc_head_present(); });
+    check!("libc: wc references printf via libc",        { t_libc_wc_uses_printf(); });
 
     // USB stack — register layout, TD/QH bit packing, descriptor parsing,
     // HID boot-protocol report parsing.  All pure data; no real USB hw.
@@ -1112,6 +1121,58 @@ fn t_ul_unsigned_hex() {
     assert_eq!(format_unsigned(0xCAFE_BABE, 16, &mut b), b"cafebabe");
 }
 
+fn t_ul_strlen() {
+    use rustos::userlib::rs_strlen;
+    assert_eq!(rs_strlen(b""), 0);
+    assert_eq!(rs_strlen(b"hello\0world"), 5);
+    assert_eq!(rs_strlen(b"no nul"), 6);
+}
+
+fn t_ul_strcmp() {
+    use rustos::userlib::rs_strcmp;
+    assert_eq!(rs_strcmp(b"abc\0", b"abc\0"), 0);
+    assert!(rs_strcmp(b"abc\0", b"abd\0") < 0);
+    assert!(rs_strcmp(b"abd\0", b"abc\0") > 0);
+    assert!(rs_strcmp(b"abc\0", b"abcd\0") < 0); // shorter < longer
+}
+
+fn t_ul_strncmp() {
+    use rustos::userlib::rs_strncmp;
+    // First 3 bytes equal even though full strings differ.
+    assert_eq!(rs_strncmp(b"abcd\0", b"abce\0", 3), 0);
+    assert!(rs_strncmp(b"abcd\0", b"abce\0", 4) < 0);
+}
+
+fn t_ul_memchr() {
+    use rustos::userlib::rs_memchr;
+    assert_eq!(rs_memchr(b"hello", b'l', 5), Some(2));
+    assert_eq!(rs_memchr(b"hello", b'z', 5), None);
+    assert_eq!(rs_memchr(b"hello", b'l', 2), None,
+        "n=2 must not see the 'l' at index 2");
+}
+
+fn t_ul_memmove() {
+    use rustos::userlib::rs_memmove;
+    // Forward overlap (dst < src): copy "world" from index 5 to index 0.
+    let mut buf = b"world hello".to_vec();
+    rs_memmove(&mut buf, 6, 0, 5);
+    assert_eq!(&buf[0..5], b"hello");
+    // Backward overlap (dst > src): shift right by 1.
+    let mut buf2 = b"abcdef".to_vec();
+    rs_memmove(&mut buf2, 0, 1, 5);
+    assert_eq!(&buf2[..6], b"aabcde");
+}
+
+fn t_ul_strtol() {
+    use rustos::userlib::rs_strtol;
+    assert_eq!(rs_strtol(b"42", 10), (42, 2));
+    assert_eq!(rs_strtol(b"-17", 10), (-17, 3));
+    assert_eq!(rs_strtol(b"0xFF", 0), (255, 4));
+    assert_eq!(rs_strtol(b"0755", 0), (493, 4)); // octal 0755 = 493
+    assert_eq!(rs_strtol(b"  +9 abc", 10), (9, 4));
+    assert_eq!(rs_strtol(b"abc", 10), (0, 0), "no digits → 0 consumed");
+}
+
 // ----------------------------------------------------------------------------
 // SMP / LAPIC IPI plumbing
 // ----------------------------------------------------------------------------
@@ -1642,14 +1703,14 @@ fn t_dyn_dependent_needed() {
 // ----------------------------------------------------------------------------
 
 fn t_coreutils_count() {
-    // Six utilities: true, false, echo, pwd, hostname, cat.
-    assert_eq!(rustos::coreutils::count(), 6);
+    // Eight utilities: true, false, echo, pwd, hostname, cat, wc, head.
+    assert_eq!(rustos::coreutils::count(), 8);
 }
 
 fn t_coreutils_audit() {
     let r = rustos::coreutils::audit();
     assert!(r.is_ok(), "audit failed: {:?}", r);
-    assert_eq!(r.unwrap(), 6);
+    assert_eq!(r.unwrap(), 8);
 }
 
 fn t_coreutils_elf_parse() {
@@ -1686,6 +1747,29 @@ fn t_coreutils_has_exec_load() {
         }
         assert!(has_exec_load, "{}: must have at least one executable PT_LOAD", b.name);
     }
+}
+
+fn t_libc_wc_present() {
+    let b = rustos::coreutils::find("wc").expect("wc must exist");
+    // wc + libc is significantly bigger than `true` (just exit syscall)
+    // — a useful smoke test that libc.c actually got linked in.
+    assert!(b.bytes.len() > 8 * 1024,
+        "wc should be > 8 KiB once libc is linked, got {}", b.bytes.len());
+}
+
+fn t_libc_head_present() {
+    let b = rustos::coreutils::find("head").expect("head must exist");
+    assert!(b.bytes.len() > 8 * 1024);
+}
+
+fn t_libc_wc_uses_printf() {
+    // The compiled wc binary should contain ASCII fragments from
+    // libc.c's strerror table — proves the libc.c was linked rather
+    // than dead-code-stripped.
+    let b = rustos::coreutils::find("wc").expect("wc");
+    let needle = b"Permission denied";
+    let found = b.bytes.windows(needle.len()).any(|w| w == needle);
+    assert!(found, "wc must include libc.c's strerror table");
 }
 
 // ----------------------------------------------------------------------------

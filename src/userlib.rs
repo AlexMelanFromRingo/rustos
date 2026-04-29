@@ -312,3 +312,103 @@ pub fn format_unsigned<'a>(v: u64, base: u64, buf: &'a mut [u8]) -> &'a [u8] {
     }
     &buf[pos..]
 }
+
+// =============================================================================
+// POSIX-shaped string / byte ops, mirrored on the Rust side so kernel
+// tests can drive the same algorithms the C `libc.c` ships to userspace.
+// =============================================================================
+//
+// The C side lives in `coreutils_src/lib/libc.c`; this Rust side provides
+// equivalent primitives so we can unit-test the algorithms without firing
+// a syscall.  Keeping them in sync means a regression in either side is
+// caught by the test suite — independently of whether userspace runs.
+
+/// strlen — byte count up to (but not including) the first NUL.  Returns
+/// the full slice length if no NUL is present.
+pub fn rs_strlen(s: &[u8]) -> usize {
+    s.iter().position(|&b| b == 0).unwrap_or(s.len())
+}
+
+/// strcmp — return < 0, 0, > 0 ordering of two NUL-terminated byte slices,
+/// without reading past the first NUL.  Identical to the C semantics.
+pub fn rs_strcmp(a: &[u8], b: &[u8]) -> i32 {
+    let mut i = 0;
+    loop {
+        let ca = if i < a.len() { a[i] } else { 0 };
+        let cb = if i < b.len() { b[i] } else { 0 };
+        if ca == 0 || cb == 0 || ca != cb {
+            return ca as i32 - cb as i32;
+        }
+        i += 1;
+    }
+}
+
+/// strncmp — bounded version of strcmp.  Returns 0 once `n` bytes match
+/// even if neither side has hit a NUL.
+pub fn rs_strncmp(a: &[u8], b: &[u8], n: usize) -> i32 {
+    for i in 0..n {
+        let ca = if i < a.len() { a[i] } else { 0 };
+        let cb = if i < b.len() { b[i] } else { 0 };
+        if ca == 0 || cb == 0 || ca != cb {
+            return ca as i32 - cb as i32;
+        }
+    }
+    0
+}
+
+/// memchr — first occurrence of `c` in the first `n` bytes of `s`, or
+/// None if not found.
+pub fn rs_memchr(s: &[u8], c: u8, n: usize) -> Option<usize> {
+    let m = n.min(s.len());
+    s[..m].iter().position(|&b| b == c)
+}
+
+/// memmove — overlapping byte copy.  `dst` and `src` may alias; we
+/// determine direction so the result is always exactly `src`'s prior
+/// content.
+pub fn rs_memmove(dst: &mut [u8], src_start: usize, dst_start: usize, n: usize) {
+    if dst_start == src_start || n == 0 { return; }
+    if dst_start < src_start {
+        // forward copy
+        for i in 0..n {
+            dst[dst_start + i] = dst[src_start + i];
+        }
+    } else {
+        // backward copy
+        for i in (0..n).rev() {
+            dst[dst_start + i] = dst[src_start + i];
+        }
+    }
+}
+
+/// strtol — parse a signed integer in `base` from `s`.  `base = 0` auto-
+/// detects: `0x` → 16, leading `0` → 8, otherwise 10.  Returns
+/// `(value, bytes_consumed)`; bytes_consumed = 0 means "no digits".
+pub fn rs_strtol(s: &[u8], mut base: u32) -> (i64, usize) {
+    let mut i = 0;
+    while i < s.len() && (s[i] == b' ' || (s[i] >= b'\t' && s[i] <= b'\r')) { i += 1; }
+    let neg = if i < s.len() && s[i] == b'-' { i += 1; true }
+              else if i < s.len() && s[i] == b'+' { i += 1; false }
+              else { false };
+    if (base == 0 || base == 16) && i + 1 < s.len() && s[i] == b'0' && (s[i+1] == b'x' || s[i+1] == b'X') {
+        base = 16; i += 2;
+    } else if base == 0 && i < s.len() && s[i] == b'0' {
+        base = 8; i += 1;
+    } else if base == 0 {
+        base = 10;
+    }
+    let start = i;
+    let mut acc: i64 = 0;
+    while i < s.len() {
+        let c = s[i];
+        let d: i64 = if c.is_ascii_digit() { (c - b'0') as i64 }
+                     else if c >= b'a' && c <= b'z' { (c - b'a') as i64 + 10 }
+                     else if c >= b'A' && c <= b'Z' { (c - b'A') as i64 + 10 }
+                     else { -1 };
+        if d < 0 || d >= base as i64 { break; }
+        acc = acc * (base as i64) + d;
+        i += 1;
+    }
+    if i == start { (0, 0) }
+    else { ((if neg { -acc } else { acc }), i) }
+}

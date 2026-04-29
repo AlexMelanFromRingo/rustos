@@ -264,7 +264,10 @@ fn build_coreutils(out_dir: &str) {
     println!("cargo:rerun-if-changed={}/syscalls.h", src_dir);
     println!("cargo:rerun-if-changed={}/crt.s", src_dir);
 
-    let utils = ["true", "false", "echo", "pwd", "hostname", "cat"];
+    println!("cargo:rerun-if-changed={}/lib/libc.h", src_dir);
+    println!("cargo:rerun-if-changed={}/lib/libc.c", src_dir);
+
+    let utils = ["true", "false", "echo", "pwd", "hostname", "cat", "wc", "head"];
     let mut binaries: Vec<(String, String, usize)> = Vec::new();
 
     for util in utils.iter() {
@@ -272,15 +275,21 @@ fn build_coreutils(out_dir: &str) {
         let elf_path = format!("{}/bin_{}.elf", out_dir, util);
         println!("cargo:rerun-if-changed={}", c_path);
 
+        // Common gcc flags: freestanding, no built-ins, no stack
+        // protector, static + no-pie for classical ET_EXEC, build-id
+        // off so the binary is reproducible, no-exec stack annotation
+        // to silence binutils warnings, -I lib/ for libc.h.
         let r = Command::new("gcc")
             .args(&[
                 "-nostdlib", "-static", "-ffreestanding", "-fno-builtin",
                 "-fno-stack-protector", "-no-pie", "-O2",
                 "-Wl,--build-id=none",
                 "-Wl,-z,noexecstack",
+                "-I", &format!("{}/lib", src_dir),
                 "-o", &elf_path,
                 &format!("{}/crt.s", src_dir),
                 &c_path,
+                &format!("{}/lib/libc.c", src_dir),
             ])
             .output()
             .expect("build.rs: gcc not in PATH");
