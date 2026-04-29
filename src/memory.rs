@@ -8,6 +8,8 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 pub mod userspace;
 pub mod user_allocator;
+pub mod pagetable;
+pub mod cow;
 
 /// Saved physical memory offset for creating mappers at runtime
 static PHYS_MEM_OFFSET: AtomicU64 = AtomicU64::new(0);

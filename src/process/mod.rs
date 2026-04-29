@@ -161,6 +161,12 @@ impl Process {
             crate::gdt::user_ss_value(),
         );
 
+        // Allocate a private PML4 for this process — kernel mappings
+        // shared by reference, user L4 entry deep-cloned.  Falls back
+        // to CR3=0 (kernel PT) if frame allocation fails so the
+        // process still runs (just without per-process isolation).
+        let cr3 = crate::memory::pagetable::create_user_pagetable().unwrap_or(0);
+
         Process {
             pid,
             parent_pid,
@@ -179,7 +185,7 @@ impl Process {
             is_user: true,
             kernel_stack_slot: Some(kstack_slot),
             kernel_stack_top: kstack_top,
-            cr3: 0, // 0 = use kernel page table (shared address space for now)
+            cr3,
             cwd: String::from("/"),
             pgid: pid,
             sid: pid,

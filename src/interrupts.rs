@@ -267,11 +267,16 @@ extern "C" fn timer_preempt_handler(frame: *mut crate::process::context::TrapFra
                         let next = pm.get_process_mut(next_pid).unwrap();
                         next.state = crate::process::ProcessState::Running;
                         let kstack_top = next.kernel_stack_top;
+                        let cr3 = next.cr3;
                         let tf_ptr = &mut next.trap_frame as *mut crate::process::context::TrapFrame;
                         pm.current_pid = Some(next_pid);
                         if kstack_top != 0 {
                             unsafe { crate::gdt::set_tss_rsp0(kstack_top); }
                         }
+                        // Switch to this process's private page table.
+                        // No-op when cr3 == 0 (process not yet given its
+                        // own PML4 — falls back to kernel CR3 = ok).
+                        unsafe { crate::memory::pagetable::switch_cr3(cr3); }
                         drop(pm);
                         drop(sched);
                         return tf_ptr;
@@ -328,8 +333,10 @@ extern "C" fn timer_preempt_handler(frame: *mut crate::process::context::TrapFra
                 if proc.kernel_stack_top != 0 {
                     unsafe { crate::gdt::set_tss_rsp0(proc.kernel_stack_top); }
                 }
+                let cr3 = proc.cr3;
                 // Return pointer to the new process's TrapFrame
                 let tf_ptr = &mut proc.trap_frame as *mut crate::process::context::TrapFrame;
+                unsafe { crate::memory::pagetable::switch_cr3(cr3); }
                 drop(pm);
                 return tf_ptr;
             }
@@ -376,11 +383,28 @@ extern "x86-interrupt" fn page_fault_handler(
 {
     use x86_64::registers::control::Cr2;
 
+    let fault_addr = Cr2::read();
+
+    // Copy-on-write resolution: a write to a user page that's
+    // present-but-not-writable is the COW path.  We try to resolve
+    // it before printing any panic banner — if successful, the
+    // faulting instruction simply retries with the now-private page.
+    let is_user = error_code.contains(x86_64::structures::idt::PageFaultErrorCode::USER_MODE);
+    let is_write = error_code.contains(x86_64::structures::idt::PageFaultErrorCode::CAUSED_BY_WRITE);
+    let is_present = error_code.contains(x86_64::structures::idt::PageFaultErrorCode::PROTECTION_VIOLATION);
+    if is_user && is_write && is_present {
+        let cur_cr3: u64;
+        unsafe {
+            core::arch::asm!("mov {}, cr3", out(reg) cur_cr3, options(nomem, nostack));
+        }
+        if unsafe { crate::memory::cow::resolve(cur_cr3, fault_addr) }.is_ok() {
+            return;
+        }
+    }
+
     crate::println!("\n╔══════════════════════════════════════════╗");
     crate::println!("║       EXCEPTION: PAGE FAULT             ║");
     crate::println!("╚══════════════════════════════════════════╝");
-
-    let fault_addr = Cr2::read();
     crate::println!("Accessed Address: {:?}", fault_addr);
     crate::println!("Error Code: {:?}", error_code);
     crate::println!("  - Present: {}", error_code.contains(x86_64::structures::idt::PageFaultErrorCode::PROTECTION_VIOLATION));
