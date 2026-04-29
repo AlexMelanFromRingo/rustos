@@ -193,6 +193,23 @@ fn run_all() {
     check!("smp: APIC initialises before IPI tests",    { t_smp_apic_ready(); });
     check!("smp: self-IPI vector 0x40 round-trips",     { t_smp_self_ipi(); });
     check!("smp: boot_ap rejects startup_page 0",       { t_smp_boot_ap_zero(); });
+
+    // SMP AP trampoline — structural checks on the hand-assembled blob,
+    // plus round-trip checks of the trampoline-copy and handshake paths
+    // exercised in single-CPU mode (no real AP, BSP simulates the write).
+    check!("smp: trampoline first byte is CLI (0xFA)",  { t_smp_tramp_cli(); });
+    check!("smp: trampoline ends with HLT (0xF4)",      { t_smp_tramp_hlt(); });
+    check!("smp: trampoline length 22 bytes",           { t_smp_tramp_len(); });
+    check!("smp: trampoline embeds 0xDEADBEEF magic",   { t_smp_tramp_magic(); });
+    check!("smp: trampoline DS load matches handshake", { t_smp_tramp_ds_imm(); });
+    check!("smp: trampoline copy round-trips via map",  { t_smp_tramp_install(); });
+    check!("smp: handshake write/read round-trip",      { t_smp_handshake_rt(); });
+    check!("smp: bounded poll times out cleanly",       { t_smp_poll_timeout(); });
+    check!("smp: boot_ap_ping rejects self target",     { t_smp_ping_self(); });
+    check!("smp: boot_ap_ping rejects out-of-range id", { t_smp_ping_oob(); });
+    check!("smp: cpu_state(MAX-1) is Some",             { t_smp_cpu_state_in_range(); });
+    check!("smp: cpu_state(255) is None when MAX<255",  { t_smp_cpu_state_oob(); });
+    check!("smp: init_bsp marks BSP slot alive",        { t_smp_init_bsp(); });
 }
 
 // ----------------------------------------------------------------------------
@@ -1047,6 +1064,112 @@ fn t_smp_self_ipi() {
 fn t_smp_boot_ap_zero() {
     let err = rustos::apic::boot_ap(1, 0);
     assert!(err.is_err());
+}
+
+// ----------------------------------------------------------------------------
+// SMP AP trampoline — structural and round-trip checks
+// ----------------------------------------------------------------------------
+
+fn t_smp_tramp_cli() {
+    // Real-mode CPUs may inherit IF=1 from the BIOS, so the very first
+    // opcode in the trampoline must be CLI (0xFA) before any memory write.
+    assert_eq!(rustos::smp::AP_TRAMPOLINE[rustos::smp::TRAMP_OFF_CLI], 0xFA);
+}
+
+fn t_smp_tramp_hlt() {
+    assert_eq!(rustos::smp::AP_TRAMPOLINE[rustos::smp::TRAMP_OFF_HLT], 0xF4);
+}
+
+fn t_smp_tramp_len() {
+    // 22 bytes is the size of the documented disassembly; if a future
+    // edit changes it, this test is a tripwire forcing the doc-comment
+    // to be updated alongside the code.
+    assert_eq!(rustos::smp::AP_TRAMPOLINE.len(), 22);
+}
+
+fn t_smp_tramp_magic() {
+    // Two 16-bit little-endian halves of 0xDEADBEEF embedded in the
+    // C7 06 disp16 imm16 stores.
+    let lo_off = rustos::smp::TRAMP_OFF_MAGIC_LO;
+    let hi_off = rustos::smp::TRAMP_OFF_MAGIC_HI;
+    assert_eq!(rustos::smp::AP_TRAMPOLINE[lo_off],     0xEF);
+    assert_eq!(rustos::smp::AP_TRAMPOLINE[lo_off + 1], 0xBE);
+    assert_eq!(rustos::smp::AP_TRAMPOLINE[hi_off],     0xAD);
+    assert_eq!(rustos::smp::AP_TRAMPOLINE[hi_off + 1], 0xDE);
+}
+
+fn t_smp_tramp_ds_imm() {
+    // The `mov ax, imm16` immediately before `mov ds, ax` must encode
+    // the segment whose linear base is AP_HANDSHAKE_PHYS.  Catches the
+    // class of bug where someone moves the handshake page without
+    // updating the trampoline.
+    let imm_off = rustos::smp::TRAMP_OFF_MOV_AX + 1;
+    let lo = rustos::smp::AP_TRAMPOLINE[imm_off];
+    let hi = rustos::smp::AP_TRAMPOLINE[imm_off + 1];
+    let imm = u16::from_le_bytes([lo, hi]);
+    let expected = (rustos::smp::AP_HANDSHAKE_PHYS >> 4) as u16;
+    assert_eq!(imm, expected);
+}
+
+fn t_smp_tramp_install() {
+    // Copy the trampoline to phys 0x8000 via the kernel's direct map,
+    // then read it back through the same map and verify byte-for-byte.
+    let mut buf = [0u8; 32];
+    rustos::smp::test_install_and_readback(&mut buf);
+    let len = rustos::smp::AP_TRAMPOLINE.len();
+    assert_eq!(&buf[..len], rustos::smp::AP_TRAMPOLINE);
+}
+
+fn t_smp_handshake_rt() {
+    let v = rustos::smp::test_handshake_round_trip();
+    assert_eq!(v, rustos::smp::AP_HANDSHAKE_MAGIC);
+}
+
+fn t_smp_poll_timeout() {
+    assert!(rustos::smp::test_bounded_poll_times_out(),
+        "bounded poll must terminate without seeing the magic");
+}
+
+fn t_smp_ping_self() {
+    // BSP LAPIC ID is 0 under QEMU.  Booting self must be rejected so
+    // we don't INIT-IPI the running CPU and reset the kernel.
+    let bsp = rustos::apic::lapic_id();
+    let err = rustos::smp::boot_ap_ping(bsp);
+    assert!(err.is_err(), "boot_ap_ping(self) must error, got {:?}",
+        err.map(|_| "ok"));
+}
+
+fn t_smp_ping_oob() {
+    // MAX_CPUS-1 is the highest valid index; MAX_CPUS itself must be
+    // rejected before we touch the per-CPU array.
+    let oob = rustos::smp::MAX_CPUS as u8;
+    let err = rustos::smp::boot_ap_ping(oob);
+    assert!(err.is_err());
+}
+
+fn t_smp_cpu_state_in_range() {
+    let last = (rustos::smp::MAX_CPUS - 1) as u8;
+    assert!(rustos::smp::cpu_state(last).is_some());
+}
+
+fn t_smp_cpu_state_oob() {
+    // Skip if MAX_CPUS happens to be 256 (shouldn't be, but be robust).
+    if rustos::smp::MAX_CPUS < 256 {
+        let oob = rustos::smp::MAX_CPUS as u8;
+        assert!(rustos::smp::cpu_state(oob).is_none());
+    }
+}
+
+fn t_smp_init_bsp() {
+    use core::sync::atomic::Ordering;
+    rustos::smp::init_bsp();
+    let bsp = rustos::apic::lapic_id();
+    let slot = rustos::smp::cpu_state(bsp).expect("BSP slot must exist");
+    assert!(slot.alive.load(Ordering::Acquire),
+        "init_bsp should mark BSP slot alive");
+    // Idempotent: a second call is harmless.
+    rustos::smp::init_bsp();
+    assert!(slot.alive.load(Ordering::Acquire));
 }
 
 // Suppress unused-imports lint for paths used only in a few tests.

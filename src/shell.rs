@@ -751,6 +751,7 @@ impl Shell {
             "pkg" => self.cmd_pkg(args),
             "mknod" => self.cmd_mknod(args),
             "tsc" => self.cmd_tsc(),
+            "smp" => self.cmd_smp(args),
             "seccomp" => self.cmd_seccomp(args),
             "getcap" => self.cmd_getcap(args),
             "setcap" => self.cmd_setcap(args),
@@ -4750,6 +4751,84 @@ impl Shell {
                 println!("seccomp: pid={} sc={} -> {} ({:?})", pid, sc, label, dec);
             }
             _ => println!("Usage: seccomp [allowlist PID SC1,SC2,... ACTION | remove PID | test PID SC]"),
+        }
+    }
+
+    /// smp: SMP / multi-CPU diagnostics and opt-in AP startup.
+    ///
+    ///   smp           — same as `smp info`
+    ///   smp info      — list per-CPU state and MADT-detected CPU count
+    ///   smp selftest  — verify trampoline copy + handshake round-trip on BSP
+    ///   smp boot N    — fire INIT-SIPI-SIPI at APIC ID N with the ping
+    ///                   trampoline and wait for the handshake.  Strictly
+    ///                   opt-in: never run from boot, since a botched AP
+    ///                   trampoline can wedge the box with no debug output.
+    fn cmd_smp(&self, args: &[&str]) {
+        let sub = args.get(0).copied().unwrap_or("info");
+        match sub {
+            "info" => {
+                println!("BSP LAPIC ID  : {}", crate::apic::lapic_id());
+                println!("Trampoline    : phys 0x{:x}, {} bytes",
+                    (crate::smp::AP_TRAMPOLINE_PAGE as u64) << 12,
+                    crate::smp::AP_TRAMPOLINE.len());
+                println!("Handshake page: phys 0x{:x}", crate::smp::AP_HANDSHAKE_PHYS);
+                println!("Boot attempts : {}", crate::smp::boot_attempts());
+                println!("Boot successes: {}", crate::smp::boot_successes());
+                println!("Alive CPUs    : {}", crate::smp::alive_cpu_count());
+                match crate::acpi::parse_madt() {
+                    Some(m) => {
+                        println!("MADT-detected : {} CPU(s)", m.lapic_ids.len());
+                        for id in &m.lapic_ids {
+                            println!("  apic id {}", id);
+                        }
+                    }
+                    None => println!("MADT-detected : (no MADT)"),
+                }
+            }
+            "selftest" => {
+                let mut buf = [0u8; 32];
+                crate::smp::test_install_and_readback(&mut buf);
+                let len = crate::smp::AP_TRAMPOLINE.len();
+                if &buf[..len] == crate::smp::AP_TRAMPOLINE {
+                    println!("smp: trampoline copy OK ({} bytes)", len);
+                } else {
+                    println!("smp: trampoline copy MISMATCH");
+                    return;
+                }
+                let v = crate::smp::test_handshake_round_trip();
+                if v == crate::smp::AP_HANDSHAKE_MAGIC {
+                    println!("smp: handshake round-trip OK (0x{:x})", v);
+                } else {
+                    println!("smp: handshake round-trip FAILED (got 0x{:x})", v);
+                    return;
+                }
+                if crate::smp::test_bounded_poll_times_out() {
+                    println!("smp: bounded-poll timeout path OK");
+                } else {
+                    println!("smp: bounded-poll did not time out as expected");
+                    return;
+                }
+                println!("smp: selftest PASSED");
+            }
+            "boot" => {
+                let id_s = match args.get(1) {
+                    Some(s) => *s,
+                    None => { println!("Usage: smp boot APIC_ID"); return; }
+                };
+                let id: u8 = match id_s.parse() {
+                    Ok(n) => n,
+                    Err(_) => { println!("smp: invalid APIC ID '{}'", id_s); return; }
+                };
+                println!("smp: firing INIT-SIPI-SIPI at AP {}...", id);
+                match crate::smp::boot_ap_ping(id) {
+                    Ok(true)  => println!("smp: AP {} responded with handshake", id),
+                    Ok(false) => println!("smp: AP {} did not respond within timeout", id),
+                    Err(e)    => println!("smp: error: {}", e),
+                }
+            }
+            _ => {
+                println!("Usage: smp [info | selftest | boot APIC_ID]");
+            }
         }
     }
 
