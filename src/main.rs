@@ -174,6 +174,33 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     rustos::drivers::virtio_net::init();
     rustos::drivers::virtio_blk::init();
     rustos::drivers::rtl8139::init();
+    rustos::drivers::ahci::init();
+    if rustos::drivers::ahci::is_available() {
+        let g = rustos::drivers::ahci::AHCI.lock();
+        if let Some(a) = g.as_ref() {
+            for p in a.ports.iter() {
+                println!("ahci: port {} {} sectors ({} MiB)",
+                    p.port, p.sectors, p.sectors / 2048);
+                // Sector self-test: write a 29-byte marker to LBA 0
+                // and read it back to confirm DMA round-trip.
+                let mut sec = [0u8; 512];
+                let marker = b"RUSTOS-AHCI-SELFTEST-OK-2026A";
+                sec[..marker.len()].copy_from_slice(marker);
+                if let Err(e) = p.write_sectors(0, 1, &sec) {
+                    println!("ahci self-test: write err {}", e); continue;
+                }
+                let mut rb = [0u8; 512];
+                if let Err(e) = p.read_sectors(0, 1, &mut rb) {
+                    println!("ahci self-test: read err {}", e); continue;
+                }
+                if &rb[..marker.len()] == marker {
+                    println!("ahci self-test: OK ({} byte round-trip)", marker.len());
+                } else {
+                    println!("ahci self-test: MISMATCH first8={:02x?}", &rb[..8]);
+                }
+            }
+        }
+    }
 
     // PCI MSI primitive smoke test: pick the first listed device that
     // advertises MSI, program MSI to a probe vector, read Message
