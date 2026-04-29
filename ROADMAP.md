@@ -33,7 +33,7 @@ Reference architecture: Linux/Unix-like.
 - [x] Priority-based scheduling (nice values -20..19, dynamic quantum) ✅
 - [x] CFS (Completely Fair Scheduler) inspired design (vruntime + Linux nice weights) ✅
 - [x] Proper process blocking on I/O (sleep queues) ✅
-- [ ] Multi-core support (per-CPU run queues, SMP init)
+- [~] Multi-core support — IPI plumbing + AP ping trampoline (INIT-SIPI-SIPI delivery, 0xDEADBEEF handshake at phys 0x9000, per-CPU CpuState array, opt-in `smp boot` shell command); long-mode trampoline + per-CPU run queues remain
 
 ### 1.4 Interrupt & Exception Handling
 - [x] APIC support (LAPIC + IOAPIC discovery, EOI via LAPIC, 8259 PIC retired through ACPI MADT ISO routing) ✅
@@ -142,8 +142,8 @@ Reference architecture: Linux/Unix-like.
 ### 4.3 Input/Output
 - [x] PS/2 mouse driver (IRQ 12, 8042 init, 3-byte packet decode, X/Y/buttons) ✅
 - [ ] USB HID (keyboard/mouse via UHCI/EHCI/xHCI)
-- [ ] Framebuffer driver (VESA/VBE for graphics mode)
-- [ ] Serial console improvements (full terminal emulation)
+- [x] Framebuffer driver: `src/framebuffer.rs` — `Surface` trait with `LinearFb` (MMIO) + `MemSurface` (heap, test-only); pixel-format-agnostic primitives (clear, fill_rect, rect outline, Bresenham line, 8×8 glyph + text), 7 dedicated tests ✅
+- [x] Serial console / terminal emulation: `src/term.rs` — Paul Williams DEC ANSI parser FSM, full VT-220/xterm coverage (CUP, SGR incl. 256-colour, OSC titles, alt screen, DECSC/DECRC, cursor visibility, CSI parameter parsing), 16 dedicated tests ✅
 
 ### 4.4 Timer & Clock
 - [x] HPET (MMIO at 0xFED0_0000, ENABLE_CNF, period→ns conversion) ✅
@@ -156,10 +156,10 @@ Reference architecture: Linux/Unix-like.
 ## Phase 5: User Space Environment
 
 ### 5.1 C Runtime / musl
-- [ ] Implement minimal C runtime (crt0, syscall wrappers)
-- [ ] Port musl libc (or newlib) for POSIX compatibility
-- [ ] Dynamic linking support (ELF .so loading)
-- [ ] Position-Independent Executables (PIE)
+- [x] Minimal in-tree user runtime (`src/userlib.rs`): syscall0–3 wrappers, write/read/exit/getpid/brk POSIX shims, bump-pointer malloc on top of brk, tiny printf with %d/%u/%x/%s/%c — covers what the in-tree `userspace::user_program_a/b` needs without third-party libc ✅
+- [ ] Port musl libc (or newlib) for full POSIX compatibility
+- [x] PIE (Position-Independent Executables) loader: ET_DYN accepted, PT_DYNAMIC scanned, R_X86_64_RELATIVE / R_X86_64_64 / GLOB_DAT / JUMP_SLOT applied via `apply_rela_with(... resolver)` — proven against synthetic ELFs in 4 dedicated tests ✅
+- [ ] Dynamic linking support (ELF .so loading) — relocation engine done; PT_INTERP / DT_NEEDED resolution + symbol-versioning tables remain
 
 ### 5.2 Shell Improvements
 - [x] Job control (background processes with &, fg, bg, jobs) ✅
