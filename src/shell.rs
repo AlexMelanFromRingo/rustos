@@ -752,6 +752,7 @@ impl Shell {
             "mknod" => self.cmd_mknod(args),
             "tsc" => self.cmd_tsc(),
             "smp" => self.cmd_smp(args),
+            "coreutils" => self.cmd_coreutils(args),
             "seccomp" => self.cmd_seccomp(args),
             "getcap" => self.cmd_getcap(args),
             "setcap" => self.cmd_setcap(args),
@@ -4751,6 +4752,46 @@ impl Shell {
                 println!("seccomp: pid={} sc={} -> {} ({:?})", pid, sc, label, dec);
             }
             _ => println!("Usage: seccomp [allowlist PID SC1,SC2,... ACTION | remove PID | test PID SC]"),
+        }
+    }
+
+    /// coreutils: list / audit / re-install the in-tree static ELF utilities.
+    ///
+    ///   coreutils         — same as `coreutils list`
+    ///   coreutils list    — show name + size + entry-point of every blob
+    ///   coreutils audit   — sanity-check every blob (ELF magic, ET_EXEC, size)
+    ///   coreutils install — re-populate /bin from the embedded blobs
+    fn cmd_coreutils(&self, args: &[&str]) {
+        let sub = args.get(0).copied().unwrap_or("list");
+        match sub {
+            "list" => {
+                println!("{:10} {:>7}  entry      first 4 bytes",
+                    "name", "bytes");
+                for b in crate::coreutils::COREUTILS {
+                    let entry = match crate::elf::ElfLoader::new(b.bytes) {
+                        Ok(l) => l.entry_point(),
+                        Err(_) => 0,
+                    };
+                    println!("{:10} {:>7}  0x{:08x}  {:02x} {:02x} {:02x} {:02x}",
+                        b.name, b.bytes.len(), entry,
+                        b.bytes[0], b.bytes[1], b.bytes[2], b.bytes[3]);
+                }
+                println!("\nTotal: {} binaries", crate::coreutils::count());
+            }
+            "audit" => {
+                match crate::coreutils::audit() {
+                    Ok(n)  => println!("coreutils: audit OK ({} binaries)", n),
+                    Err((name, why)) =>
+                        println!("coreutils: audit FAILED — {}: {}", name, why),
+                }
+            }
+            "install" => {
+                let n = crate::coreutils::populate_bin();
+                println!("coreutils: installed {} binaries to /bin", n);
+            }
+            _ => {
+                println!("Usage: coreutils [list | audit | install]");
+            }
         }
     }
 

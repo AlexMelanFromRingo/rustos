@@ -253,6 +253,16 @@ fn run_all() {
     check!("dynlink: MultiObjectResolver finds symbol",  { t_dyn_multiobj_resolver(); });
     check!("dynlink: MultiObjectResolver misses unknown",{ t_dyn_multiobj_miss(); });
     check!("dynlink: dependent .so lists its NEEDED",    { t_dyn_dependent_needed(); });
+
+    // In-tree coreutils — built as static x86-64 ELFs by gcc and
+    // embedded by build.rs.  Each must pass an audit and parse via the
+    // existing ElfLoader.
+    check!("coreutils: count is 6 utilities",            { t_coreutils_count(); });
+    check!("coreutils: audit passes for every blob",     { t_coreutils_audit(); });
+    check!("coreutils: ElfLoader parses every blob",     { t_coreutils_elf_parse(); });
+    check!("coreutils: 'echo' resolves by name",         { t_coreutils_find_echo(); });
+    check!("coreutils: 'nope' returns None",             { t_coreutils_find_miss(); });
+    check!("coreutils: every blob has executable PT_LOAD",{ t_coreutils_has_exec_load(); });
 }
 
 // ----------------------------------------------------------------------------
@@ -1604,6 +1614,57 @@ fn t_dyn_dependent_needed() {
         .collect();
     assert!(strs.iter().any(|s| s == "libdyntest.so.1"),
         "got {:?}", strs);
+}
+
+// ----------------------------------------------------------------------------
+// Coreutils (in-tree static ELF binaries)
+// ----------------------------------------------------------------------------
+
+fn t_coreutils_count() {
+    // Six utilities: true, false, echo, pwd, hostname, cat.
+    assert_eq!(rustos::coreutils::count(), 6);
+}
+
+fn t_coreutils_audit() {
+    let r = rustos::coreutils::audit();
+    assert!(r.is_ok(), "audit failed: {:?}", r);
+    assert_eq!(r.unwrap(), 6);
+}
+
+fn t_coreutils_elf_parse() {
+    for b in rustos::coreutils::COREUTILS {
+        let l = rustos::elf::ElfLoader::new(b.bytes);
+        assert!(l.is_ok(), "{}: ElfLoader::new failed: {:?}", b.name, l.err());
+        let l = l.unwrap();
+        assert!(!l.is_pie(), "{}: -no-pie should produce ET_EXEC", b.name);
+        assert!(l.entry_point() != 0, "{}: entry_point should be non-zero", b.name);
+    }
+}
+
+fn t_coreutils_find_echo() {
+    let b = rustos::coreutils::find("echo").expect("echo must exist");
+    assert_eq!(b.name, "echo");
+    assert!(b.bytes.len() > 256);
+}
+
+fn t_coreutils_find_miss() {
+    assert!(rustos::coreutils::find("does-not-exist").is_none());
+}
+
+fn t_coreutils_has_exec_load() {
+    use rustos::elf::PT_LOAD;
+    for b in rustos::coreutils::COREUTILS {
+        let l = rustos::elf::ElfLoader::new(b.bytes).unwrap();
+        let mut has_exec_load = false;
+        for ph in l.program_headers() {
+            // PF_X = 1
+            if ph.p_type == PT_LOAD && (ph.p_flags & 1) != 0 {
+                has_exec_load = true;
+                break;
+            }
+        }
+        assert!(has_exec_load, "{}: must have at least one executable PT_LOAD", b.name);
+    }
 }
 
 // Suppress unused-imports lint for paths used only in a few tests.

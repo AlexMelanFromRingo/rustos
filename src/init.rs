@@ -375,4 +375,10 @@ pub fn boot_to_default_runlevel() {
 pub fn init() {
     install_default_services();
     INIT.lock().boot_tick = crate::task::timer::current_ticks();
+
+    // Lay out /bin with the in-tree coreutil binaries so users can
+    // `cat /bin/echo` and (eventually) `exec /bin/echo hi` against
+    // real ELFs rather than shell builtins.
+    let n = crate::coreutils::populate_bin();
+    crate::klog_info!("coreutils: installed {} binaries to /bin", n);
 }

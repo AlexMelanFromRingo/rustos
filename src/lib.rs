@@ -60,6 +60,7 @@ pub mod term;
 pub mod framebuffer;
 pub mod userlib;
 pub mod smp;
+pub mod coreutils;
 
 pub fn init() {
     gdt::init();
