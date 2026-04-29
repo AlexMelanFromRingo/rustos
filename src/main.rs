@@ -175,6 +175,31 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     rustos::drivers::virtio_blk::init();
     rustos::drivers::rtl8139::init();
     rustos::drivers::ahci::init();
+    rustos::drivers::nvme::init();
+    if rustos::drivers::nvme::is_available() {
+        let mut g = rustos::drivers::nvme::NVME.lock();
+        if let Some(n) = g.as_mut() {
+            let bs = 1u64 << n.lba_shift;
+            println!("nvme: ns1 {} blocks × {} bytes ({} MiB)",
+                n.sectors, bs, (n.sectors * bs) / (1024 * 1024));
+            // Sector self-test: 4 KiB write+read on LBA 0.
+            let marker = b"RUSTOS-NVME-SELFTEST-OK-2026A";
+            let mut buf = alloc::vec![0u8; bs as usize];
+            buf[..marker.len()].copy_from_slice(marker);
+            if let Err(e) = n.write(0, 1, &buf) {
+                println!("nvme self-test: write err {}", e);
+            } else {
+                let mut rb = alloc::vec![0u8; bs as usize];
+                if let Err(e) = n.read(0, 1, &mut rb) {
+                    println!("nvme self-test: read err {}", e);
+                } else if &rb[..marker.len()] == marker {
+                    println!("nvme self-test: OK ({} byte round-trip)", marker.len());
+                } else {
+                    println!("nvme self-test: MISMATCH first8={:02x?}", &rb[..8]);
+                }
+            }
+        }
+    }
     if rustos::drivers::ahci::is_available() {
         let g = rustos::drivers::ahci::AHCI.lock();
         if let Some(a) = g.as_ref() {
