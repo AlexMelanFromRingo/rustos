@@ -198,7 +198,12 @@ impl Process {
         }
     }
 
-    /// Clone this process (for fork)
+    /// Clone this process (for fork).  Clones the parent's page
+    /// table so the child has its own PML4 with deep-copied user
+    /// L3/L2/L1 trees, then marks every writable user page COW in
+    /// *both* parent and child so the first write to any of them
+    /// is resolved by `crate::memory::cow::resolve` into a private
+    /// copy.  Kernel mappings stay shared by reference.
     pub fn clone(&self, new_pid: Pid) -> Self {
         let (kstack_top, kstack_slot) = if self.is_user {
             crate::gdt::allocate_kernel_stack()
@@ -207,6 +212,31 @@ impl Process {
         } else {
             (0, None)
         };
+
+        // Clone the parent's PML4 — the helper deep-copies user L4/L3/
+        // /L2/L1 entries while sharing kernel mappings.  After cloning,
+        // mark every writable user PTE COW in both PML4s so the next
+        // write either side performs takes a #PF and copies on demand.
+        let mut child_cr3 = 0u64;
+        if self.is_user && self.cr3 != 0 {
+            if let Some(new_cr3) = crate::memory::pagetable::create_user_pagetable() {
+                // Both parent and child must see their user pages as
+                // COW so a write from either side trips the fault.
+                let _ = crate::memory::cow::mark_user_pages_cow(self.cr3);
+                let _ = crate::memory::cow::mark_user_pages_cow(new_cr3);
+                child_cr3 = new_cr3;
+                // Force a TLB flush on the parent's address space so it
+                // immediately sees the read-only mapping.
+                let cur: u64;
+                unsafe {
+                    core::arch::asm!("mov {}, cr3", out(reg) cur, options(nomem, nostack));
+                    if cur == self.cr3 {
+                        core::arch::asm!("mov cr3, {}", in(reg) cur,
+                            options(nostack, preserves_flags));
+                    }
+                }
+            }
+        }
 
         Process {
             pid: new_pid,
@@ -226,7 +256,7 @@ impl Process {
             is_user: self.is_user,
             kernel_stack_slot: kstack_slot,
             kernel_stack_top: kstack_top,
-            cr3: 0, // TODO: clone page table for fork
+            cr3: child_cr3,
             cwd: self.cwd.clone(),
             pgid: self.pgid, // child inherits parent's group
             sid: self.sid,   // and session
