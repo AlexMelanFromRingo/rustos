@@ -14,13 +14,14 @@ Reference architecture: Linux/Unix-like.
 - [x] Implement slab allocator for kernel objects (Bonwick-style object cache, kmalloc sizes 16..4096, /proc/slabinfo) ✅
 - [x] Add kernel virtual memory allocator (vmalloc/vfree, 64 MiB region, bitmap free list, /vmalloc-test) ✅
 - [x] Guard pages for kernel stack overflow detection ✅
-- [ ] Per-process address spaces (separate page tables per process)
+- [x] Per-process address spaces (private PML4 per user process, kernel mappings shared by reference, user L4 entry deep-cloned) ✅
+- [x] Contiguous DMA allocator (alloc_dma_contig, used by virtio / AHCI / NVMe / NIC drivers) ✅
 
 ### 1.2 Process Management
-- [ ] Per-process page tables (full address space isolation)
+- [x] Per-process page tables (private PML4 per user process; kernel L4 shared by reference; user L4 deep-cloned; CR3 switched in timer ISR) ✅
 - [x] Per-process file descriptor tables (FdTableAccess with process/kernel dispatch) ✅
 - [x] Per-process working directory (Process.cwd, sys_chdir/sys_getcwd, SHELL_CWD fallback) ✅
-- [ ] Proper `fork()` with COW (Copy-On-Write) pages
+- [x] Proper `fork()` with COW (PTE bit 9 marks COW, refcount table, page-fault handler resolves to private frame on write) ✅
 - [x] `waitpid()` with blocking (200k-iter retry loop with HLT yield + WNOHANG support) ✅
 - [x] Signal delivery (SIGTERM, SIGKILL, SIGINT, SIGCHLD, etc.) ✅
 - [x] TTY device abstraction (line discipline, raw/cooked mode) ✅
@@ -105,7 +106,7 @@ Reference architecture: Linux/Unix-like.
 - [x] Ext3-style journal replay (jbd2 magic 0xC03B3998, descriptor + commit walk, marks s_start = 0 after replay) ✅
 
 ### 3.4 Special Filesystems
-- [x] `/proc` — process information filesystem (uptime, meminfo, version, cpuinfo, kmsg, loadavg, stat, per-pid) ✅
+- [x] `/proc` — process information filesystem (uptime, meminfo, version, cpuinfo, kmsg, loadavg, stat, per-pid, interrupts, diskstats, swaps, cmdline, partitions, sys/kernel/{ostype,osrelease,version,hostname}) ✅
 - [x] `/sys` — sysfs (kernel info, device tree: serial, keyboard, timer, rtc, vga) ✅
 - [x] `/dev` — device nodes (null, zero, random, urandom, console, tty, kmsg, mem) ✅
 - [x] `/tmp` — tmpfs (RAM-backed, 128 files, 512 KiB/file) ✅
@@ -116,9 +117,10 @@ Reference architecture: Linux/Unix-like.
 ## Phase 4: Device Drivers
 
 ### 4.1 Storage
-- [ ] AHCI/SATA driver (replace PIO ATA with DMA)
-- [ ] NVMe driver for modern storage
+- [x] AHCI/SATA driver (Intel AHCI 1.3.1; per-port command list + FIS receive area; READ/WRITE_DMA_EXT; polling) ✅
+- [x] NVMe driver (NVM Express 1.4; admin queue + I/O queue; IDENTIFY CONTROLLER + NAMESPACE; READ/WRITE; polling) ✅
 - [x] Virtio-blk for QEMU performance (legacy I/O port layout, contiguous DMA, NO_INTERRUPT poll, ext2 mount on boot) ✅
+- [x] Generic BlockDevice trait (vblk0/sd*/nvme0n1 unified; Ext2 mounts from any backend; per-device stat counters surface in /proc/diskstats) ✅
 - [x] Partition table parsing (MBR; GPT detection via protective entry only) ✅
 
 ### 4.2 Network Stack

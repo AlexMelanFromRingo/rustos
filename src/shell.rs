@@ -772,6 +772,9 @@ impl Shell {
             "lspci" => self.cmd_lspci(),
             "nicstat" => self.cmd_nicstat(),
             "vblk" => self.cmd_vblk(args),
+            "block" | "blkid" => self.cmd_block(),
+            "ahci" => self.cmd_ahci(args),
+            "nvme" => self.cmd_nvme(args),
             "httptest" => self.cmd_httptest(args),
             "unixtest" => self.cmd_unixtest(args),
             "wget" | "curl" => self.cmd_wget(args),
@@ -5664,6 +5667,134 @@ impl Shell {
     }
 
     /// vblk: virtio-blk diagnostics.
+    /// `block` / `blkid` — show every registered block device with its
+    /// size and (reads/sectors-read/writes/sectors-written) counters.
+    fn cmd_block(&self) {
+        let snap = crate::block::snapshot();
+        if snap.is_empty() {
+            println!("(no block devices registered)");
+            return;
+        }
+        println!("NAME      SIZE       READS      RD-SECT  WRITES     WR-SECT");
+        for (name, sectors, (r, sr, w, sw)) in snap {
+            let mib = sectors / 2048;
+            println!("{:<9} {:>5} MiB  {:>9}  {:>9}  {:>7}  {:>9}",
+                name, mib, r, sr, w, sw);
+        }
+    }
+
+    /// `ahci [info|test|read LBA|write LBA HEX]` — diagnose AHCI port 0.
+    fn cmd_ahci(&self, args: &[&str]) {
+        if !crate::drivers::ahci::is_available() {
+            println!("ahci: no controller initialised");
+            return;
+        }
+        let g = crate::drivers::ahci::AHCI.lock();
+        let a = match g.as_ref() { Some(a) => a, None => { println!("ahci: gone"); return; } };
+        if args.is_empty() || args[0] == "info" {
+            println!("AHCI HBA virt {:#x}, {} port(s):", a.hba_virt, a.ports.len());
+            for p in &a.ports {
+                println!("  port {}: {} sectors ({} MiB)",
+                    p.port, p.sectors, p.sectors / 2048);
+            }
+            return;
+        }
+        let port = match a.ports.first() {
+            Some(p) => p,
+            None => { println!("ahci: no ports"); return; }
+        };
+        match args[0] {
+            "read" if args.len() >= 2 => {
+                let lba: u64 = args[1].parse().unwrap_or(0);
+                let mut buf = [0u8; 512];
+                match port.read_sectors(lba, 1, &mut buf) {
+                    Ok(()) => {
+                        println!("ahci: LBA {} (first 64 bytes):", lba);
+                        for i in 0..4 {
+                            print!("  ");
+                            for j in 0..16 {
+                                print!("{:02x} ", buf[i * 16 + j]);
+                            }
+                            println!();
+                        }
+                    }
+                    Err(e) => println!("ahci: {}", e),
+                }
+            }
+            "test" => {
+                let marker = b"AHCI-CLI-TEST";
+                let mut s = [0u8; 512];
+                s[..marker.len()].copy_from_slice(marker);
+                if let Err(e) = port.write_sectors(1024, 1, &s) {
+                    println!("ahci: write: {}", e); return;
+                }
+                let mut rb = [0u8; 512];
+                if let Err(e) = port.read_sectors(1024, 1, &mut rb) {
+                    println!("ahci: read: {}", e); return;
+                }
+                if &rb[..marker.len()] == marker {
+                    println!("ahci: round-trip OK on LBA 1024");
+                } else {
+                    println!("ahci: MISMATCH");
+                }
+            }
+            _ => println!("Usage: ahci [info | test | read LBA]"),
+        }
+    }
+
+    /// `nvme [info|test|read LBA]` — same shape as `ahci`.
+    fn cmd_nvme(&self, args: &[&str]) {
+        if !crate::drivers::nvme::is_available() {
+            println!("nvme: no controller initialised");
+            return;
+        }
+        let mut g = crate::drivers::nvme::NVME.lock();
+        let n = match g.as_mut() { Some(n) => n, None => { println!("nvme: gone"); return; } };
+        if args.is_empty() || args[0] == "info" {
+            let bs = 1u64 << n.lba_shift;
+            println!("nvme: ns{} = {} blocks × {} bytes ({} MiB)",
+                n.nsid, n.sectors, bs, (n.sectors * bs) / (1024 * 1024));
+            return;
+        }
+        match args[0] {
+            "read" if args.len() >= 2 => {
+                let lba: u64 = args[1].parse().unwrap_or(0);
+                let bs = 1usize << n.lba_shift;
+                let mut buf = alloc::vec![0u8; bs];
+                match n.read(lba, 1, &mut buf) {
+                    Ok(()) => {
+                        println!("nvme: LBA {} (first 64 bytes):", lba);
+                        for i in 0..4 {
+                            print!("  ");
+                            for j in 0..16 { print!("{:02x} ", buf[i * 16 + j]); }
+                            println!();
+                        }
+                    }
+                    Err(e) => println!("nvme: {}", e),
+                }
+            }
+            "test" => {
+                let bs = 1usize << n.lba_shift;
+                let marker = b"NVME-CLI-TEST";
+                let mut s = alloc::vec![0u8; bs];
+                s[..marker.len()].copy_from_slice(marker);
+                if let Err(e) = n.write(2048, 1, &s) {
+                    println!("nvme: write: {}", e); return;
+                }
+                let mut rb = alloc::vec![0u8; bs];
+                if let Err(e) = n.read(2048, 1, &mut rb) {
+                    println!("nvme: read: {}", e); return;
+                }
+                if &rb[..marker.len()] == marker {
+                    println!("nvme: round-trip OK on LBA 2048");
+                } else {
+                    println!("nvme: MISMATCH");
+                }
+            }
+            _ => println!("Usage: nvme [info | test | read LBA]"),
+        }
+    }
+
     ///   vblk info        : capacity
     ///   vblk read LBA    : read sector LBA, hex-dump first 64 bytes
     ///   vblk test        : write a marker pattern to LBA 0 then read it back
