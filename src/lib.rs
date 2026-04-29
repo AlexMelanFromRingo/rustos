@@ -61,6 +61,7 @@ pub mod framebuffer;
 pub mod userlib;
 pub mod smp;
 pub mod coreutils;
+pub mod boot_info;
 
 pub fn init() {
     gdt::init();

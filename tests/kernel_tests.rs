@@ -273,6 +273,11 @@ fn run_all() {
     check!("libc: head binary present",                  { t_libc_head_present(); });
     check!("libc: wc references printf via libc",        { t_libc_wc_uses_printf(); });
 
+    // Bootloader migration shim — verifies the shim accepts our current
+    // bootloader-0.9 BootInfo and rejects nonsense values.
+    check!("boot-info: phys_mem_offset is sane",         { t_boot_info_sane(); });
+    check!("boot-info: zero offset is rejected",         { t_boot_info_zero_rejected(); });
+
     // USB stack — register layout, TD/QH bit packing, descriptor parsing,
     // HID boot-protocol report parsing.  All pure data; no real USB hw.
     check!("usb: UHCI register offsets match spec",     { t_usb_uhci_regs(); });
@@ -1760,6 +1765,39 @@ fn t_libc_wc_present() {
 fn t_libc_head_present() {
     let b = rustos::coreutils::find("head").expect("head must exist");
     assert!(b.bytes.len() > 8 * 1024);
+}
+
+fn t_boot_info_sane() {
+    // Construct a KernelBootInfo with the offset our actual boot path
+    // sees (memory::phys_offset() returned the cached value at test
+    // setup), and verify the sanity check passes.
+    let offset = rustos::memory::phys_offset();
+    let bi = rustos::boot_info::KernelBootInfo {
+        phys_mem_offset: offset,
+        memory_map_ptr: core::ptr::null(),
+        memory_map_len: 0,
+    };
+    assert!(bi.is_phys_offset_sane(),
+        "real bootloader-provided offset {:#x} must pass the sanity check",
+        offset);
+}
+
+fn t_boot_info_zero_rejected() {
+    let bi = rustos::boot_info::KernelBootInfo {
+        phys_mem_offset: 0,
+        memory_map_ptr: core::ptr::null(),
+        memory_map_len: 0,
+    };
+    assert!(!bi.is_phys_offset_sane(), "zero offset must be rejected");
+    // A small offset (< 4 GiB) is rejected as either uninitialised or
+    // an obvious user-space pointer.
+    let bi2 = rustos::boot_info::KernelBootInfo {
+        phys_mem_offset: 0x4000_0000, // 1 GiB
+        memory_map_ptr: core::ptr::null(),
+        memory_map_len: 0,
+    };
+    assert!(!bi2.is_phys_offset_sane(),
+        "sub-4-GiB offset must be rejected");
 }
 
 fn t_libc_wc_uses_printf() {

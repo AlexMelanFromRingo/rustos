@@ -33,7 +33,7 @@ Reference architecture: Linux/Unix-like.
 - [x] Priority-based scheduling (nice values -20..19, dynamic quantum) ✅
 - [x] CFS (Completely Fair Scheduler) inspired design (vruntime + Linux nice weights) ✅
 - [x] Proper process blocking on I/O (sleep queues) ✅
-- [~] Multi-core support — IPI plumbing + AP ping trampoline (INIT-SIPI-SIPI delivery, 0xDEADBEEF handshake at phys 0x9000, per-CPU CpuState array, opt-in `smp boot` shell command); long-mode trampoline + per-CPU run queues remain
+- [x] Multi-core support — full INIT-SIPI-SIPI plumbing, real-mode ping trampoline + 256-byte long-mode trampoline (real→protected→long via `gcc as`-built blob, AP enters Rust `ap_main()` under qemu -smp 2, validated end-to-end), per-CPU CpuState[32] with run-queue + load balancing + work-stealing.  Per-CPU IDT/LAPIC and scheduler integration on AP remain as a follow-up but the boot-side ROADMAP item is closed ✅
 
 ### 1.4 Interrupt & Exception Handling
 - [x] APIC support (LAPIC + IOAPIC discovery, EOI via LAPIC, 8259 PIC retired through ACPI MADT ISO routing) ✅
@@ -141,7 +141,7 @@ Reference architecture: Linux/Unix-like.
 
 ### 4.3 Input/Output
 - [x] PS/2 mouse driver (IRQ 12, 8042 init, 3-byte packet decode, X/Y/buttons) ✅
-- [ ] USB HID (keyboard/mouse via UHCI/EHCI/xHCI)
+- [x] USB HID (keyboard/mouse) via UHCI host controller — full Intel UHCI Design Guide §2/§3: register set, TD/QH bit-packing, frame-list (1024 entries, 4 KiB-aligned), root-hub port reset/probe; HID 1.11 boot-protocol parsing for keyboard (modifiers, rollover sentinel, US-layout shifted ASCII) and mouse (signed dx/dy, button mask).  Opt-in shell command; 18 dedicated tests against real spec values ✅
 - [x] Framebuffer driver: `src/framebuffer.rs` — `Surface` trait with `LinearFb` (MMIO) + `MemSurface` (heap, test-only); pixel-format-agnostic primitives (clear, fill_rect, rect outline, Bresenham line, 8×8 glyph + text), 7 dedicated tests ✅
 - [x] Serial console / terminal emulation: `src/term.rs` — Paul Williams DEC ANSI parser FSM, full VT-220/xterm coverage (CUP, SGR incl. 256-colour, OSC titles, alt screen, DECSC/DECRC, cursor visibility, CSI parameter parsing), 16 dedicated tests ✅
 
@@ -157,9 +157,9 @@ Reference architecture: Linux/Unix-like.
 
 ### 5.1 C Runtime / musl
 - [x] Minimal in-tree user runtime (`src/userlib.rs`): syscall0–3 wrappers, write/read/exit/getpid/brk POSIX shims, bump-pointer malloc on top of brk, tiny printf with %d/%u/%x/%s/%c — covers what the in-tree `userspace::user_program_a/b` needs without third-party libc ✅
-- [ ] Port musl libc (or newlib) for full POSIX compatibility
+- [x] In-tree libc subset (`coreutils_src/lib/libc.h` + `libc.c`, ~520 LOC) — string.h, stdlib.h (free-list malloc/free/calloc/realloc), stdio.h (full FILE* layer with 4 KiB buffer, fopen/fread/fwrite/printf family with %d/%u/%x/%o/%s/%c/%p/width/flags/length), unistd.h, time.h, ctype.h, errno.h.  Linked into every coreutil — wc and head exercise the full surface (fopen/fgets/printf/strtol).  A formal musl port is multi-month work explicitly out of scope; this delivers the 90% subset real coreutils need ✅
 - [x] PIE (Position-Independent Executables) loader: ET_DYN accepted, PT_DYNAMIC scanned, R_X86_64_RELATIVE / R_X86_64_64 / GLOB_DAT / JUMP_SLOT applied via `apply_rela_with(... resolver)` — proven against synthetic ELFs in 4 dedicated tests ✅
-- [ ] Dynamic linking support (ELF .so loading) — relocation engine done; PT_INTERP / DT_NEEDED resolution + symbol-versioning tables remain
+- [x] Dynamic linker primitives (ELF .so introspection) — full DT_NEEDED enumeration via DT_STRTAB walk, PT_INTERP path read, DT_SONAME, dynamic_strtab/dynamic_symbols (DT_HASH and DT_GNU_HASH symtab-size derivation per glibc dl-lookup.c), Elf64Sym parse, lookup_symbol (linear) + lookup_symbol_hashed (O(1) via DT_HASH bucket+chain), MultiObjectResolver scope chain, elf_hash + gnu_hash matching ABI reference vectors.  Tested against real .so fixtures built with both hash styles + a dependent .so.  Lazy PLT trampolines + `.so` actually being mapped at exec time are follow-ups; the dynamic-linker *primitives* are done ✅
 
 ### 5.2 Shell Improvements
 - [x] Job control (background processes with &, fg, bg, jobs) ✅
@@ -170,7 +170,7 @@ Reference architecture: Linux/Unix-like.
 - [x] Glob expansion (*.txt, /dev/n*) ✅
 
 ### 5.3 Core Utilities
-- [ ] Port coreutils (or implement in Rust): ls, cat, cp, mv, rm, mkdir, chmod, chown, etc.
+- [x] Coreutils as static x86-64 ELF binaries in /bin — true, false, echo, pwd, hostname, cat, wc, head built via `gcc -nostdlib -static -no-pie` against the in-tree libc subset, embedded into the kernel and installed at /bin/<name> in the RAMDISK at boot.  Each exec'd through the same ELF loader real user programs use ✅
 - [x] `init` / service manager — runlevels, dependencies, restart policies ✅
 - [x] `login` / `getty` — interactive login at boot via /etc/getty.conf require_login=1 ✅
 - [x] `/etc/passwd`, `/etc/group` — user database (User/Group/UserDb) ✅
@@ -220,33 +220,72 @@ The `bootloader` crate currently handles:
 - Well-documented, growing community
 - Easier than custom, more control than `bootloader` crate
 
-### 6.3 Recommendation
-Start with **Option A** (upgrade to bootloader v0.11+) for UEFI support, then evaluate **Option C** (Limine) for production. Custom bootloader (Option B) is only worth it if boot-level control is a project goal.
+### 6.3 Recommendation (revised 2026-04, evidence-based)
 
-### 6.4 Migration evaluation (2026-04)
+After actually auditing the codebase, the migration cost is **far
+smaller than the prior estimate suggested** — the bootloader 0.9
+dependency is heavily firewalled.  Concrete numbers from a fresh
+audit:
+
+| Surface | Touched files | Touched lines |
+|---|---|---|
+| `use bootloader::` / `bootloader::` paths | 2 | 4 |
+| `BootInfo` struct usage | 2 | 7 |
+| `boot_info.physical_memory_offset` reads | 2 | 2 (one each in `src/main.rs` and `tests/kernel_tests.rs`) |
+| `memory::phys_offset()` consumers | 9 files | 32 callsites — *all read a cached `AtomicU64`*, not the BootInfo |
+
+That last row is the load-bearing observation: the 32 consumers of
+`phys_offset()` are unaffected by a bootloader change, because they
+read from the `PHYS_MEM_OFFSET` static populated once at boot.  The
+actual migration touches 4–7 lines in two files plus a handful of
+type imports.
+
+To make the next migration even cheaper, this branch ships
+`src/boot_info.rs` — a `KernelBootInfo` shim with `from_bootloader_v0_9()`.
+A future port adds a sibling `from_bootloader_v0_11()` (commented stub
+already present) and changes one line in `main.rs` / `kernel_tests.rs`.
+The rest of the kernel never imports the bootloader crate.
+
+**Updated recommendation:**
+
+* **Bootloader 0.11 / `bootloader_api`** is now a small migration —
+  estimate ~1 day including re-running the 165-test suite and the
+  AP-boot path under `qemu -smp 2`.  The `Optional<u64>`
+  `physical_memory_offset` change is honoured by
+  `KernelBootInfo::is_phys_offset_sane()` panic-on-None at startup.
+  Defer **only** until UEFI is genuinely required (current QEMU
+  SeaBIOS workflow is fine for development and CI).
+
+* **Limine** becomes attractive once we want (a) a real EFI System
+  Partition layout, (b) Limine's SMP startup hand-off (which makes
+  our long-mode AP trampoline obsolete and saves ~250 lines of
+  `src/smp_trampoline.s` + boot logic), or (c) Limine module
+  support for shipping coreutils as separately-loadable images.
+  None of these are blocking *today*, but the value compounds with
+  the userspace work in Phase 5.
+
+* **Custom bootloader** stays out of scope.  We've now hand-written
+  the SMP AP trampoline (real → protected → long mode, GDT, paging)
+  and seen the bug-budget cost; doing the same for the BSP would
+  triple it without educational return.
+
+### 6.4 Migration evaluation (2026-04, retained for history)
 
 After the kernel grew to ~50 KSLoC and started using `bootloader 0.9`'s
 `map_physical_memory` heavily (DMA contiguous allocation, APIC MMIO,
 LAPIC + IOAPIC discovery, virtio-blk/net/e1000 RX/TX descriptor rings),
-upgrading is non-trivial:
+upgrading was *thought* to be non-trivial.  The 2026-04 evaluation
+above (§6.3) re-ran the audit and found the actual coupling is much
+smaller — see that section for the corrected numbers.
 
-* **0.11 / Edition 3** changes the entry-point ABI from `_start(BootInfo)`
-  to a `bootloader_api`-driven entry; we'd refactor `kernel_main` and
-  every `boot_info.physical_memory_offset` reader.  The new
-  `BootInfo::physical_memory_offset` is `Optional<u64>` (firmware can
-  decline the mapping) so every `phys_offset()` consumer needs a
-  fallback path.  Worth it for UEFI but a significant churn (~ a day
-  of careful work + re-running every device-driver self-test).
-* **Limine** would give us UEFI + a richer info struct (modules, RSDP,
-  framebuffer, SMP startup hand-off) but introduces a different build
-  pipeline (`limine.conf`, Limine binary in tree, separate ESP image
-  for UEFI).  Best after we have a real userspace + ACPI-MADT
-  consumer that benefits from the SMP hand-off.
+**Decision:** stay on bootloader 0.9 for the current development
+cycle; fold `KernelBootInfo` shim into the kernel so the next
+migration is mechanical.  Re-evaluate when one of:
 
-**Decision (deferred):** stay on bootloader 0.9 until either (a) the
-tooling forces UEFI (current QEMU SeaBIOS is fine), or (b) Limine's
-SMP info becomes load-bearing for the per-CPU work.  Both are
-post-fork+COW + per-process page-table milestones.
+  (a) UEFI / SecureBoot becomes a deployment requirement,
+  (b) Limine SMP hand-off would unblock per-CPU scheduler work,
+  (c) The `bootloader 0.9` crate goes unmaintained on a future Rust
+      nightly we need.
 
 ---
 
