@@ -4775,6 +4775,8 @@ impl Shell {
                 println!("Boot attempts : {}", crate::smp::boot_attempts());
                 println!("Boot successes: {}", crate::smp::boot_successes());
                 println!("Alive CPUs    : {}", crate::smp::alive_cpu_count());
+                println!("Total runnable: {}", crate::smp::total_runnable());
+                println!("Least loaded  : CPU {}", crate::smp::least_loaded_cpu());
                 match crate::acpi::parse_madt() {
                     Some(m) => {
                         println!("MADT-detected : {} CPU(s)", m.lapic_ids.len());

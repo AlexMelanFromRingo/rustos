@@ -37,8 +37,14 @@
 //!
 //! Reference: OSDev wiki "Symmetric Multiprocessing", Intel SDM Vol. 3A §8.
 
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use alloc::collections::VecDeque;
+use spin::Mutex;
 use crate::memory::phys_offset;
+
+/// PID type re-exported here so callers don't have to chase down the
+/// `process` module.  Matches `process::pid::Pid`'s underlying repr.
+pub type Pid = u32;
 
 // ---------------------------------------------------------------------------
 // Trampoline parameters
@@ -119,7 +125,6 @@ pub const AP_TRAMPOLINE: &[u8] = &[
 /// adding them doesn't break ABI between modules.
 pub const MAX_CPUS: usize = 32;
 
-#[repr(C)]
 pub struct CpuState {
     /// Local APIC ID — also the slot index.  Set when this slot is
     /// claimed by a successful AP boot, or by `init_bsp()` for slot 0.
@@ -135,6 +140,17 @@ pub struct CpuState {
     /// stack top.  Currently unused — `boot_ap_ping` doesn't transition
     /// out of real mode.
     pub kernel_stack_top: AtomicU64,
+    /// Per-CPU run queue.  Each PID lives on exactly one CPU's queue.
+    /// The scheduler is expected to consume from `run_queue` first and
+    /// only fall through to a global queue / steal from peers when
+    /// empty.  Until the AP-launched scheduler is wired (#131 phase 2),
+    /// only CPU 0's queue is populated, which makes this transparent
+    /// to the existing single-CPU code path.
+    pub run_queue: Mutex<VecDeque<Pid>>,
+    /// Cached length of `run_queue`, updated alongside push/pop.  Lets
+    /// `least_loaded_cpu()` make routing decisions without taking the
+    /// lock — important on the hot enqueue path.
+    pub run_queue_len: AtomicUsize,
 }
 
 impl CpuState {
@@ -144,7 +160,43 @@ impl CpuState {
             alive: AtomicBool::new(false),
             handshake_seen: AtomicU32::new(0),
             kernel_stack_top: AtomicU64::new(0),
+            run_queue: Mutex::new(VecDeque::new()),
+            run_queue_len: AtomicUsize::new(0),
         }
+    }
+
+    /// Push a PID to the back of this CPU's run queue.  O(1).  Updates
+    /// the cached length atomically before releasing the spinlock so
+    /// `least_loaded_cpu` always sees a value `len` that's no greater
+    /// than the queue's actual size.
+    pub fn enqueue(&self, pid: Pid) {
+        let mut q = self.run_queue.lock();
+        q.push_back(pid);
+        self.run_queue_len.store(q.len(), Ordering::Release);
+    }
+
+    /// Pop the front PID, or `None` if the queue is empty.
+    pub fn dequeue(&self) -> Option<Pid> {
+        let mut q = self.run_queue.lock();
+        let p = q.pop_front();
+        self.run_queue_len.store(q.len(), Ordering::Release);
+        p
+    }
+
+    /// Best-effort load metric — racy, but always returns a value the
+    /// queue *had* recently.  Used for routing, never for correctness.
+    pub fn load(&self) -> usize {
+        self.run_queue_len.load(Ordering::Acquire)
+    }
+
+    /// Drain the queue and return all PIDs.  Useful for shutdown and
+    /// for re-routing when a CPU goes offline (work-stealing's coarse
+    /// cousin).
+    pub fn drain(&self) -> alloc::vec::Vec<Pid> {
+        let mut q = self.run_queue.lock();
+        let v: alloc::vec::Vec<Pid> = q.drain(..).collect();
+        self.run_queue_len.store(0, Ordering::Release);
+        v
     }
 }
 
@@ -177,6 +229,75 @@ pub fn alive_cpu_count() -> usize {
 
 pub fn boot_attempts() -> u32 { AP_BOOT_ATTEMPTS.load(Ordering::Relaxed) }
 pub fn boot_successes() -> u32 { AP_BOOT_SUCCESSES.load(Ordering::Relaxed) }
+
+// ---------------------------------------------------------------------------
+// Per-CPU run queue routing
+// ---------------------------------------------------------------------------
+
+/// Sum of every alive CPU's run-queue length.  O(MAX_CPUS), all
+/// atomic loads, no locks.  Useful for `top`-style summaries and
+/// for sanity-checking that PIDs aren't lost when re-routing.
+pub fn total_runnable() -> usize {
+    let mut sum = 0usize;
+    for c in CPUS.iter() {
+        if c.alive.load(Ordering::Acquire) {
+            sum += c.load();
+        }
+    }
+    sum
+}
+
+/// Pick the alive CPU with the smallest run-queue length.  Falls back
+/// to CPU 0 if no CPU is marked alive (e.g. before `init_bsp()`),
+/// which preserves single-CPU semantics during early boot.
+pub fn least_loaded_cpu() -> u8 {
+    let mut best: u8 = 0;
+    let mut best_load: usize = usize::MAX;
+    for (i, c) in CPUS.iter().enumerate() {
+        if !c.alive.load(Ordering::Acquire) { continue; }
+        let load = c.load();
+        if load < best_load {
+            best_load = load;
+            best = i as u8;
+        }
+    }
+    best
+}
+
+/// Enqueue a PID onto the least-loaded CPU and return which CPU got it.
+/// On a 1-CPU system this is always CPU 0 — transparent to existing
+/// single-CPU code paths.
+pub fn enqueue_balanced(pid: Pid) -> u8 {
+    let cpu = least_loaded_cpu();
+    if let Some(slot) = cpu_state(cpu) {
+        slot.enqueue(pid);
+    }
+    cpu
+}
+
+/// Dequeue from a specific CPU.  Used by the per-CPU scheduler tick.
+pub fn dequeue_on(cpu: u8) -> Option<Pid> {
+    cpu_state(cpu).and_then(|c| c.dequeue())
+}
+
+/// Work-stealing: try to take a PID from the most-loaded *other* CPU.
+/// Returns the stolen PID or `None` if no peer has anything to spare.
+/// Conservative: only steals when the victim has at least 2 PIDs, so
+/// we don't ping-pong a single PID between CPUs.
+pub fn steal_from_peer(thief: u8) -> Option<Pid> {
+    let mut victim: Option<u8> = None;
+    let mut victim_load: usize = 1; // require ≥ 2 to even consider
+    for (i, c) in CPUS.iter().enumerate() {
+        if i == thief as usize { continue; }
+        if !c.alive.load(Ordering::Acquire) { continue; }
+        let load = c.load();
+        if load > victim_load {
+            victim_load = load;
+            victim = Some(i as u8);
+        }
+    }
+    victim.and_then(|v| dequeue_on(v))
+}
 
 // ---------------------------------------------------------------------------
 // Trampoline copy + handshake polling

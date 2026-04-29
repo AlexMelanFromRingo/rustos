@@ -210,6 +210,16 @@ fn run_all() {
     check!("smp: cpu_state(MAX-1) is Some",             { t_smp_cpu_state_in_range(); });
     check!("smp: cpu_state(255) is None when MAX<255",  { t_smp_cpu_state_oob(); });
     check!("smp: init_bsp marks BSP slot alive",        { t_smp_init_bsp(); });
+
+    // Per-CPU run queues + load balancing
+    check!("smp: enqueue/dequeue PID round-trip",       { t_smp_pq_round_trip(); });
+    check!("smp: load() reflects queue length",         { t_smp_pq_load(); });
+    check!("smp: dequeue empty returns None",           { t_smp_pq_empty(); });
+    check!("smp: drain returns all and zeros len",      { t_smp_pq_drain(); });
+    check!("smp: total_runnable sums alive CPUs",       { t_smp_pq_total(); });
+    check!("smp: least_loaded picks emptiest CPU",      { t_smp_pq_least_loaded(); });
+    check!("smp: enqueue_balanced routes to slot",      { t_smp_pq_balanced(); });
+    check!("smp: steal_from_peer requires ≥ 2 PIDs",    { t_smp_pq_steal_threshold(); });
 }
 
 // ----------------------------------------------------------------------------
@@ -1170,6 +1180,94 @@ fn t_smp_init_bsp() {
     // Idempotent: a second call is harmless.
     rustos::smp::init_bsp();
     assert!(slot.alive.load(Ordering::Acquire));
+}
+
+// ----------------------------------------------------------------------------
+// Per-CPU run queues + load balancing.  These mutate global per-CPU state,
+// so each test starts by draining whatever the previous test left behind.
+// ----------------------------------------------------------------------------
+
+fn t_smp_pq_round_trip() {
+    let bsp = rustos::apic::lapic_id();
+    let slot = rustos::smp::cpu_state(bsp).expect("BSP slot");
+    let _ = slot.drain();
+    slot.enqueue(101);
+    slot.enqueue(202);
+    slot.enqueue(303);
+    assert_eq!(slot.dequeue(), Some(101));
+    assert_eq!(slot.dequeue(), Some(202));
+    assert_eq!(slot.dequeue(), Some(303));
+    assert_eq!(slot.dequeue(), None);
+}
+
+fn t_smp_pq_load() {
+    let bsp = rustos::apic::lapic_id();
+    let slot = rustos::smp::cpu_state(bsp).expect("BSP slot");
+    let _ = slot.drain();
+    assert_eq!(slot.load(), 0);
+    slot.enqueue(1); assert_eq!(slot.load(), 1);
+    slot.enqueue(2); assert_eq!(slot.load(), 2);
+    let _ = slot.dequeue(); assert_eq!(slot.load(), 1);
+    let _ = slot.drain();
+}
+
+fn t_smp_pq_empty() {
+    let slot = rustos::smp::cpu_state(rustos::apic::lapic_id()).unwrap();
+    let _ = slot.drain();
+    assert_eq!(slot.dequeue(), None);
+}
+
+fn t_smp_pq_drain() {
+    let slot = rustos::smp::cpu_state(rustos::apic::lapic_id()).unwrap();
+    let _ = slot.drain();
+    slot.enqueue(7); slot.enqueue(8); slot.enqueue(9);
+    let v = slot.drain();
+    assert_eq!(v, alloc::vec![7, 8, 9]);
+    assert_eq!(slot.load(), 0);
+}
+
+fn t_smp_pq_total() {
+    let bsp = rustos::apic::lapic_id();
+    let slot = rustos::smp::cpu_state(bsp).unwrap();
+    let _ = slot.drain();
+    assert_eq!(rustos::smp::total_runnable(), 0);
+    slot.enqueue(11); slot.enqueue(22);
+    assert_eq!(rustos::smp::total_runnable(), 2);
+    let _ = slot.drain();
+}
+
+fn t_smp_pq_least_loaded() {
+    // Only the BSP is alive in our test environment, so least_loaded
+    // must always return the BSP regardless of queue depth.
+    let bsp = rustos::apic::lapic_id();
+    let slot = rustos::smp::cpu_state(bsp).unwrap();
+    let _ = slot.drain();
+    assert_eq!(rustos::smp::least_loaded_cpu(), bsp);
+    slot.enqueue(1);
+    assert_eq!(rustos::smp::least_loaded_cpu(), bsp);
+    let _ = slot.drain();
+}
+
+fn t_smp_pq_balanced() {
+    let bsp = rustos::apic::lapic_id();
+    let slot = rustos::smp::cpu_state(bsp).unwrap();
+    let _ = slot.drain();
+    let cpu = rustos::smp::enqueue_balanced(42);
+    assert_eq!(cpu, bsp);
+    assert_eq!(slot.dequeue(), Some(42));
+}
+
+fn t_smp_pq_steal_threshold() {
+    // Single-CPU box: steal_from_peer always returns None because
+    // there *is* no peer.  This verifies the iteration's "skip
+    // self" logic and the "≥ 2 PIDs" threshold.
+    let bsp = rustos::apic::lapic_id();
+    let slot = rustos::smp::cpu_state(bsp).unwrap();
+    let _ = slot.drain();
+    slot.enqueue(1); slot.enqueue(2); slot.enqueue(3);
+    assert_eq!(rustos::smp::steal_from_peer(bsp), None,
+        "thief must not steal from itself");
+    let _ = slot.drain();
 }
 
 // Suppress unused-imports lint for paths used only in a few tests.
