@@ -146,6 +146,34 @@ fn run_all() {
     check!("ramdisk: write + read round-trip",          { t_ramdisk_round_trip(); });
     check!("ramdisk: list returns the file we wrote",   { t_ramdisk_list(); });
     check!("ramdisk: delete removes file",              { t_ramdisk_delete(); });
+
+    // Terminal state machine — the new VT-220/xterm parser.
+    check!("term: prints printable ASCII",              { t_term_print(); });
+    check!("term: routes C0 controls",                  { t_term_c0(); });
+    check!("term: ESC[H goes to (1,1)",                 { t_term_cup_default(); });
+    check!("term: ESC[10;20H positions cursor",         { t_term_cup_args(); });
+    check!("term: ESC[A/B/C/D move cursor",             { t_term_arrows(); });
+    check!("term: ESC[2J clears whole display",         { t_term_clear_display(); });
+    check!("term: ESC[K erases line",                   { t_term_erase_line(); });
+    check!("term: ESC[31m → SetForeground(red)",        { t_term_sgr_fg(); });
+    check!("term: ESC[38;5;208m → 256-colour fg",       { t_term_sgr_256(); });
+    check!("term: ESC[1;4m → bold + underline",         { t_term_sgr_attrs(); });
+    check!("term: ESC[0m emits ResetAttrs",             { t_term_sgr_reset(); });
+    check!("term: ESC]0;title BEL → SetTitle",          { t_term_osc_title(); });
+    check!("term: ESC[?1049h toggles alt screen",       { t_term_alt_screen(); });
+    check!("term: ESC[?25l hides cursor",               { t_term_cursor_vis(); });
+    check!("term: ESC 7 / ESC 8 save+restore cursor",   { t_term_decsc(); });
+    check!("term: malformed CSI returns to ground",     { t_term_malformed(); });
+
+    // Framebuffer drawing — runs against an in-memory MemSurface so
+    // no actual video hardware is touched.
+    check!("fb: clear sets every pixel to colour",      { t_fb_clear(); });
+    check!("fb: put_pixel + read_pixel round-trip",     { t_fb_pixel_rw(); });
+    check!("fb: out-of-bounds writes are dropped",      { t_fb_oob(); });
+    check!("fb: fill_rect fills exactly that region",   { t_fb_fill_rect(); });
+    check!("fb: rect outlines exactly perimeter",       { t_fb_rect_outline(); });
+    check!("fb: line draws Bresenham endpoints",        { t_fb_line(); });
+    check!("fb: glyph8x8 rasterises bitmap rows",       { t_fb_glyph(); });
 }
 
 // ----------------------------------------------------------------------------
@@ -706,6 +734,192 @@ fn t_ramdisk_delete() {
     assert!(rd.exists("zap.txt"));
     rd.delete("zap.txt").expect("delete");
     assert!(!rd.exists("zap.txt"));
+}
+
+// ----------------------------------------------------------------------------
+// Terminal parser
+// ----------------------------------------------------------------------------
+
+use rustos::term::{Parser, Event};
+
+fn feed(parser: &mut Parser, bytes: &[u8]) -> alloc::vec::Vec<Event> {
+    let mut out = alloc::vec::Vec::new();
+    for &b in bytes {
+        out.extend(parser.feed(b));
+    }
+    out
+}
+
+fn t_term_print() {
+    let mut p = Parser::new();
+    let evs = feed(&mut p, b"hi");
+    assert_eq!(evs, vec![Event::Print(b'h'), Event::Print(b'i')]);
+}
+fn t_term_c0() {
+    let mut p = Parser::new();
+    let evs = feed(&mut p, b"\x07\x08\x09\x0A\x0D");
+    assert_eq!(evs, vec![Event::Bell, Event::Backspace,
+        Event::HorizontalTab, Event::Newline, Event::CarriageReturn]);
+}
+fn t_term_cup_default() {
+    let mut p = Parser::new();
+    let evs = feed(&mut p, b"\x1b[H");
+    assert_eq!(evs, vec![Event::CursorTo { row: 1, col: 1 }]);
+}
+fn t_term_cup_args() {
+    let mut p = Parser::new();
+    let evs = feed(&mut p, b"\x1b[10;20H");
+    assert_eq!(evs, vec![Event::CursorTo { row: 10, col: 20 }]);
+}
+fn t_term_arrows() {
+    let mut p = Parser::new();
+    let evs = feed(&mut p, b"\x1b[3A\x1b[B\x1b[5C\x1b[D");
+    assert_eq!(evs, vec![
+        Event::CursorUp(3),
+        Event::CursorDown(1),
+        Event::CursorForward(5),
+        Event::CursorBack(1),
+    ]);
+}
+fn t_term_clear_display() {
+    let mut p = Parser::new();
+    let evs = feed(&mut p, b"\x1b[2J");
+    assert_eq!(evs, vec![Event::EraseDisplay(2)]);
+}
+fn t_term_erase_line() {
+    let mut p = Parser::new();
+    let evs = feed(&mut p, b"\x1b[K\x1b[1K");
+    assert_eq!(evs, vec![Event::EraseLine(0), Event::EraseLine(1)]);
+}
+fn t_term_sgr_fg() {
+    let mut p = Parser::new();
+    let evs = feed(&mut p, b"\x1b[31m");
+    assert_eq!(evs, vec![Event::SetForeground(1)]); // red
+}
+fn t_term_sgr_256() {
+    let mut p = Parser::new();
+    let evs = feed(&mut p, b"\x1b[38;5;208m");
+    assert_eq!(evs, vec![Event::SetForeground(208)]);
+}
+fn t_term_sgr_attrs() {
+    let mut p = Parser::new();
+    let evs = feed(&mut p, b"\x1b[1;4m");
+    assert_eq!(evs, vec![Event::SetBold(true), Event::SetUnderline(true)]);
+}
+fn t_term_sgr_reset() {
+    let mut p = Parser::new();
+    let evs = feed(&mut p, b"\x1b[0m");
+    assert_eq!(evs, vec![Event::ResetAttrs]);
+    let evs2 = feed(&mut p, b"\x1b[m");
+    assert_eq!(evs2, vec![Event::ResetAttrs]);
+}
+fn t_term_osc_title() {
+    let mut p = Parser::new();
+    let evs = feed(&mut p, b"\x1b]0;hello\x07");
+    assert_eq!(evs, vec![Event::SetTitle("hello".into())]);
+}
+fn t_term_alt_screen() {
+    let mut p = Parser::new();
+    let on = feed(&mut p, b"\x1b[?1049h");
+    assert_eq!(on, vec![Event::AlternateScreen(true)]);
+    let off = feed(&mut p, b"\x1b[?1049l");
+    assert_eq!(off, vec![Event::AlternateScreen(false)]);
+}
+fn t_term_cursor_vis() {
+    let mut p = Parser::new();
+    let evs = feed(&mut p, b"\x1b[?25l\x1b[?25h");
+    assert_eq!(evs, vec![Event::ShowCursor(false), Event::ShowCursor(true)]);
+}
+fn t_term_decsc() {
+    let mut p = Parser::new();
+    let evs = feed(&mut p, b"\x1b7\x1b8");
+    assert_eq!(evs, vec![Event::SaveCursor, Event::RestoreCursor]);
+}
+fn t_term_malformed() {
+    // Garbage CSI should not panic; later valid sequence still parsed.
+    let mut p = Parser::new();
+    let _ = feed(&mut p, b"\x1b[\x07"); // BEL inside CSI param → reset
+    let evs = feed(&mut p, b"\x1b[H");
+    assert_eq!(evs, vec![Event::CursorTo { row: 1, col: 1 }]);
+}
+
+// ----------------------------------------------------------------------------
+// Framebuffer
+// ----------------------------------------------------------------------------
+
+use rustos::framebuffer::{Surface, MemSurface, clear as fb_clear,
+    fill_rect, rect, line, glyph8x8};
+
+fn t_fb_clear() {
+    let mut s = MemSurface::new(8, 8);
+    fb_clear(&mut s, 7);
+    for y in 0..8 {
+        for x in 0..8 {
+            assert_eq!(s.read_pixel(x, y), 7);
+        }
+    }
+}
+fn t_fb_pixel_rw() {
+    let mut s = MemSurface::new(4, 4);
+    s.put_pixel(2, 1, 42);
+    assert_eq!(s.read_pixel(2, 1), 42);
+    assert_eq!(s.read_pixel(0, 0), 0);
+}
+fn t_fb_oob() {
+    let mut s = MemSurface::new(4, 4);
+    s.put_pixel(99, 99, 5); // must not panic, must not write
+    assert_eq!(s.read_pixel(99, 99), 0);
+    // The valid range stays untouched.
+    for y in 0..4 { for x in 0..4 { assert_eq!(s.read_pixel(x, y), 0); } }
+}
+fn t_fb_fill_rect() {
+    let mut s = MemSurface::new(8, 8);
+    fill_rect(&mut s, 2, 2, 3, 4, 9);
+    for y in 0..8 {
+        for x in 0..8 {
+            let inside = (2..5).contains(&x) && (2..6).contains(&y);
+            assert_eq!(s.read_pixel(x, y), if inside { 9 } else { 0 },
+                "pixel ({},{}) wrong", x, y);
+        }
+    }
+}
+fn t_fb_rect_outline() {
+    let mut s = MemSurface::new(6, 6);
+    rect(&mut s, 1, 1, 4, 4, 3);
+    // Perimeter set; interior (2..4, 2..4) untouched.
+    assert_eq!(s.read_pixel(1, 1), 3); // corners
+    assert_eq!(s.read_pixel(4, 1), 3);
+    assert_eq!(s.read_pixel(1, 4), 3);
+    assert_eq!(s.read_pixel(4, 4), 3);
+    assert_eq!(s.read_pixel(2, 2), 0); // interior
+    assert_eq!(s.read_pixel(3, 3), 0);
+}
+fn t_fb_line() {
+    let mut s = MemSurface::new(8, 8);
+    line(&mut s, 0, 0, 7, 7, 5);
+    // Diagonal: every (i, i) should be 5.
+    for i in 0..8 {
+        assert_eq!(s.read_pixel(i, i), 5,
+            "diagonal pixel ({},{}) missing", i, i);
+    }
+}
+fn t_fb_glyph() {
+    // A glyph that draws a small "L":
+    //   row 0: 1000 0000  → only top-left pixel set
+    //   row 1: 1000 0000
+    //   row 2: 1000 0000
+    //   row 3: 1100 0000  → top-left + one to the right
+    //   rest: 0
+    let glyph = [0x80, 0x80, 0x80, 0xC0, 0, 0, 0, 0];
+    let mut s = MemSurface::new(8, 8);
+    glyph8x8(&mut s, 0, 0, &glyph, 6, 0);
+    assert_eq!(s.read_pixel(0, 0), 6);
+    assert_eq!(s.read_pixel(0, 1), 6);
+    assert_eq!(s.read_pixel(0, 2), 6);
+    assert_eq!(s.read_pixel(0, 3), 6);
+    assert_eq!(s.read_pixel(1, 3), 6);
+    assert_eq!(s.read_pixel(1, 0), 0);
+    assert_eq!(s.read_pixel(7, 7), 0);
 }
 
 // Suppress unused-imports lint for paths used only in a few tests.

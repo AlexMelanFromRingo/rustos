@@ -56,6 +56,8 @@ pub mod acpi;
 pub mod symbols;
 pub mod block;
 pub mod interrupt_stats;
+pub mod term;
+pub mod framebuffer;
 
 pub fn init() {
     gdt::init();
