@@ -281,6 +281,7 @@ fn run_all() {
     check!("coreutils: ls binary is ET_EXEC",            { t_coreutils_ls_exec(); });
     check!("sys_getdents64: empty buffer rejected",      { t_getdents_empty_rejected(); });
     check!("sys_getdents64: enumerates /bin",            { t_getdents_lists_bin(); });
+    check!("coreutils: linked at USER_SPACE_START",      { t_coreutils_link_addr(); });
 
     // Bootloader migration shim — verifies the shim accepts our current
     // bootloader-0.9 BootInfo and rejects nonsense values.
@@ -1946,6 +1947,24 @@ fn t_coreutils_echo_in_bin() {
         data.len(), embedded.len());
     assert_eq!(&data[..], embedded,
         "byte-for-byte match between embedded blob and RAMDISK copy");
+}
+
+fn t_coreutils_link_addr() {
+    // Every coreutil must link at or above USER_SPACE_START (0x0100_0000)
+    // so the kernel's ELF loader doesn't skip its PT_LOAD segments as
+    // "kernel space."  We exposed USER_SPACE_START via memory::userspace
+    // so this test stays in sync if the constant moves.
+    let user_start: u64 = 0x0100_0000;
+    for b in rustos::coreutils::COREUTILS {
+        let l = rustos::elf::ElfLoader::new(b.bytes).unwrap();
+        let entry = l.entry_point();
+        assert!(entry >= user_start,
+            "{}: entry 0x{:x} must be >= USER_SPACE_START 0x{:x}",
+            b.name, entry, user_start);
+        // Plausible upper bound — anywhere in user half is fine.
+        assert!(entry < 0x0000_8000_0000_0000,
+            "{}: entry must be in user-half canonical range", b.name);
+    }
 }
 
 fn t_coreutils_ls_exec() {

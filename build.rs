@@ -282,12 +282,19 @@ fn build_coreutils(out_dir: &str) {
         // protector, static + no-pie for classical ET_EXEC, build-id
         // off so the binary is reproducible, no-exec stack annotation
         // to silence binutils warnings, -I lib/ for libc.h.
+        // Link at 0x01000000 — the kernel's USER_SPACE_START (16 MiB).
+        // The gcc default of 0x400000 lands BELOW our user-space window
+        // and the ELF loader skips those segments as "kernel space."
+        // -Ttext-segment forces the executable's PT_LOAD to start at
+        // our user-space base; binutils ld picks 0x1000000 as the new
+        // base of .text.
         let r = Command::new("gcc")
             .args(&[
                 "-nostdlib", "-static", "-ffreestanding", "-fno-builtin",
                 "-fno-stack-protector", "-no-pie", "-O2",
                 "-Wl,--build-id=none",
                 "-Wl,-z,noexecstack",
+                "-Wl,-Ttext-segment=0x01000000",
                 "-I", &format!("{}/lib", src_dir),
                 "-o", &elf_path,
                 &format!("{}/crt.s", src_dir),
