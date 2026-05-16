@@ -267,7 +267,7 @@ fn run_all() {
     // In-tree coreutils — built as static x86-64 ELFs by gcc and
     // embedded by build.rs.  Each must pass an audit and parse via the
     // existing ElfLoader.
-    check!("coreutils: count is 19 utilities",           { t_coreutils_count(); });
+    check!("coreutils: count is 20 utilities",           { t_coreutils_count(); });
     check!("coreutils: audit passes for every blob",     { t_coreutils_audit(); });
     check!("coreutils: ElfLoader parses every blob",     { t_coreutils_elf_parse(); });
     check!("coreutils: 'echo' resolves by name",         { t_coreutils_find_echo(); });
@@ -1832,14 +1832,14 @@ fn t_dyn_dependent_needed() {
 // ----------------------------------------------------------------------------
 
 fn t_coreutils_count() {
-    // 19 utilities: 17 prior + chmod, chown.
-    assert_eq!(rustos::coreutils::count(), 19);
+    // 20 utilities: 19 prior + date.
+    assert_eq!(rustos::coreutils::count(), 20);
 }
 
 fn t_coreutils_audit() {
     let r = rustos::coreutils::audit();
     assert!(r.is_ok(), "audit failed: {:?}", r);
-    assert_eq!(r.unwrap(), 19);
+    assert_eq!(r.unwrap(), 20);
 }
 
 fn t_coreutils_elf_parse() {
@@ -2058,7 +2058,7 @@ fn t_getdents_lists_bin() {
     for util in ["true", "false", "echo", "pwd", "hostname", "cat", "wc", "head", "ls",
                  "mkdir", "rm", "cp", "mv",
                  "sleep", "seq", "basename", "dirname",
-                 "chmod", "chown"] {
+                 "chmod", "chown", "date"] {
         assert!(names.iter().any(|n| n == util),
             "/bin should contain {}, got {:?}", util, names);
     }

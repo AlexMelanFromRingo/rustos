@@ -272,6 +272,7 @@ fn build_coreutils(out_dir: &str) {
         "mkdir", "rm", "cp", "mv",
         "sleep", "seq", "basename", "dirname",
         "chmod", "chown",
+        "date",
     ];
     let mut binaries: Vec<(String, String, usize)> = Vec::new();
 
