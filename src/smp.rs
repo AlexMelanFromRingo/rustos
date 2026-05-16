@@ -140,6 +140,13 @@ pub struct CpuState {
     /// stack top.  Currently unused — `boot_ap_ping` doesn't transition
     /// out of real mode.
     pub kernel_stack_top: AtomicU64,
+    /// Per-CPU LAPIC-timer heartbeat counter — incremented by this
+    /// CPU's `ap_heartbeat_handler` on every periodic LAPIC-timer
+    /// interrupt.  Lets the BSP observe "AP is alive and servicing
+    /// interrupts" rather than just "AP entered Rust ap_main and
+    /// halted."  Reads from any CPU are safe (Acquire), the producer
+    /// is the AP itself in IRQ context.
+    pub heartbeat: AtomicU64,
     /// Per-CPU run queue.  Each PID lives on exactly one CPU's queue.
     /// The scheduler is expected to consume from `run_queue` first and
     /// only fall through to a global queue / steal from peers when
@@ -160,6 +167,7 @@ impl CpuState {
             alive: AtomicBool::new(false),
             handshake_seen: AtomicU32::new(0),
             kernel_stack_top: AtomicU64::new(0),
+            heartbeat: AtomicU64::new(0),
             run_queue: Mutex::new(VecDeque::new()),
             run_queue_len: AtomicUsize::new(0),
         }
@@ -633,6 +641,7 @@ pub fn boot_ap_long_mode(target: u8) -> Result<bool, &'static str> {
     // Bounded poll for the 64-bit handshake.  Trampoline writes it from
     // long-mode code right before tail-calling Rust, so observing it
     // means CR0.PE → CR0.PG → CS reload all completed.
+    let lm_alive_before = AP_LM_ALIVE.load(Ordering::Acquire);
     for _ in 0..5_000_000u32 {
         let v = unsafe { read_lm_handshake() };
         if v == AP_LM_HANDSHAKE_MAGIC {
@@ -641,6 +650,15 @@ pub fn boot_ap_long_mode(target: u8) -> Result<bool, &'static str> {
                 slot.kernel_stack_top.store(stack_top, Ordering::Release);
             }
             AP_BOOT_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+            // Wait briefly for the AP to execute its first ap_main
+            // instructions (the AP_LM_ALIVE.fetch_add) — bridges the
+            // handshake-write → tail-jump-to-Rust race.  100K spin =
+            // ~300 μs on a modern CPU; AP only needs to retire one
+            // atomic add before the BSP returns.
+            for _ in 0..100_000u32 {
+                if AP_LM_ALIVE.load(Ordering::Acquire) > lm_alive_before { break; }
+                core::hint::spin_loop();
+            }
             return Ok(true);
         }
         core::hint::spin_loop();
@@ -655,9 +673,13 @@ static AP_IDT_LOADED: AtomicU32 = AtomicU32::new(0);
 /// Counter of APs that successfully completed `apic::init_ap()` (LAPIC
 /// software-enabled, SVR + TPR programmed) on themselves.
 static AP_LAPIC_READY: AtomicU32 = AtomicU32::new(0);
+static AP_TIMER_PROGRAMMED: AtomicU32 = AtomicU32::new(0);
+static AP_STI_DONE: AtomicU32 = AtomicU32::new(0);
 
-pub fn ap_idt_loaded()  -> u32 { AP_IDT_LOADED.load(Ordering::Acquire) }
-pub fn ap_lapic_ready() -> u32 { AP_LAPIC_READY.load(Ordering::Acquire) }
+pub fn ap_idt_loaded()       -> u32 { AP_IDT_LOADED.load(Ordering::Acquire) }
+pub fn ap_lapic_ready()      -> u32 { AP_LAPIC_READY.load(Ordering::Acquire) }
+pub fn ap_timer_programmed() -> u32 { AP_TIMER_PROGRAMMED.load(Ordering::Acquire) }
+pub fn ap_sti_done()         -> u32 { AP_STI_DONE.load(Ordering::Acquire) }
 
 /// Rust entry point for an AP that completed the long-mode trampoline.
 ///
@@ -699,13 +721,50 @@ pub extern "C" fn ap_main(apic_id: u32) -> ! {
     // BSP's apic::init() to have run already (it shares the cached
     // LAPIC virt-base).  If somehow it didn't, we just skip — the AP
     // is harmless without LAPIC, just won't receive IPIs.
-    if crate::apic::init_ap().is_ok() {
+    let lapic_ok = crate::apic::init_ap().is_ok();
+    if lapic_ok {
         AP_LAPIC_READY.fetch_add(1, Ordering::AcqRel);
     }
 
-    // Step 4: HLT loop.  Interrupts off until the per-CPU scheduler
-    // is wired (TODO: enable IF + register a per-CPU timer tick).
+    // Step 4: program this CPU's LAPIC timer to fire vector 0x70
+    // periodically.  10_000_000 cycles at divide-by-1 ≈ 10 ms on a
+    // 1 GHz APIC bus (QEMU emulates this).  Once we enable IF, the
+    // AP heartbeat counter starts ticking — the BSP can observe
+    // "AP is alive and servicing interrupts" not just "AP halted in
+    // long mode."
+    //
+    // The HLT in the loop below isn't a no-op — when a timer IRQ
+    // retires, control returns into the HLT instruction's successor
+    // (i.e., back to the top of the loop), so we sleep until the
+    // next firing.  Power-efficient + responsive.
+    if lapic_ok {
+        // 1 second period (1 billion cycles).  Under QEMU TCG the
+        // LAPIC-timer firing path is fragile; once the timer DOES
+        // fire it can swamp the AP and starve the BSP via the host
+        // thread's vCPU scheduler.  We use a very long period so the
+        // structural wiring (LVT + INITIAL_COUNT programmed, IF=1)
+        // is observable via counters without inducing IRQ flood.
+        // Production / KVM can override via this constant when a
+        // shorter heartbeat is actually wanted.
+        crate::apic::program_lapic_timer(
+            crate::interrupts::AP_HEARTBEAT_VECTOR,
+            1_000_000_000,
+        );
+        AP_TIMER_PROGRAMMED.fetch_add(1, Ordering::AcqRel);
+        unsafe { core::arch::asm!("sti", options(nomem, nostack)); }
+        AP_STI_DONE.fetch_add(1, Ordering::AcqRel);
+    }
+
+    // Step 5: idle loop.  Heartbeat fires through the IDT slot we
+    // installed; the rest of the kernel sees activity via
+    // cpu_state(id).heartbeat.
     loop { unsafe { core::arch::asm!("hlt", options(nomem, nostack)); } }
+}
+
+/// Return this CPU's heartbeat counter — for shell / test
+/// observation of how much time the AP has been running.
+pub fn heartbeat_of(apic_id: u8) -> u64 {
+    cpu_state(apic_id).map(|s| s.heartbeat.load(Ordering::Acquire)).unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------

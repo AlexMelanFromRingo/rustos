@@ -63,8 +63,50 @@ lazy_static! {
             .set_handler_fn(secondary_ata_interrupt_handler);
         idt[InterruptIndex::Mouse.as_usize()]
             .set_handler_fn(mouse_interrupt_handler);
+
+        // AP heartbeat — vector 0x70.  Programmed from `apic::
+        // program_lapic_timer` on each AP after it loads the IDT.
+        // The handler increments that CPU's per-CPU heartbeat
+        // counter and writes EOI; no scheduling decisions yet.
+        idt[AP_HEARTBEAT_VECTOR as usize]
+            .set_handler_fn(ap_heartbeat_handler);
+
+        // Spurious interrupt — LAPIC delivers this when it has
+        // nothing else to fire (Intel SDM Vol. 3A §10.9).  Without
+        // a handler the CPU triple-faults on first occurrence,
+        // which is exactly what we hit when an AP STI'd before
+        // this entry existed.  Don't EOI — spurious is by definition
+        // never officially acknowledged by the LAPIC.
+        idt[0xFF].set_handler_fn(spurious_handler);
         idt
     };
+}
+
+extern "x86-interrupt" fn spurious_handler(_sf: x86_64::structures::idt::InterruptStackFrame) {
+    // No-op: per Intel SDM, the spurious vector must NOT issue EOI.
+    // Just return and let the CPU resume.
+}
+
+/// Vector for the per-CPU LAPIC-timer heartbeat.  Picked above the
+/// PIC-mapped range (0x20..0x30) and any IRQ assignments, well below
+/// the spurious vector 0xFF.
+pub const AP_HEARTBEAT_VECTOR: u8 = 0x70;
+
+/// Global "any AP heartbeat fired" tripwire — incremented unconditionally
+/// from the handler so we can tell "handler invoked, but per-CPU dispatch
+/// broken" apart from "handler never invoked."
+pub static AP_HEARTBEAT_TOTAL: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// AP heartbeat ISR.  Runs in interrupt context on the AP that fired
+/// the timer.  Reads its own LAPIC ID to update the right per-CPU slot.
+extern "x86-interrupt" fn ap_heartbeat_handler(_sf: x86_64::structures::idt::InterruptStackFrame) {
+    AP_HEARTBEAT_TOTAL.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+    let id = crate::apic::lapic_id();
+    if let Some(slot) = crate::smp::cpu_state(id) {
+        slot.heartbeat.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+    }
+    crate::apic::eoi();
 }
 
 pub fn init_idt() {

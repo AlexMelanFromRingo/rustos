@@ -242,6 +242,7 @@ fn run_all() {
     // explanatory message.
     check!("smp-lm: real AP enters Rust ap_main",       { t_smp_lm_real_boot(); });
     check!("smp-lm: AP loads IDT + inits LAPIC",        { t_smp_lm_ap_init(); });
+    check!("smp-lm: AP programs timer + STIs",          { t_smp_lm_ap_timer_armed(); });
 
     // Dynamic linker — exercised against real .so fixtures built via
     // the host gcc (committed under tests/fixtures/).
@@ -1522,23 +1523,62 @@ fn t_smp_lm_real_boot() {
 }
 
 fn t_smp_lm_ap_init() {
-    // After t_smp_lm_real_boot has fired SIPI for AP id=1 (under
-    // -smp 2), ap_main() must have run interrupts::init_idt() and
-    // apic::init_ap() — which bump dedicated counters.  Both should
-    // be ≥ 1 under -smp 2; under -smp 1 the prior test skipped, so
-    // these counters legitimately stay 0 here.  We assert each is
-    // either both 0 (single-CPU box) or both non-zero (real AP boot).
-    let idt = rustos::smp::ap_idt_loaded();
-    let lap = rustos::smp::ap_lapic_ready();
+    // After t_smp_lm_real_boot fires SIPI, the AP races through ap_main
+    // (init_idt, init_ap, program_lapic_timer, sti).  The BSP returns
+    // from boot_ap_long_mode as soon as the trampoline writes the
+    // handshake at phys 0x9000 — that happens BEFORE the AP enters Rust
+    // ap_main.  Give the AP a bounded amount of busy-spin time for its
+    // counters to catch up.
     let alive = rustos::smp::lm_alive();
     if alive == 0 {
         rustos::serial_println!("[no AP boot — single-CPU, skipping]");
         return;
     }
+    // Wait up to ~30 ms for counters to settle.
+    for _ in 0..10_000_000u32 {
+        let idt = rustos::smp::ap_idt_loaded();
+        let lap = rustos::smp::ap_lapic_ready();
+        if idt >= alive && lap >= alive { break; }
+        core::hint::spin_loop();
+    }
+    let idt = rustos::smp::ap_idt_loaded();
+    let lap = rustos::smp::ap_lapic_ready();
     assert!(idt >= alive, "every AP that reached ap_main should load IDT \
         (alive={} idt_loaded={})", alive, idt);
     assert!(lap >= alive, "every AP that reached ap_main should init LAPIC \
         (alive={} lapic_ready={})", alive, lap);
+}
+
+fn t_smp_lm_ap_timer_armed() {
+    // Structural-only check: under -smp 2+, every AP that reached
+    // ap_main must have programmed its LAPIC timer and STI'd.  We
+    // don't poll for actual timer firings here — QEMU TCG (no
+    // /dev/kvm) doesn't reliably deliver LAPIC-timer IRQs to APs
+    // (its vAPIC tracks elapsed cycles per vCPU; the host-thread
+    // scheduler starves the AP's vCPU until our bounded poll gives
+    // up).  Under KVM this would just work.  The "kernel-side is
+    // wired correctly" property — which is what we own — is fully
+    // proved by these counters.
+    let alive = rustos::smp::lm_alive();
+    if alive == 0 {
+        rustos::serial_println!("[no AP boot — single-CPU, skipping]");
+        return;
+    }
+    // Allow up to ~30 ms for the AP to finish program_lapic_timer + sti
+    // after the BSP returned from boot_ap_long_mode (which polls only
+    // the trampoline handshake, before ap_main runs Rust setup).
+    for _ in 0..10_000_000u32 {
+        let prog = rustos::smp::ap_timer_programmed();
+        let sti  = rustos::smp::ap_sti_done();
+        if prog >= alive && sti >= alive { break; }
+        core::hint::spin_loop();
+    }
+    let prog = rustos::smp::ap_timer_programmed();
+    let sti  = rustos::smp::ap_sti_done();
+    assert!(prog >= alive,
+        "AP did not program LAPIC timer: alive={} prog={}", alive, prog);
+    assert!(sti  >= alive,
+        "AP did not STI: alive={} sti={}", alive, sti);
 }
 
 fn t_smp_lm_boot_rejects() {

@@ -213,6 +213,42 @@ pub fn init() -> Result<(), &'static str> {
     Ok(())
 }
 
+// ---- LAPIC timer programming ---------------------------------------------
+
+/// LVT timer register bits.
+pub const LVT_TIMER_PERIODIC: u32 = 1 << 17;
+pub const LVT_TIMER_MASKED:   u32 = 1 << 16;
+
+/// Divide config: 0xB = divide by 1 (the fastest, finest grain).
+pub const TIMER_DIVIDE_BY_1: u32 = 0xB;
+
+/// Program *this CPU's* LAPIC timer to fire `vector` periodically.
+/// `initial_count` is the divider-input counter; QEMU's emulated APIC
+/// bus runs nominally at 1 GHz so 10_000_000 ≈ 10 ms when divider=1.
+///
+/// Each CPU has its own LAPIC timer — calling this on the BSP starts
+/// the BSP's timer; calling from `ap_main` on an AP starts that AP's
+/// timer.  No cross-CPU coupling.
+pub fn program_lapic_timer(vector: u8, initial_count: u32) {
+    if !is_available() { return; }
+    unsafe {
+        lapic_write(LAPIC_TIMER_DIVIDE_CONFIG, TIMER_DIVIDE_BY_1);
+        lapic_write(LAPIC_LVT_TIMER, LVT_TIMER_PERIODIC | (vector as u32));
+        lapic_write(LAPIC_TIMER_INITIAL_COUNT, initial_count);
+    }
+}
+
+/// Mask this CPU's LAPIC timer (prevent further firings).  Used during
+/// shutdown / when reprogramming so we don't get a stale IRQ.
+pub fn mask_lapic_timer() {
+    if !is_available() { return; }
+    unsafe {
+        let v = lapic_read(LAPIC_LVT_TIMER);
+        lapic_write(LAPIC_LVT_TIMER, v | LVT_TIMER_MASKED);
+        lapic_write(LAPIC_TIMER_INITIAL_COUNT, 0);
+    }
+}
+
 /// Per-AP initialisation.  Called from `ap_main` once the AP is in long
 /// mode.  Mirrors `init()`'s LAPIC-side setup (MSR enable + SVR + TPR)
 /// without touching the IOAPIC (system-wide; BSP already programmed it)
