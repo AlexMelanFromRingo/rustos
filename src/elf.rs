@@ -982,6 +982,28 @@ pub fn load_and_exec(path: &str) {
             return;
         }
     };
+    // Map physical frames for the stack range too — UserAllocator only
+    // tracks virtual addresses.  Without this, the very first iretq
+    // into user mode page-faults trying to push onto an unmapped stack.
+    if let Err(e) = crate::memory::map_user_range(stack_bottom.as_u64(), stack_size as usize) {
+        crate::println!("Failed to map user stack: {}", e);
+        return;
+    }
+
+    // SysV x86-64 process-startup stack layout (psABI §3.4.1):
+    // user RSP must point at argc, with argv[0..argc-1] + NULL +
+    // envp[0..]+NULL + AT_NULL aux above it.  We don't yet pass real
+    // args, but `_start` (crt0) blindly reads [rsp] (argc), [rsp+8]
+    // (argv) and expects them to be valid.  Reserve 64 bytes of zeros
+    // at the top of the stack giving argc=0, argv=NULL, envp=NULL,
+    // and AT_NULL terminator — every coreutil's _start handles this
+    // cleanly, and the entry RSP lands inside mapped memory.
+    let stack_top = stack_bottom.as_u64() + stack_size;
+    let init_rsp = stack_top - 64;
+    unsafe { core::ptr::write_bytes(init_rsp as *mut u8, 0, 64); }
+    // Adjust the size we pass to exec so it computes rsp = bottom +
+    // (size - 64) = init_rsp.
+    let stack_size = stack_size - 64;
 
     // Execute in user mode with proper context saving
     // When process calls exit(), restore_kernel_context_and_return() will
