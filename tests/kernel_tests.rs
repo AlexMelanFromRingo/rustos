@@ -287,6 +287,15 @@ fn run_all() {
     check!("coreutils: linked at USER_SPACE_START",      { t_coreutils_link_addr(); });
     check!("coreutils: load() maps /bin/true PT_LOAD",   { t_coreutils_load_true(); });
 
+    // Per-CPU scheduler dispatch API — additive to the global path.
+    check!("sched: enqueue_for_cpu pushes to slot",      { t_sched_enq_for_cpu(); });
+    check!("sched: enqueue_balanced picks BSP on 1-CPU", { t_sched_enq_balanced(); });
+    check!("sched: dequeue_next_for_cpu local first",    { t_sched_deq_local(); });
+    check!("sched: dequeue_next_for_cpu nothing → None", { t_sched_deq_empty(); });
+    check!("sched: enqueue_balanced load-balances",      { t_sched_balance_distributes(); });
+    check!("sched: global enqueue mirrors to per-CPU",   { t_sched_global_mirrors(); });
+    check!("sched: global dequeue removes from per-CPU", { t_sched_global_removes(); });
+
     // Bootloader migration shim — verifies the shim accepts our current
     // bootloader-0.9 BootInfo and rejects nonsense values.
     check!("boot-info: phys_mem_offset is sane",         { t_boot_info_sane(); });
@@ -1950,6 +1959,120 @@ fn t_coreutils_echo_in_bin() {
         data.len(), embedded.len());
     assert_eq!(&data[..], embedded,
         "byte-for-byte match between embedded blob and RAMDISK copy");
+}
+
+fn drain_all_cpus() {
+    for id in 0..(rustos::smp::MAX_CPUS as u8) {
+        if let Some(s) = rustos::smp::cpu_state(id) {
+            let _ = s.drain();
+        }
+    }
+}
+
+fn t_sched_enq_for_cpu() {
+    use rustos::process::scheduler::SCHEDULER;
+    drain_all_cpus();
+    let bsp = rustos::apic::lapic_id();
+    {
+        let mut s = SCHEDULER.lock();
+        s.enqueue_for_cpu(101, bsp);
+    }
+    let slot = rustos::smp::cpu_state(bsp).expect("BSP slot");
+    use core::sync::atomic::Ordering;
+    assert_eq!(slot.run_queue_len.load(Ordering::Acquire), 1);
+    drain_all_cpus();
+}
+
+fn t_sched_enq_balanced() {
+    use rustos::process::scheduler::SCHEDULER;
+    drain_all_cpus();
+    let bsp = rustos::apic::lapic_id();
+    let picked = SCHEDULER.lock().enqueue_balanced(42);
+    // On a 1-CPU box (single alive CPU = BSP) balance must return BSP.
+    // Under multi-CPU it picks the emptiest, which is also BSP since we
+    // just drained.
+    assert_eq!(picked, bsp);
+    let slot = rustos::smp::cpu_state(bsp).unwrap();
+    use core::sync::atomic::Ordering;
+    assert_eq!(slot.run_queue_len.load(Ordering::Acquire), 1);
+    drain_all_cpus();
+}
+
+fn t_sched_deq_local() {
+    use rustos::process::scheduler::SCHEDULER;
+    drain_all_cpus();
+    let bsp = rustos::apic::lapic_id();
+    {
+        let mut s = SCHEDULER.lock();
+        s.enqueue_for_cpu(11, bsp);
+        s.enqueue_for_cpu(22, bsp);
+        assert_eq!(s.dequeue_next_for_cpu(bsp), Some(11));
+        assert_eq!(s.dequeue_next_for_cpu(bsp), Some(22));
+    }
+    drain_all_cpus();
+}
+
+fn t_sched_deq_empty() {
+    use rustos::process::scheduler::SCHEDULER;
+    drain_all_cpus();
+    let bsp = rustos::apic::lapic_id();
+    // Local empty, no peers with ≥2 PIDs → None.
+    assert_eq!(SCHEDULER.lock().dequeue_next_for_cpu(bsp), None);
+}
+
+fn t_sched_balance_distributes() {
+    use rustos::process::scheduler::SCHEDULER;
+    drain_all_cpus();
+    let bsp = rustos::apic::lapic_id();
+    // Push 5 PIDs.  On 1-CPU box all go to BSP; on multi-CPU they
+    // distribute toward the least-loaded.  Either way every push
+    // returns *some* alive CPU id.
+    for pid in 0..5usize {
+        let picked = SCHEDULER.lock().enqueue_balanced(pid);
+        assert!(rustos::smp::cpu_state(picked).is_some());
+    }
+    // BSP slot should contain at least one PID (could be all 5 on
+    // single-CPU, fewer if work distributed).
+    use core::sync::atomic::Ordering;
+    let bsp_load = rustos::smp::cpu_state(bsp).unwrap().run_queue_len.load(Ordering::Acquire);
+    assert!(bsp_load >= 1);
+    assert!(rustos::smp::total_runnable() >= 5);
+    drain_all_cpus();
+}
+
+fn t_sched_global_mirrors() {
+    use rustos::process::scheduler::SCHEDULER;
+    use core::sync::atomic::Ordering;
+    drain_all_cpus();
+    // Use a PID that doesn't exist in PROCESS_MANAGER — that's fine
+    // because Scheduler::enqueue only consults PM for vruntime lift
+    // (which gracefully no-ops on missing PIDs).
+    SCHEDULER.lock().enqueue(0xDEAD);
+    // Per-CPU queue (BSP slot) should now contain the PID, mirrored
+    // from the global enqueue path.
+    let bsp = rustos::apic::lapic_id();
+    let slot = rustos::smp::cpu_state(bsp).unwrap();
+    assert!(slot.run_queue_len.load(Ordering::Acquire) >= 1,
+        "global enqueue should mirror into BSP's per-CPU queue");
+    SCHEDULER.lock().dequeue(0xDEAD);
+    drain_all_cpus();
+}
+
+fn t_sched_global_removes() {
+    use rustos::process::scheduler::SCHEDULER;
+    use core::sync::atomic::Ordering;
+    drain_all_cpus();
+    SCHEDULER.lock().enqueue(0xBEEF);
+    let bsp = rustos::apic::lapic_id();
+    let slot = rustos::smp::cpu_state(bsp).unwrap();
+    let before = slot.run_queue_len.load(Ordering::Acquire);
+    assert!(before >= 1);
+    SCHEDULER.lock().dequeue(0xBEEF);
+    // Per-CPU sweep should have removed it.
+    let after = slot.run_queue_len.load(Ordering::Acquire);
+    assert!(after < before, "global dequeue should sweep per-CPU queues \
+        (before={} after={})", before, after);
+    drain_all_cpus();
 }
 
 fn t_coreutils_load_true() {

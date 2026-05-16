@@ -123,11 +123,27 @@ impl Scheduler {
         drop(pm);
         self.ready_queue.push_back(pid);
         self.publish_load_to_smp();
+        // Mirror into the per-CPU queue of the least-loaded alive CPU.
+        // This populates per-CPU dispatch state without changing the
+        // global scheduler's behaviour — the timer ISR still drives
+        // off ready_queue; per-CPU schedulers (once enabled on APs)
+        // would consume from the slot.
+        let _ = crate::smp::enqueue_balanced(pid as u32);
     }
 
     pub fn dequeue(&mut self, pid: Pid) {
         self.ready_queue.retain(|&p| p != pid);
         self.publish_load_to_smp();
+        // Best-effort sweep across per-CPU queues — if the PID is
+        // sitting in one, drain it.  O(MAX_CPUS * queue-len) but
+        // queues are short.
+        for id in 0..(crate::smp::MAX_CPUS as u8) {
+            if let Some(slot) = crate::smp::cpu_state(id) {
+                let mut q = slot.run_queue.lock();
+                q.retain(|&p| p as Pid != pid);
+                slot.run_queue_len.store(q.len(), core::sync::atomic::Ordering::Release);
+            }
+        }
     }
 
     /// Mirror the global ready-queue length into the BSP's `smp::CpuState`
@@ -143,6 +159,63 @@ impl Scheduler {
                 core::sync::atomic::Ordering::Release,
             );
         }
+    }
+
+    // ----------------------------------------------------------------
+    // Per-CPU dispatch API — additive to the global ready_queue.
+    //
+    // The global queue stays the source of truth for the BSP-local
+    // single-CPU scheduler (timer ISR + cooperative schedule).  These
+    // methods let callers — once the AP-side scheduler ticks come
+    // online — push and pull from per-CPU run queues directly.  On a
+    // 1-CPU system they all route to the BSP and behave identically
+    // to the global queue.
+    // ----------------------------------------------------------------
+
+    /// Push `pid` onto a specific CPU's run queue.  Lifts the
+    /// process's vruntime to at least `min_vruntime` first, same as
+    /// the global enqueue path.  Falls back to a no-op if the cpu_id
+    /// is out of `smp::MAX_CPUS` range.
+    pub fn enqueue_for_cpu(&mut self, pid: Pid, cpu_id: u8) {
+        let mut pm = PROCESS_MANAGER.lock();
+        if let Some(p) = pm.get_process_mut(pid) {
+            if p.vruntime < self.min_vruntime {
+                p.vruntime = self.min_vruntime;
+            }
+        }
+        drop(pm);
+        if let Some(slot) = crate::smp::cpu_state(cpu_id) {
+            slot.enqueue(pid as u32);
+        }
+    }
+
+    /// Route `pid` to the least-loaded alive CPU and push it onto
+    /// that CPU's queue.  Returns the chosen CPU id.  On a 1-CPU
+    /// system always returns the BSP.
+    pub fn enqueue_balanced(&mut self, pid: Pid) -> u8 {
+        let mut pm = PROCESS_MANAGER.lock();
+        if let Some(p) = pm.get_process_mut(pid) {
+            if p.vruntime < self.min_vruntime {
+                p.vruntime = self.min_vruntime;
+            }
+        }
+        drop(pm);
+        crate::smp::enqueue_balanced(pid as u32)
+    }
+
+    /// Pull the next runnable PID from `cpu_id`'s local queue, with
+    /// work-stealing fallback to the most-loaded peer when local is
+    /// empty.  Returns None only if every CPU's queue is empty.
+    ///
+    /// Selection within a single per-CPU queue is FIFO — the vruntime
+    /// fairness logic lives in the global path's `next_process`.
+    /// Once per-CPU schedulers fully replace the global queue, this
+    /// can grow the same min-vruntime selection per CPU.
+    pub fn dequeue_next_for_cpu(&mut self, cpu_id: u8) -> Option<Pid> {
+        if let Some(pid) = crate::smp::dequeue_on(cpu_id) {
+            return Some(pid as Pid);
+        }
+        crate::smp::steal_from_peer(cpu_id).map(|p| p as Pid)
     }
 
     /// Pick the runnable PID with the smallest vruntime, given an
