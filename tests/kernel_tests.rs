@@ -267,7 +267,7 @@ fn run_all() {
     // In-tree coreutils — built as static x86-64 ELFs by gcc and
     // embedded by build.rs.  Each must pass an audit and parse via the
     // existing ElfLoader.
-    check!("coreutils: count is 17 utilities",           { t_coreutils_count(); });
+    check!("coreutils: count is 19 utilities",           { t_coreutils_count(); });
     check!("coreutils: audit passes for every blob",     { t_coreutils_audit(); });
     check!("coreutils: ElfLoader parses every blob",     { t_coreutils_elf_parse(); });
     check!("coreutils: 'echo' resolves by name",         { t_coreutils_find_echo(); });
@@ -281,6 +281,9 @@ fn run_all() {
     check!("coreutils: ls binary is ET_EXEC",            { t_coreutils_ls_exec(); });
     check!("sys_getdents64: empty buffer rejected",      { t_getdents_empty_rejected(); });
     check!("sys_getdents64: enumerates /bin",            { t_getdents_lists_bin(); });
+    check!("sys_chmod: succeeds on existing file",       { t_sys_chmod_basic(); });
+    check!("sys_chmod: ENOENT on missing file",          { t_sys_chmod_missing(); });
+    check!("sys_chown: succeeds on existing file",       { t_sys_chown_basic(); });
     check!("coreutils: linked at USER_SPACE_START",      { t_coreutils_link_addr(); });
     check!("coreutils: load() maps /bin/true PT_LOAD",   { t_coreutils_load_true(); });
 
@@ -1829,15 +1832,14 @@ fn t_dyn_dependent_needed() {
 // ----------------------------------------------------------------------------
 
 fn t_coreutils_count() {
-    // 17 utilities: true, false, echo, pwd, hostname, cat, wc, head, ls,
-    //               mkdir, rm, cp, mv, sleep, seq, basename, dirname.
-    assert_eq!(rustos::coreutils::count(), 17);
+    // 19 utilities: 17 prior + chmod, chown.
+    assert_eq!(rustos::coreutils::count(), 19);
 }
 
 fn t_coreutils_audit() {
     let r = rustos::coreutils::audit();
     assert!(r.is_ok(), "audit failed: {:?}", r);
-    assert_eq!(r.unwrap(), 17);
+    assert_eq!(r.unwrap(), 19);
 }
 
 fn t_coreutils_elf_parse() {
@@ -2055,7 +2057,8 @@ fn t_getdents_lists_bin() {
     // Expect every coreutil we installed.
     for util in ["true", "false", "echo", "pwd", "hostname", "cat", "wc", "head", "ls",
                  "mkdir", "rm", "cp", "mv",
-                 "sleep", "seq", "basename", "dirname"] {
+                 "sleep", "seq", "basename", "dirname",
+                 "chmod", "chown"] {
         assert!(names.iter().any(|n| n == util),
             "/bin should contain {}, got {:?}", util, names);
     }
@@ -2068,6 +2071,40 @@ fn t_getdents_lists_bin() {
     let n3 = sys_getdents64(fd2 as i32, b2.as_mut_ptr() as usize, b2.len()); // second
     let _ = sys_close(fd2 as usize);
     assert_eq!(n3, 0, "second getdents on same FD must return 0 (EOF)");
+}
+
+fn t_sys_chmod_basic() {
+    use rustos::fs::ramdisk::RAMDISK;
+    use rustos::fs::vfs::FileSystem;
+    use rustos::syscall::handler::sys_chmod;
+    // Create a tmpfs-style file in RAMDISK first.
+    let path = b"/tmp_chmod_test\0";
+    {
+        let mut rd = RAMDISK.lock();
+        let _ = rd.write_file("/tmp_chmod_test", alloc::vec![1,2,3]);
+    }
+    let r = sys_chmod(path.as_ptr() as usize, 0o644);
+    assert_eq!(r, 0, "chmod must succeed: {}", r);
+}
+
+fn t_sys_chmod_missing() {
+    use rustos::syscall::handler::sys_chmod;
+    let path = b"/does-not-exist-at-all\0";
+    let r = sys_chmod(path.as_ptr() as usize, 0o755);
+    assert!(r < 0, "chmod on missing file must fail: {}", r);
+}
+
+fn t_sys_chown_basic() {
+    use rustos::fs::ramdisk::RAMDISK;
+    use rustos::fs::vfs::FileSystem;
+    use rustos::syscall::handler::sys_chown;
+    let path = b"/tmp_chown_test\0";
+    {
+        let mut rd = RAMDISK.lock();
+        let _ = rd.write_file("/tmp_chown_test", alloc::vec![4,5,6]);
+    }
+    let r = sys_chown(path.as_ptr() as usize, 1000, 1000);
+    assert_eq!(r, 0, "chown must succeed: {}", r);
 }
 
 fn t_libc_wc_uses_printf() {

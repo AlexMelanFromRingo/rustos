@@ -60,6 +60,8 @@ static inline long _sc3(long n, long a, long b, long c) {
 #define SYS_mkdir       83
 #define SYS_rename      82
 #define SYS_chdir       80
+#define SYS_chmod       90
+#define SYS_chown       92
 #define SYS_nanosleep   35
 #define SYS_getdents64 217
 
@@ -150,6 +152,12 @@ int rename(const char *oldp, const char *newp) {
 }
 int chdir(const char *path) {
     return (int)_ret(_sc1(SYS_chdir, (long)path));
+}
+int chmod(const char *path, unsigned mode) {
+    return (int)_ret(_sc2(SYS_chmod, (long)path, (long)mode));
+}
+int chown(const char *path, unsigned uid, unsigned gid) {
+    return (int)_ret(_sc3(SYS_chown, (long)path, (long)uid, (long)gid));
 }
 
 int isatty(int fd) {

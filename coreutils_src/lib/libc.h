@@ -128,6 +128,8 @@ int     rmdir(const char *path);
 int     unlink(const char *path);
 int     rename(const char *oldp, const char *newp);
 int     chdir(const char *path);
+int     chmod(const char *path, unsigned mode);
+int     chown(const char *path, unsigned uid, unsigned gid);
 
 /* ---- dirent.h (Linux flavour, fits our kernel's getdents64) ---- */
 

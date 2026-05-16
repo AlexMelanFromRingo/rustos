@@ -490,6 +490,42 @@ pub fn sys_dup2(old_fd: usize, new_fd: usize) -> isize {
 }
 
 /// sys_mkdir - create a directory
+/// chmod(path, mode) — change a file's permission bits.  POSIX
+/// semantics: only the low 12 bits (rwxrwxrwx + setuid/setgid/sticky)
+/// matter; we narrow `mode` to u16 to match the VFS interface.
+pub fn sys_chmod(path_ptr: usize, mode: u32) -> isize {
+    if path_ptr == 0 { return SyscallError::InvalidArgument.as_isize(); }
+    let path = match unsafe { read_user_string(path_ptr) } {
+        Some(p) => p,
+        None => return SyscallError::InvalidArgument.as_isize(),
+    };
+    use crate::fs::vfs::{VfsContext, VfsError};
+    match VfsContext::chmod(&path, (mode & 0xFFFF) as u16) {
+        Ok(()) => 0,
+        Err(VfsError::FileNotFound) => SyscallError::FileNotFound.as_isize(),
+        Err(_) => SyscallError::PermissionDenied.as_isize(),
+    }
+}
+
+/// chown(path, uid, gid) — change file ownership.  -1 (`u32::MAX`)
+/// means "leave unchanged" per POSIX, but our VFS chown takes both
+/// values atomically, so we pre-fetch FileInfo when needed.  For
+/// now: pass both through verbatim; -1 ends up as 0xFFFFFFFF in the
+/// stored metadata which a future stat could special-case.
+pub fn sys_chown(path_ptr: usize, uid: u32, gid: u32) -> isize {
+    if path_ptr == 0 { return SyscallError::InvalidArgument.as_isize(); }
+    let path = match unsafe { read_user_string(path_ptr) } {
+        Some(p) => p,
+        None => return SyscallError::InvalidArgument.as_isize(),
+    };
+    use crate::fs::vfs::{VfsContext, VfsError};
+    match VfsContext::chown(&path, uid, gid) {
+        Ok(()) => 0,
+        Err(VfsError::FileNotFound) => SyscallError::FileNotFound.as_isize(),
+        Err(_) => SyscallError::PermissionDenied.as_isize(),
+    }
+}
+
 /// Linux `getdents64(fd, buf, count)` — read directory entries into a
 /// caller-supplied buffer of `struct linux_dirent64`-shaped records.
 ///
