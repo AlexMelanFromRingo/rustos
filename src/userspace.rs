@@ -466,17 +466,25 @@ pub unsafe fn restore_kernel_context_and_return() -> ! {
     }
 }
 
-/// Execute user code with proper context saving
+/// Execute user code with proper context saving.
 ///
-/// Naked function to completely control stack layout.
-/// Saves all callee-saved registers, then jumps to user mode via IRETQ.
+/// Naked function — completely controls stack layout.  Saves all
+/// callee-saved registers, then jumps to user mode via IRETQ.
+///
+/// Despite being naked + jumping into user mode, the signature is
+/// `-> ()` (not `-> !`) so callers can place code after the invocation.
+/// `restore_kernel_context_and_return` restores RSP to the value
+/// captured here and then `ret`s — that lands at the caller's
+/// instruction immediately following the call site.  If we declared
+/// `-> !` the optimizer would DCE that follow-up code and the
+/// return-from-user path would land in the next function's prologue.
 ///
 /// Arguments (System V ABI):
 /// - rdi: entry_point
 /// - rsi: stack_bottom
 /// - rdx: stack_size
 #[unsafe(naked)]
-pub unsafe extern "C" fn exec_with_return_proper(entry_point: u64, stack_bottom: u64, stack_size: u64) -> ! {
+pub unsafe extern "C" fn exec_with_return_proper(entry_point: u64, stack_bottom: u64, stack_size: u64) {
     core::arch::naked_asm!(
         // Save all callee-saved registers (System V ABI)
         "push rbp",

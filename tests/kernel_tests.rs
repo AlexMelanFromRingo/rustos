@@ -286,6 +286,9 @@ fn run_all() {
     check!("sys_chown: succeeds on existing file",       { t_sys_chown_basic(); });
     check!("coreutils: linked at USER_SPACE_START",      { t_coreutils_link_addr(); });
     check!("coreutils: load() maps /bin/true PT_LOAD",   { t_coreutils_load_true(); });
+    check!("exec: minimal user → sys_exit → return",     { t_exec_minimal_user(); });
+    check!("exec: load_and_exec /bin/true returns",      { t_exec_bin_true(); });
+    check!("exec: /bin/echo writes to serial",           { t_exec_bin_echo(); });
 
     // Per-CPU scheduler dispatch API — additive to the global path.
     check!("sched: enqueue_for_cpu pushes to slot",      { t_sched_enq_for_cpu(); });
@@ -2073,6 +2076,61 @@ fn t_sched_global_removes() {
     assert!(after < before, "global dequeue should sweep per-CPU queues \
         (before={} after={})", before, after);
     drain_all_cpus();
+}
+
+fn t_exec_bin_echo() {
+    // Sister of t_exec_bin_true.  /bin/echo runs main(argc=0, argv=NULL)
+    // — same as `echo` with no args.  POSIX echo prints "\n" (just a
+    // newline) and exits.  We don't observe stdout from inside the
+    // kernel test harness easily, but reaching the next line proves
+    // the load → exec → write to fd 1 → exit → return cycle works.
+    let _ = rustos::coreutils::populate_bin();
+    rustos::serial_print!("[/bin/echo says: <<<]");
+    rustos::elf::load_and_exec("/bin/echo");
+    rustos::serial_print!("[<<<>");
+}
+
+fn t_exec_bin_true() {
+    // End-to-end: load /bin/true through the kernel's load_and_exec
+    // path (parse ELF, map PT_LOAD, map stack, write SysV init, iretq
+    // to ring 3, user main() returns 0, _start calls sys_exit, kernel
+    // restore_kernel_context_and_return brings us back here).
+    //
+    // Reaching the next line is the assertion.  If exec hangs or
+    // triple-faults the test harness times out / panics.
+    let _ = rustos::coreutils::populate_bin();
+    rustos::serial_print!("[/bin/true...] ");
+    rustos::elf::load_and_exec("/bin/true");
+    rustos::serial_print!("[returned] ");
+}
+
+fn t_exec_minimal_user() {
+    // Map one user-space code page + one stack page, write the
+    // smallest-possible user program ("mov $60, rax; xor rdi, rdi;
+    // syscall" — sys_exit(0)), exec it.  If exec_with_return_proper
+    // → user mode → sys_exit → restore returns, the kernel-side
+    // ring-3 plumbing works end-to-end.
+    use rustos::memory::map_user_range;
+    const CODE_BASE: u64 = 0x0200_0000;
+    const STACK_BASE: u64 = 0x0200_1000;
+    map_user_range(CODE_BASE, 4096).expect("map code");
+    map_user_range(STACK_BASE, 4096).expect("map stack");
+    // 7 bytes: 48 c7 c0 3c 00 00 00 (mov rax, 0x3c)
+    // 3 bytes: 48 31 ff             (xor rdi, rdi)
+    // 2 bytes: 0f 05                (syscall)
+    let code: [u8; 12] = [
+        0x48, 0xc7, 0xc0, 0x3c, 0x00, 0x00, 0x00,
+        0x48, 0x31, 0xff,
+        0x0f, 0x05,
+    ];
+    unsafe {
+        core::ptr::copy_nonoverlapping(code.as_ptr(), CODE_BASE as *mut u8, code.len());
+    }
+    rustos::serial_print!("[user...] ");
+    unsafe {
+        rustos::userspace::exec_with_return_proper(CODE_BASE, STACK_BASE, 4096);
+    }
+    rustos::serial_print!("[returned] ");
 }
 
 fn t_coreutils_load_true() {
