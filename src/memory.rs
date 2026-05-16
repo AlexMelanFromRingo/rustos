@@ -355,6 +355,56 @@ pub fn alloc_dma_contig(size: usize) -> Option<(*mut u8, u64)> {
     Some((ptr, phys))
 }
 
+/// Map a user-space virtual range to freshly-allocated frames in the
+/// currently-active page table.  Pages get
+/// PRESENT | WRITABLE | USER_ACCESSIBLE flags (NX is NOT set — caller
+/// is responsible for executable mappings).  Zero-fills each frame
+/// after mapping so the caller can read back well-defined bytes.
+///
+/// Used by the ELF loader to materialise PT_LOAD segments before copying
+/// the file contents.  Without this, the loader's `copy_nonoverlapping`
+/// onto a still-unmapped virtual address page-faults.
+///
+/// Returns `Err` if any frame allocation or map_to fails.  Idempotent
+/// per page: a page that's already mapped is silently skipped.
+pub fn map_user_range(virt_start: u64, size: usize) -> Result<(), &'static str> {
+    use x86_64::structures::paging::{Mapper, Page, PageTableFlags, Size4KiB, FrameAllocator};
+    if size == 0 { return Ok(()); }
+    let mut mapper = unsafe { get_mapper() };
+    let page_count = (size + 4095) / 4096;
+    let start_page = virt_start & !0xFFF;
+
+    for i in 0..page_count {
+        let va = start_page + (i as u64) * 4096;
+        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(va));
+        // Idempotent: if already mapped, skip.
+        if virt_to_phys(va).is_some() { continue; }
+        let frame_opt = with_frame_allocator(|fa| fa.allocate_frame()).flatten();
+        let frame = match frame_opt { Some(f) => f, None => return Err("oom") };
+        let flags = PageTableFlags::PRESENT
+                  | PageTableFlags::WRITABLE
+                  | PageTableFlags::USER_ACCESSIBLE;
+        let map_res = with_frame_allocator(|fa| unsafe {
+            mapper.map_to(page, frame, flags, fa).map(|f| f.flush())
+        });
+        match map_res {
+            Some(Ok(())) => {}
+            Some(Err(e)) => {
+                crate::klog_warn!("map_user_range: map_to failed at {:#x}: {:?}", va, e);
+                return Err("map_to failed");
+            }
+            None => return Err("frame allocator unavailable"),
+        }
+        // Zero-fill the newly-mapped page so segment copy lands in
+        // deterministic memory (the BSS portion of an ELF requires
+        // zeros where memsz > filesz).
+        let phys = frame.start_address().as_u64();
+        let kvirt = phys_offset() + phys;
+        unsafe { core::ptr::write_bytes(kvirt as *mut u8, 0, 4096); }
+    }
+    Ok(())
+}
+
 /// Free a DMA region previously returned by `alloc_dma_contig`.
 ///
 /// # Safety

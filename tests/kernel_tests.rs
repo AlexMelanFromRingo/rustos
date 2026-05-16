@@ -282,6 +282,7 @@ fn run_all() {
     check!("sys_getdents64: empty buffer rejected",      { t_getdents_empty_rejected(); });
     check!("sys_getdents64: enumerates /bin",            { t_getdents_lists_bin(); });
     check!("coreutils: linked at USER_SPACE_START",      { t_coreutils_link_addr(); });
+    check!("coreutils: load() maps /bin/true PT_LOAD",   { t_coreutils_load_true(); });
 
     // Bootloader migration shim — verifies the shim accepts our current
     // bootloader-0.9 BootInfo and rejects nonsense values.
@@ -1947,6 +1948,34 @@ fn t_coreutils_echo_in_bin() {
         data.len(), embedded.len());
     assert_eq!(&data[..], embedded,
         "byte-for-byte match between embedded blob and RAMDISK copy");
+}
+
+fn t_coreutils_load_true() {
+    // End-to-end: read /bin/true, ElfLoader::load() actually maps
+    // frames + copies segments.  Read back at entry_point and confirm
+    // bytes match the source file.  This proves load_user_range +
+    // segment copy work; only ring-3 transition remains for full exec
+    // (which can't run from the test harness).
+    use rustos::fs::ramdisk::RAMDISK;
+    use rustos::fs::vfs::FileSystem;
+    let _ = rustos::coreutils::populate_bin();
+    let elf = RAMDISK.lock().read("/bin/true").expect("read /bin/true");
+    let loader = rustos::elf::ElfLoader::new(&elf).expect("parse ELF");
+    let (entry, low, high) = loader.load().expect("load must succeed");
+    assert!(entry.as_u64() >= 0x0100_0000);
+    assert!(low < high);
+
+    let exec_seg = loader.program_headers().iter()
+        .find(|p| p.p_type == rustos::elf::PT_LOAD && (p.p_flags & 1) != 0)
+        .expect("must have executable PT_LOAD");
+    let file_off = exec_seg.p_offset as usize
+        + (entry.as_u64() - exec_seg.p_vaddr) as usize;
+    let expected = &elf[file_off..file_off + 8];
+    let actual: [u8; 8] = unsafe {
+        core::ptr::read_volatile(entry.as_u64() as *const [u8; 8])
+    };
+    assert_eq!(&actual[..], expected,
+        "byte mismatch at entry 0x{:x}", entry.as_u64());
 }
 
 fn t_coreutils_link_addr() {

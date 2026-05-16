@@ -293,6 +293,18 @@ impl<'a> ElfLoader<'a> {
         crate::println!("ELF: lowest_addr=0x{:X}, highest_addr=0x{:X}, base_addr=0x{:X}",
                         lowest_addr, highest_addr, base_addr.as_u64());
 
+        // Map physical frames for the segment region.  Without this,
+        // copy_nonoverlapping below page-faults — the UserAllocator is
+        // a virtual-bump-pointer that doesn't actually install PT
+        // entries.  map_user_range allocates per-page frames, zeroes
+        // them, and installs PRESENT|WRITABLE|USER_ACCESSIBLE PTEs
+        // in the active CR3.
+        let range_size = (highest_addr - base_addr.as_u64()) as usize;
+        if let Err(e) = crate::memory::map_user_range(base_addr.as_u64(), range_size) {
+            crate::println!("ELF: map_user_range failed: {}", e);
+            return Err(ElfError::AllocationFailed);
+        }
+
         // Second pass: load segments
         for phdr in phdrs {
             if phdr.p_type != PT_LOAD {
