@@ -23,3 +23,6 @@ pub const SYS_CHDIR: usize = 80;
 pub const SYS_MKDIR: usize = 83;
 pub const SYS_RMDIR: usize = 84;
 pub const SYS_UNLINK: usize = 87;
+/// Linux getdents64 — read directory entries into a flat buffer of
+/// `linux_dirent64`-shaped records.
+pub const SYS_GETDENTS64: usize = 217;

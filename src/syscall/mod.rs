@@ -64,6 +64,7 @@ pub enum SyscallNumber {
     Clone = 56,
     ArchPrctl = 158,
     Futex = 202,
+    GetDents64 = 217,
 }
 
 impl SyscallNumber {
@@ -117,6 +118,7 @@ impl SyscallNumber {
             56 => Some(SyscallNumber::Clone),
             158 => Some(SyscallNumber::ArchPrctl),
             202 => Some(SyscallNumber::Futex),
+            217 => Some(SyscallNumber::GetDents64),
             _ => None,
         }
     }
@@ -262,5 +264,6 @@ pub fn syscall_dispatcher(
         SyscallNumber::Clone => handler::sys_clone(arg1, arg2, arg3, arg4, arg5),
         SyscallNumber::ArchPrctl => handler::sys_arch_prctl(arg1 as i32, arg2 as u64),
         SyscallNumber::Futex => handler::sys_futex(arg1, arg2 as i32, arg3 as i32, arg4 as u64),
+        SyscallNumber::GetDents64 => handler::sys_getdents64(arg1 as i32, arg2, arg3),
     }
 }

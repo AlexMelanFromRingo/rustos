@@ -45,16 +45,17 @@ static inline long _sc3(long n, long a, long b, long c) {
     return r;
 }
 
-#define SYS_read    0
-#define SYS_write   1
-#define SYS_open    2
-#define SYS_close   3
-#define SYS_lseek   8
-#define SYS_brk    12
-#define SYS_exit   60
-#define SYS_getpid 39
-#define SYS_getcwd 79
-#define SYS_time  201
+#define SYS_read         0
+#define SYS_write        1
+#define SYS_open         2
+#define SYS_close        3
+#define SYS_lseek        8
+#define SYS_brk         12
+#define SYS_exit        60
+#define SYS_getpid      39
+#define SYS_getcwd      79
+#define SYS_time       201
+#define SYS_getdents64 217
 
 /* ────────────────────────────────────────────────────────────
  *  errno
@@ -123,6 +124,10 @@ int getpid(void) { return (int)_sc0(SYS_getpid); }
 char *getcwd(char *buf, size_t sz) {
     long r = _ret(_sc2(SYS_getcwd, (long)buf, (long)sz));
     return r < 0 ? NULL : buf;
+}
+
+long getdents64(int fd, void *buf, unsigned long count) {
+    return _ret(_sc3(SYS_getdents64, fd, (long)buf, (long)count));
 }
 
 int isatty(int fd) {

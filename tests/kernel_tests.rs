@@ -53,6 +53,7 @@ fn kernel_test_main(boot_info: &'static BootInfo) -> ! {
     rustos::memory::store_frame_allocator(fa);
     rustos::acpi::init();
     let _ = rustos::apic::init();
+    rustos::init_syscall();
 
     rustos::serial_println!("kernel_tests: running...");
     run_all();
@@ -266,7 +267,7 @@ fn run_all() {
     // In-tree coreutils — built as static x86-64 ELFs by gcc and
     // embedded by build.rs.  Each must pass an audit and parse via the
     // existing ElfLoader.
-    check!("coreutils: count is 8 utilities",            { t_coreutils_count(); });
+    check!("coreutils: count is 9 utilities",            { t_coreutils_count(); });
     check!("coreutils: audit passes for every blob",     { t_coreutils_audit(); });
     check!("coreutils: ElfLoader parses every blob",     { t_coreutils_elf_parse(); });
     check!("coreutils: 'echo' resolves by name",         { t_coreutils_find_echo(); });
@@ -277,6 +278,9 @@ fn run_all() {
     check!("libc: wc references printf via libc",        { t_libc_wc_uses_printf(); });
     check!("coreutils: /bin populated in RAMDISK",       { t_coreutils_bin_populated(); });
     check!("coreutils: /bin/echo round-trips through VFS",{ t_coreutils_echo_in_bin(); });
+    check!("coreutils: ls binary is ET_EXEC",            { t_coreutils_ls_exec(); });
+    check!("sys_getdents64: empty buffer rejected",      { t_getdents_empty_rejected(); });
+    check!("sys_getdents64: enumerates /bin",            { t_getdents_lists_bin(); });
 
     // Bootloader migration shim — verifies the shim accepts our current
     // bootloader-0.9 BootInfo and rejects nonsense values.
@@ -1823,14 +1827,14 @@ fn t_dyn_dependent_needed() {
 // ----------------------------------------------------------------------------
 
 fn t_coreutils_count() {
-    // Eight utilities: true, false, echo, pwd, hostname, cat, wc, head.
-    assert_eq!(rustos::coreutils::count(), 8);
+    // Nine utilities: true, false, echo, pwd, hostname, cat, wc, head, ls.
+    assert_eq!(rustos::coreutils::count(), 9);
 }
 
 fn t_coreutils_audit() {
     let r = rustos::coreutils::audit();
     assert!(r.is_ok(), "audit failed: {:?}", r);
-    assert_eq!(r.unwrap(), 8);
+    assert_eq!(r.unwrap(), 9);
 }
 
 fn t_coreutils_elf_parse() {
@@ -1941,6 +1945,78 @@ fn t_coreutils_echo_in_bin() {
         data.len(), embedded.len());
     assert_eq!(&data[..], embedded,
         "byte-for-byte match between embedded blob and RAMDISK copy");
+}
+
+fn t_coreutils_ls_exec() {
+    let b = rustos::coreutils::find("ls").expect("ls coreutil must exist");
+    // ls + libc should be at least 16 KB.
+    assert!(b.bytes.len() > 16 * 1024, "ls binary should be > 16 KiB, got {}", b.bytes.len());
+    let l = rustos::elf::ElfLoader::new(b.bytes).expect("ls parses as ELF");
+    assert!(!l.is_pie(), "-no-pie should produce ET_EXEC");
+    // The C source for ls references "getdents64" — and since we don't
+    // strip symbols, that string should appear in the binary's strtab.
+    let needle = b"getdents64";
+    assert!(b.bytes.windows(needle.len()).any(|w| w == needle),
+        "ls must reference getdents64 symbol");
+}
+
+fn t_getdents_empty_rejected() {
+    use rustos::syscall::handler::sys_getdents64;
+    // null buf
+    assert!(sys_getdents64(3, 0, 4096) < 0);
+    // tiny buffer (< 32) rejected
+    let mut b = [0u8; 16];
+    assert!(sys_getdents64(3, b.as_mut_ptr() as usize, b.len()) < 0);
+}
+
+fn t_getdents_lists_bin() {
+    use rustos::syscall::handler::{sys_open, sys_getdents64, sys_close};
+    use rustos::syscall::numbers;
+    let _ = numbers::SYS_GETDENTS64; // touch constant to ensure module compiles
+
+    // Make sure /bin is populated.
+    let _ = rustos::coreutils::populate_bin();
+
+    // Open /bin via sys_open.
+    let path = b"/bin\0";
+    let fd = sys_open(path.as_ptr() as usize, 0);
+    assert!(fd >= 0, "open /bin failed: {}", fd);
+
+    // getdents64 → buffer
+    let mut buf = [0u8; 4096];
+    let n = sys_getdents64(fd as i32, buf.as_mut_ptr() as usize, buf.len());
+    let _ = sys_close(fd as usize);
+    assert!(n > 0, "getdents64 must return some bytes for /bin, got {}", n);
+
+    // Walk the dirent records and collect names.
+    let mut names: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+    let mut off: usize = 0;
+    while off < n as usize {
+        // Layout: d_ino:8 d_off:8 d_reclen:2 d_type:1 d_name[]
+        let reclen = u16::from_le_bytes([buf[off + 16], buf[off + 17]]) as usize;
+        if reclen == 0 { break; }
+        let name_start = off + 19;
+        // NUL-terminated
+        let mut end = name_start;
+        while end < off + reclen && buf[end] != 0 { end += 1; }
+        let n = core::str::from_utf8(&buf[name_start..end]).unwrap_or("?").to_string();
+        names.push(n);
+        off += reclen;
+    }
+    // Expect every coreutil we installed.
+    for util in ["true", "false", "echo", "pwd", "hostname", "cat", "wc", "head", "ls"] {
+        assert!(names.iter().any(|n| n == util),
+            "/bin should contain {}, got {:?}", util, names);
+    }
+
+    // Second call should return 0 (we mark "already enumerated").
+    let fd2 = sys_open(path.as_ptr() as usize, 0);
+    assert!(fd2 >= 0);
+    let mut b2 = [0u8; 4096];
+    let _ = sys_getdents64(fd2 as i32, b2.as_mut_ptr() as usize, b2.len()); // first
+    let n3 = sys_getdents64(fd2 as i32, b2.as_mut_ptr() as usize, b2.len()); // second
+    let _ = sys_close(fd2 as usize);
+    assert_eq!(n3, 0, "second getdents on same FD must return 0 (EOF)");
 }
 
 fn t_libc_wc_uses_printf() {

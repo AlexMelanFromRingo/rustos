@@ -267,7 +267,7 @@ fn build_coreutils(out_dir: &str) {
     println!("cargo:rerun-if-changed={}/lib/libc.h", src_dir);
     println!("cargo:rerun-if-changed={}/lib/libc.c", src_dir);
 
-    let utils = ["true", "false", "echo", "pwd", "hostname", "cat", "wc", "head"];
+    let utils = ["true", "false", "echo", "pwd", "hostname", "cat", "wc", "head", "ls"];
     let mut binaries: Vec<(String, String, usize)> = Vec::new();
 
     for util in utils.iter() {

@@ -490,6 +490,109 @@ pub fn sys_dup2(old_fd: usize, new_fd: usize) -> isize {
 }
 
 /// sys_mkdir - create a directory
+/// Linux `getdents64(fd, buf, count)` — read directory entries into a
+/// caller-supplied buffer of `struct linux_dirent64`-shaped records.
+///
+/// Layout (Linux fs.h, kept Linux-compatible so existing C code works):
+///
+///     struct linux_dirent64 {
+///         u64  d_ino;       // inode number — we use a hash of the name
+///         s64  d_off;       // offset to next dirent — sequential index
+///         u16  d_reclen;    // length of THIS record
+///         u8   d_type;      // 4=DIR, 8=REG (subset of Linux DT_*)
+///         char d_name[];    // NUL-terminated filename
+///     };
+///
+/// Returns: bytes filled on success, 0 on EOF, negative on error.
+///
+/// Statefulness: we use the FD's `offset` field as "already enumerated"
+/// flag — 0 = not yet, non-zero = done.  This matches `ls`'s single-call
+/// usage pattern.  A future paginated implementation would store the
+/// next-entry index in `offset`.
+pub fn sys_getdents64(fd: i32, buf_ptr: usize, count: usize) -> isize {
+    if buf_ptr == 0 || count < 32 {
+        return SyscallError::InvalidArgument.as_isize();
+    }
+    if fd < 0 { return SyscallError::BadFileDescriptor.as_isize(); }
+
+    // Snapshot the FD's path + "already enumerated" state, then drop
+    // the lock before listing (list may take its own locks).
+    let (path, already) = {
+        let mut tbl = filedesc::get_fd_table();
+        let of = match tbl.get_mut(fd as usize) {
+            Some(of) => of,
+            None => return SyscallError::BadFileDescriptor.as_isize(),
+        };
+        let path = of.path.clone();
+        let already = of.offset != 0;
+        if !already { of.offset = 1; }
+        (path, already)
+    };
+    if already { return 0; }
+
+    // List the directory.  We need to support both ramdisk and FAT32;
+    // try ramdisk first as it's where /bin lives.
+    let entries: alloc::vec::Vec<(alloc::string::String, bool)> = {
+        let rd = crate::fs::ramdisk::RAMDISK.lock();
+        match rd.list_directory(&path) {
+            Ok(es) => es.into_iter().map(|fi| (fi.name, fi.is_directory)).collect(),
+            Err(_) => alloc::vec::Vec::new(),
+        }
+    };
+    if entries.is_empty() { return 0; }
+
+    // Pack entries into the user buffer.  Each record is 19 bytes of
+    // header (d_ino:8 + d_off:8 + d_reclen:2 + d_type:1) plus the
+    // name plus a NUL plus padding to 8-byte alignment.
+    let mut written: usize = 0;
+    for (idx, (name, is_dir)) in entries.iter().enumerate() {
+        // Length: header(19) + name + NUL.  Round up to 8.
+        let raw_len = 19 + name.len() + 1;
+        let rec_len = (raw_len + 7) & !7;
+        if written + rec_len > count { break; }
+
+        // Inode number: hash of path+name to fit u64 (we don't have
+        // real inodes for ramdisk; this just gives `find -inum`-style
+        // tools a stable per-entry identifier).
+        let ino = inode_hash(&path, name);
+        let dtype: u8 = if *is_dir { 4 /* DT_DIR */ } else { 8 /* DT_REG */ };
+
+        unsafe {
+            let base = (buf_ptr + written) as *mut u8;
+            // d_ino (u64 LE)
+            core::ptr::write_unaligned(base as *mut u64, ino);
+            // d_off (s64 LE) — next entry's logical index
+            core::ptr::write_unaligned(base.add(8) as *mut i64, (idx + 1) as i64);
+            // d_reclen (u16 LE)
+            core::ptr::write_unaligned(base.add(16) as *mut u16, rec_len as u16);
+            // d_type (u8)
+            *base.add(18) = dtype;
+            // d_name + NUL
+            for (i, b) in name.as_bytes().iter().enumerate() {
+                *base.add(19 + i) = *b;
+            }
+            *base.add(19 + name.len()) = 0;
+            // Pad to rec_len with zeros.
+            for i in (20 + name.len())..rec_len {
+                *base.add(i) = 0;
+            }
+        }
+        written += rec_len;
+    }
+    written as isize
+}
+
+/// Stable u64 hash of "path/name" for the synthetic d_ino.  Not
+/// cryptographic — just a deterministic per-entry tag.
+fn inode_hash(dir: &str, name: &str) -> u64 {
+    let mut h: u64 = 1469598103934665603; // FNV-1a 64 offset basis
+    for b in dir.bytes().chain(b"/".iter().copied()).chain(name.bytes()) {
+        h ^= b as u64;
+        h = h.wrapping_mul(1099511628211);
+    }
+    h
+}
+
 pub fn sys_mkdir(path_ptr: usize, _mode: usize) -> isize {
     if path_ptr == 0 {
         return SyscallError::InvalidArgument.as_isize();
