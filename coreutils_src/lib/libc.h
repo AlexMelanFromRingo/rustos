@@ -156,6 +156,16 @@ long getdents64(int fd, void *buf, unsigned long count);
 
 time_t time(time_t *out);
 
+/* timespec — POSIX layout, matches the kernel's expected sys_nanosleep
+ * argument format. */
+struct timespec {
+    long tv_sec;
+    long tv_nsec;
+};
+
+int nanosleep(const struct timespec *req, struct timespec *rem);
+unsigned int sleep(unsigned int seconds);
+
 /* ---- ctype.h (subset) ---- */
 
 int isalpha(int c);

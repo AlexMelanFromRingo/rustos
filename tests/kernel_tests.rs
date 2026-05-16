@@ -267,7 +267,7 @@ fn run_all() {
     // In-tree coreutils — built as static x86-64 ELFs by gcc and
     // embedded by build.rs.  Each must pass an audit and parse via the
     // existing ElfLoader.
-    check!("coreutils: count is 13 utilities",           { t_coreutils_count(); });
+    check!("coreutils: count is 17 utilities",           { t_coreutils_count(); });
     check!("coreutils: audit passes for every blob",     { t_coreutils_audit(); });
     check!("coreutils: ElfLoader parses every blob",     { t_coreutils_elf_parse(); });
     check!("coreutils: 'echo' resolves by name",         { t_coreutils_find_echo(); });
@@ -1828,15 +1828,15 @@ fn t_dyn_dependent_needed() {
 // ----------------------------------------------------------------------------
 
 fn t_coreutils_count() {
-    // 13 utilities: true, false, echo, pwd, hostname, cat, wc, head, ls,
-    //               mkdir, rm, cp, mv.
-    assert_eq!(rustos::coreutils::count(), 13);
+    // 17 utilities: true, false, echo, pwd, hostname, cat, wc, head, ls,
+    //               mkdir, rm, cp, mv, sleep, seq, basename, dirname.
+    assert_eq!(rustos::coreutils::count(), 17);
 }
 
 fn t_coreutils_audit() {
     let r = rustos::coreutils::audit();
     assert!(r.is_ok(), "audit failed: {:?}", r);
-    assert_eq!(r.unwrap(), 13);
+    assert_eq!(r.unwrap(), 17);
 }
 
 fn t_coreutils_elf_parse() {
@@ -2025,7 +2025,8 @@ fn t_getdents_lists_bin() {
     }
     // Expect every coreutil we installed.
     for util in ["true", "false", "echo", "pwd", "hostname", "cat", "wc", "head", "ls",
-                 "mkdir", "rm", "cp", "mv"] {
+                 "mkdir", "rm", "cp", "mv",
+                 "sleep", "seq", "basename", "dirname"] {
         assert!(names.iter().any(|n| n == util),
             "/bin should contain {}, got {:?}", util, names);
     }

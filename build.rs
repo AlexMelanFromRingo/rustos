@@ -270,6 +270,7 @@ fn build_coreutils(out_dir: &str) {
     let utils = [
         "true", "false", "echo", "pwd", "hostname", "cat", "wc", "head", "ls",
         "mkdir", "rm", "cp", "mv",
+        "sleep", "seq", "basename", "dirname",
     ];
     let mut binaries: Vec<(String, String, usize)> = Vec::new();
 

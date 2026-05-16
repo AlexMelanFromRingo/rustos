@@ -60,6 +60,7 @@ static inline long _sc3(long n, long a, long b, long c) {
 #define SYS_mkdir       83
 #define SYS_rename      82
 #define SYS_chdir       80
+#define SYS_nanosleep   35
 #define SYS_getdents64 217
 
 /* ────────────────────────────────────────────────────────────
@@ -167,6 +168,17 @@ time_t time(time_t *out) {
     long r = _sc1(SYS_time, (long)out);
     if (r < 0 && r > -4096) { errno = (int)-r; return -1; }
     return r;
+}
+
+int nanosleep(const struct timespec *req, struct timespec *rem) {
+    return (int)_ret(_sc2(SYS_nanosleep, (long)req, (long)rem));
+}
+
+unsigned int sleep(unsigned int seconds) {
+    struct timespec req = { (long)seconds, 0 };
+    struct timespec rem = { 0, 0 };
+    if (nanosleep(&req, &rem) == 0) return 0;
+    return (unsigned int)rem.tv_sec;
 }
 
 /* ────────────────────────────────────────────────────────────
