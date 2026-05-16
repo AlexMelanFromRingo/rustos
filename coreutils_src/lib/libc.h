@@ -123,6 +123,11 @@ off_t   lseek(int fd, off_t off, int whence);
 int     getpid(void);
 char   *getcwd(char *buf, size_t sz);
 int     isatty(int fd);
+int     mkdir(const char *path, unsigned mode);
+int     rmdir(const char *path);
+int     unlink(const char *path);
+int     rename(const char *oldp, const char *newp);
+int     chdir(const char *path);
 
 /* ---- dirent.h (Linux flavour, fits our kernel's getdents64) ---- */
 

@@ -55,6 +55,11 @@ static inline long _sc3(long n, long a, long b, long c) {
 #define SYS_getpid      39
 #define SYS_getcwd      79
 #define SYS_time       201
+#define SYS_unlink      87
+#define SYS_rmdir       84
+#define SYS_mkdir       83
+#define SYS_rename      82
+#define SYS_chdir       80
 #define SYS_getdents64 217
 
 /* ────────────────────────────────────────────────────────────
@@ -128,6 +133,22 @@ char *getcwd(char *buf, size_t sz) {
 
 long getdents64(int fd, void *buf, unsigned long count) {
     return _ret(_sc3(SYS_getdents64, fd, (long)buf, (long)count));
+}
+
+int mkdir(const char *path, unsigned mode) {
+    return (int)_ret(_sc2(SYS_mkdir, (long)path, (long)mode));
+}
+int rmdir(const char *path) {
+    return (int)_ret(_sc1(SYS_rmdir, (long)path));
+}
+int unlink(const char *path) {
+    return (int)_ret(_sc1(SYS_unlink, (long)path));
+}
+int rename(const char *oldp, const char *newp) {
+    return (int)_ret(_sc2(SYS_rename, (long)oldp, (long)newp));
+}
+int chdir(const char *path) {
+    return (int)_ret(_sc1(SYS_chdir, (long)path));
 }
 
 int isatty(int fd) {
